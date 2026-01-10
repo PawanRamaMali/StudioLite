@@ -85,6 +85,34 @@ def display_cached_video(cache_key, label=None):
     return False
 
 
+def display_video_browser_compatible(input_path, source_cache_key, label=None):
+    """
+    Display video with automatic conversion to H.264 for browser compatibility.
+
+    Args:
+        input_path: Path to the input video file
+        source_cache_key: Cache key for the source video bytes
+        label: Optional label to display above the video
+    """
+    converted_key = f"{source_cache_key}_converted"
+
+    if get_cached_video(converted_key) is None:
+        # Convert to H.264 MP4 for browser compatibility
+        with st.spinner("Preparing video for preview..."):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+                preview_path = tmp.name
+            if remover.export_video(input_path, preview_path, "mp4", "medium", None):
+                cache_video_file(preview_path, converted_key)
+                os.unlink(preview_path)
+            else:
+                # Fallback to original if conversion fails
+                st.session_state.video_cache[converted_key] = get_cached_video(source_cache_key)
+
+    if label:
+        st.subheader(label)
+    st.video(get_cached_video(converted_key))
+
+
 def download_button(cache_key, filename, label="Download Video"):
     """Create download button for cached video."""
     video_bytes = get_cached_video(cache_key)
@@ -124,8 +152,7 @@ if tool == "Remove Watermark":
                 input_path = tmp.name
 
         if is_video:
-            st.subheader("Original Video")
-            st.video(get_cached_video("input"))
+            display_video_browser_compatible(input_path, "input", "Original Video")
 
             video_info = remover.get_video_info(input_path)
             if video_info:
@@ -207,8 +234,7 @@ elif tool == "Trim / Cut":
                 tmp.write(get_cached_video("input"))
                 input_path = tmp.name
 
-        st.subheader("Original Video")
-        st.video(get_cached_video("input"))
+        display_video_browser_compatible(input_path, "input", "Original Video")
 
         video_info = remover.get_video_info(input_path)
         if video_info:
@@ -294,8 +320,7 @@ elif tool == "Add Image Overlay":
                 tmp.write(get_cached_video("overlay_img"))
                 image_path = tmp.name
 
-        st.subheader("Original Video")
-        st.video(get_cached_video("input"))
+        display_video_browser_compatible(video_path, "input", "Original Video")
 
         video_info = remover.get_video_info(video_path)
         if video_info:
@@ -358,8 +383,7 @@ elif tool == "Change Speed":
                 tmp.write(get_cached_video("input"))
                 input_path = tmp.name
 
-        st.subheader("Original Video")
-        st.video(get_cached_video("input"))
+        display_video_browser_compatible(input_path, "input", "Original Video")
 
         video_info = remover.get_video_info(input_path)
         if video_info:
@@ -465,8 +489,7 @@ elif tool == "Extract Frame":
                 tmp.write(get_cached_video("input"))
                 input_path = tmp.name
 
-        st.subheader("Video")
-        st.video(get_cached_video("input"))
+        display_video_browser_compatible(input_path, "input", "Video")
 
         video_info = remover.get_video_info(input_path)
         if video_info:
@@ -518,8 +541,7 @@ elif tool == "Export Video":
                 tmp.write(get_cached_video("input"))
                 input_path = tmp.name
 
-        st.subheader("Original Video")
-        st.video(get_cached_video("input"))
+        display_video_browser_compatible(input_path, "input", "Original Video")
 
         video_info = remover.get_video_info(input_path)
         if video_info:
@@ -595,22 +617,7 @@ elif tool == "View & Publish":
                 input_path = tmp.name
 
         # Video Preview Section
-        st.subheader("Video Preview")
-
-        # Check if we need to convert for browser compatibility
-        if get_cached_video("preview_converted") is None:
-            # Convert to H.264 MP4 for browser compatibility
-            with st.spinner("Preparing video for preview..."):
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-                    preview_path = tmp.name
-                if remover.export_video(input_path, preview_path, "mp4", "medium", None):
-                    cache_video_file(preview_path, "preview_converted")
-                    os.unlink(preview_path)
-                else:
-                    # Fallback to original if conversion fails
-                    st.session_state.video_cache["preview_converted"] = get_cached_video("input")
-
-        st.video(get_cached_video("preview_converted"))
+        display_video_browser_compatible(input_path, "input", "Video Preview")
 
         video_info = remover.get_video_info(input_path)
         if video_info:

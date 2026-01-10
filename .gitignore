@@ -15,3 +15,5 @@ Thumbs.db
 
 # Output files (optional, but good to ignore if running tests locally)
 *_cleaned.pdf
+client_secrets.json
+youtube_token.pickle

@@ -5,6 +5,9 @@ import streamlit as st
 import tempfile
 import os
 from remover import WatermarkRemover
+from youtube_uploader import (
+    YouTubeUploader, check_dependencies, check_client_secrets, get_category_list
+)
 
 st.set_page_config(page_title="StudioLite - Video Editor", layout="wide")
 
@@ -15,13 +18,15 @@ if "video_cache" not in st.session_state:
     st.session_state.video_cache = {}
 if "current_tool" not in st.session_state:
     st.session_state.current_tool = None
+if "youtube_uploader" not in st.session_state:
+    st.session_state.youtube_uploader = None
 
 # Sidebar navigation
 st.sidebar.title("StudioLite")
 tool = st.sidebar.radio(
     "Select Tool",
     ["Remove Watermark", "Trim / Cut", "Add Image Overlay", "Change Speed",
-     "Merge Videos", "Extract Frame", "Export Video"]
+     "Merge Videos", "Extract Frame", "Export Video", "View & Publish"]
 )
 
 # Clear cache when switching tools
@@ -563,3 +568,192 @@ elif tool == "Export Video":
                 )
 
         os.unlink(input_path)
+
+
+# =====================
+# VIEW & PUBLISH
+# =====================
+elif tool == "View & Publish":
+    st.title("View & Publish")
+    st.markdown("Preview your video and publish directly to YouTube.")
+
+    # Video upload section
+    uploaded_file = st.file_uploader(
+        "Upload video to view/publish",
+        type=["mp4", "mov", "avi", "mkv"],
+        key="publish_upload"
+    )
+
+    if uploaded_file:
+        file_ext = os.path.splitext(uploaded_file.name)[1].lower()
+
+        if get_cached_video("input") is None:
+            input_path = save_uploaded_file(uploaded_file, "input")
+        else:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+                tmp.write(get_cached_video("input"))
+                input_path = tmp.name
+
+        # Video Preview Section
+        st.subheader("Video Preview")
+
+        # Check if we need to convert for browser compatibility
+        if get_cached_video("preview_converted") is None:
+            # Convert to H.264 MP4 for browser compatibility
+            with st.spinner("Preparing video for preview..."):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+                    preview_path = tmp.name
+                if remover.export_video(input_path, preview_path, "mp4", "medium", None):
+                    cache_video_file(preview_path, "preview_converted")
+                    os.unlink(preview_path)
+                else:
+                    # Fallback to original if conversion fails
+                    st.session_state.video_cache["preview_converted"] = get_cached_video("input")
+
+        st.video(get_cached_video("preview_converted"))
+
+        video_info = remover.get_video_info(input_path)
+        if video_info:
+            display_video_info(video_info)
+
+        st.markdown("---")
+
+        # YouTube Upload Section
+        st.subheader("Publish to YouTube")
+
+        # Check dependencies
+        deps_ok, deps_msg = check_dependencies()
+        if not deps_ok:
+            st.error(deps_msg)
+            st.stop()
+
+        # Check for client secrets
+        secrets_ok, secrets_msg = check_client_secrets()
+        if not secrets_ok:
+            st.warning(secrets_msg)
+            st.markdown("""
+            **Setup Instructions:**
+            1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+            2. Create a new project or select an existing one
+            3. Enable **YouTube Data API v3**
+            4. Go to **Credentials** > **Create Credentials** > **OAuth client ID**
+            5. Select **Desktop app** as application type
+            6. Download the JSON file and save as `client_secrets.json` in the project folder
+            """)
+            st.stop()
+
+        # Initialize uploader
+        if st.session_state.youtube_uploader is None:
+            st.session_state.youtube_uploader = YouTubeUploader()
+
+        uploader = st.session_state.youtube_uploader
+
+        # Authentication status
+        if uploader.is_authenticated():
+            st.success("Connected to YouTube")
+
+            # Logout option
+            if st.button("Disconnect YouTube Account"):
+                uploader.logout()
+                st.session_state.youtube_uploader = None
+                st.rerun()
+
+            st.markdown("---")
+
+            # Video metadata form
+            st.subheader("Video Details")
+
+            title = st.text_input(
+                "Title",
+                value=os.path.splitext(uploaded_file.name)[0],
+                max_chars=100
+            )
+
+            description = st.text_area(
+                "Description",
+                placeholder="Enter video description...",
+                max_chars=5000,
+                height=150
+            )
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                category = st.selectbox("Category", get_category_list(), index=7)  # Entertainment
+
+            with col2:
+                privacy = st.selectbox(
+                    "Privacy",
+                    ["Private", "Unlisted", "Public"],
+                    index=0,
+                    help="Private: Only you can view. Unlisted: Anyone with link. Public: Everyone."
+                )
+
+            tags_input = st.text_input(
+                "Tags (comma-separated)",
+                placeholder="tag1, tag2, tag3"
+            )
+            tags = [t.strip() for t in tags_input.split(",") if t.strip()] if tags_input else []
+
+            st.markdown("---")
+
+            # Upload button
+            if st.button("Upload to YouTube", type="primary"):
+                with st.spinner("Uploading to YouTube..."):
+                    # Create temp file for upload
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+                        tmp.write(get_cached_video("input"))
+                        upload_path = tmp.name
+
+                    # Progress tracking
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+
+                    def update_progress(percent):
+                        progress_bar.progress(percent)
+                        status_text.text(f"Uploading: {percent}%")
+
+                    result = uploader.upload_video(
+                        video_path=upload_path,
+                        title=title,
+                        description=description,
+                        category=category,
+                        tags=tags,
+                        privacy_status=privacy.lower(),
+                        progress_callback=update_progress
+                    )
+
+                    os.unlink(upload_path)
+
+                    if result["success"]:
+                        progress_bar.progress(100)
+                        status_text.text("Upload complete!")
+                        st.success("Video uploaded successfully!")
+                        st.markdown(f"**Video URL:** [{result['url']}]({result['url']})")
+                        st.balloons()
+                    else:
+                        st.error(f"Upload failed: {result['error']}")
+
+        else:
+            # Not authenticated - show auth flow
+            st.info("Connect your YouTube account to upload videos.")
+
+            st.markdown("""
+            **How it works:**
+            1. Click the button below
+            2. A browser window will open for Google authorization
+            3. Sign in and allow access to your YouTube account
+            4. Return here after authorization completes
+            """)
+
+            if st.button("Connect YouTube Account", type="primary"):
+                with st.spinner("Opening browser for authorization..."):
+                    if uploader.authenticate_with_local_server(port=8085):
+                        st.success("Successfully connected to YouTube!")
+                        st.rerun()
+                    else:
+                        st.error("Authorization failed. Please try again.")
+
+        os.unlink(input_path)
+    else:
+        st.info("Upload a video to preview and publish to YouTube.")

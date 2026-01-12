@@ -8,6 +8,11 @@ from remover import WatermarkRemover
 from youtube_uploader import (
     YouTubeUploader, check_dependencies, check_client_secrets, get_category_list
 )
+from transcriber import (
+    Transcriber, TranscriptionConfig, check_whisperx_installed,
+    get_language_list, get_language_code, get_device,
+    MODEL_SIZES, COMPUTE_TYPES, OUTPUT_FORMATS
+)
 
 st.set_page_config(page_title="StudioLite - Video Editor", layout="wide")
 
@@ -26,7 +31,7 @@ st.sidebar.title("StudioLite")
 tool = st.sidebar.radio(
     "Select Tool",
     ["Remove Watermark", "Trim / Cut", "Add Image Overlay", "Change Speed",
-     "Merge Videos", "Extract Frame", "Export Video", "View & Publish"]
+     "Merge Videos", "Extract Frame", "Export Video", "Transcribe", "View & Publish"]
 )
 
 # Clear cache when switching tools
@@ -590,6 +595,247 @@ elif tool == "Export Video":
                 )
 
         os.unlink(input_path)
+
+
+# =====================
+# TRANSCRIBE
+# =====================
+elif tool == "Transcribe":
+    st.title("Transcribe Audio/Video")
+    st.markdown("Extract text from video or audio using AI speech recognition (WhisperX).")
+
+    # Check if WhisperX is installed
+    whisperx_ok, whisperx_msg = check_whisperx_installed()
+    if not whisperx_ok:
+        st.error(whisperx_msg)
+        st.markdown("""
+        **Installation:**
+        ```bash
+        pip install whisperx torch torchaudio
+        ```
+
+        For GPU acceleration (CUDA), install PyTorch with CUDA support:
+        ```bash
+        pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+        ```
+        """)
+        st.stop()
+
+    st.info(f"Device: **{get_device().upper()}** | {whisperx_msg}")
+
+    uploaded_file = st.file_uploader(
+        "Upload video or audio",
+        type=["mp4", "mov", "avi", "mkv", "mp3", "wav", "m4a", "flac", "ogg", "webm"],
+        key="transcribe_upload"
+    )
+
+    if uploaded_file:
+        file_ext = os.path.splitext(uploaded_file.name)[1].lower()
+        is_video = file_ext in [".mp4", ".mov", ".avi", ".mkv", ".webm"]
+
+        if get_cached_video("input") is None:
+            input_path = save_uploaded_file(uploaded_file, "input")
+        else:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+                tmp.write(get_cached_video("input"))
+                input_path = tmp.name
+
+        # File info
+        file_size_mb = len(get_cached_video("input")) / (1024 * 1024)
+        st.success(f"Loaded: **{uploaded_file.name}** ({file_size_mb:.1f} MB)")
+
+        # Transcription Settings FIRST
+        st.subheader("Transcription Settings")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            model_size = st.selectbox(
+                "Model Size",
+                MODEL_SIZES,
+                index=1,  # "base" as default
+                help="tiny=fastest, large-v3=most accurate. 'base' is good balance."
+            )
+
+            language = st.selectbox(
+                "Language",
+                get_language_list(),
+                index=0,
+                help="Select the language of the audio, or Auto-detect"
+            )
+
+        with col2:
+            compute_type = st.selectbox(
+                "Compute Type",
+                COMPUTE_TYPES,
+                index=1 if get_device() == "cuda" else 0,  # float16 for GPU, int8 for CPU
+                help="int8=fastest, float16=GPU optimized, float32=most accurate"
+            )
+
+            batch_size = st.slider(
+                "Batch Size",
+                min_value=1,
+                max_value=32,
+                value=16,
+                help="Higher=faster but uses more VRAM. Reduce if out of memory."
+            )
+
+        col3, col4 = st.columns(2)
+
+        with col3:
+            translate = st.checkbox(
+                "Translate to English",
+                value=False,
+                help="Translate non-English audio to English"
+            )
+
+        with col4:
+            pass  # Reserved for future options
+
+        # Output format selection
+        st.subheader("Output Format")
+        output_cols = st.columns(5)
+        output_formats = []
+
+        with output_cols[0]:
+            if st.checkbox("Text (.txt)", value=True):
+                output_formats.append("txt")
+        with output_cols[1]:
+            if st.checkbox("SRT Subtitles", value=False):
+                output_formats.append("srt")
+        with output_cols[2]:
+            if st.checkbox("VTT Subtitles", value=False):
+                output_formats.append("vtt")
+        with output_cols[3]:
+            if st.checkbox("JSON", value=False):
+                output_formats.append("json")
+        with output_cols[4]:
+            if st.checkbox("TSV", value=False):
+                output_formats.append("tsv")
+
+        st.markdown("---")
+
+        # Action buttons
+        btn_col1, btn_col2 = st.columns(2)
+
+        with btn_col1:
+            # Optional Preview button
+            if is_video:
+                if st.button("Preview Video", type="secondary"):
+                    st.session_state.video_cache["show_preview"] = True
+
+        with btn_col2:
+            transcribe_clicked = st.button("Transcribe", type="primary")
+
+        # Show video preview only when requested
+        if is_video and st.session_state.video_cache.get("show_preview"):
+            st.markdown("---")
+            display_video_browser_compatible(input_path, "input", "Video Preview")
+            video_info = remover.get_video_info(input_path)
+            if video_info:
+                display_video_info(video_info)
+        elif not is_video:
+            # Always show audio player (it's lightweight)
+            st.audio(get_cached_video("input"))
+
+        # Transcribe button action
+        if transcribe_clicked:
+            if not output_formats:
+                st.warning("Please select at least one output format.")
+            else:
+                # Create config
+                config = TranscriptionConfig(
+                    model_size=model_size,
+                    language=get_language_code(language),
+                    compute_type=compute_type,
+                    batch_size=batch_size,
+                    translate_to_english=translate
+                )
+
+                transcriber = Transcriber(config)
+
+                # Progress display
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                def update_status(msg):
+                    status_text.text(msg)
+
+                with st.spinner("Transcribing..."):
+                    update_status("Loading model...")
+                    progress_bar.progress(10)
+
+                    result = transcriber.transcribe(
+                        input_path,
+                        output_formats=output_formats,
+                        progress_callback=update_status
+                    )
+
+                    progress_bar.progress(100)
+
+                if result["success"]:
+                    st.success("Transcription complete!")
+
+                    # Store result in session state
+                    st.session_state.video_cache["transcription_text"] = result["text"]
+                    st.session_state.video_cache["transcription_segments"] = result["segments"]
+                    st.session_state.video_cache["transcription_language"] = result["language"]
+
+                    # Display detected language
+                    if result["language"]:
+                        st.info(f"Detected language: **{result['language']}**")
+
+                else:
+                    st.error(f"Transcription failed: {result['error']}")
+
+        # Display transcription results
+        if "transcription_text" in st.session_state.video_cache:
+            st.markdown("---")
+            st.subheader("Transcription Result")
+
+            text = st.session_state.video_cache["transcription_text"]
+            segments = st.session_state.video_cache.get("transcription_segments", [])
+
+            # Text area with transcription
+            st.text_area("Transcribed Text", text, height=200)
+
+            # Download buttons
+            st.subheader("Download")
+            download_cols = st.columns(3)
+
+            with download_cols[0]:
+                st.download_button(
+                    "Download Text (.txt)",
+                    text,
+                    f"{os.path.splitext(uploaded_file.name)[0]}_transcription.txt",
+                    "text/plain"
+                )
+
+            # Generate and offer SRT download
+            if segments:
+                transcriber_temp = Transcriber()
+                srt_content = transcriber_temp.generate_srt(segments)
+                vtt_content = transcriber_temp.generate_vtt(segments)
+
+                with download_cols[1]:
+                    st.download_button(
+                        "Download SRT",
+                        srt_content,
+                        f"{os.path.splitext(uploaded_file.name)[0]}.srt",
+                        "text/plain"
+                    )
+
+                with download_cols[2]:
+                    st.download_button(
+                        "Download VTT",
+                        vtt_content,
+                        f"{os.path.splitext(uploaded_file.name)[0]}.vtt",
+                        "text/plain"
+                    )
+
+        os.unlink(input_path)
+    else:
+        st.info("Upload a video or audio file to transcribe.")
 
 
 # =====================

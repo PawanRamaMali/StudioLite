@@ -13,6 +13,8 @@ A lightweight, web-based video editor built with Streamlit and FFmpeg. Edit vide
 | **Merge Videos** | Combine multiple videos into one |
 | **Extract Frame** | Export single frames as PNG images |
 | **Export Video** | Convert format (MP4, WebM, AVI, MOV, MKV), quality, and resolution |
+| **Transcribe** | Extract text from audio/video or microphone recording using WhisperX (SRT, VTT, JSON, TSV) |
+| **View & Publish** | Preview video and upload directly to YouTube via OAuth 2.0 |
 
 ## Getting Started
 
@@ -49,14 +51,18 @@ Open http://localhost:8501 in your browser.
 - **OpenCV** - Video/image processing
 - **FFmpeg** - Video encoding, trimming, merging
 - **PyMuPDF** - PDF processing
+- **WhisperX** - Speech-to-text transcription
+- **Google API** - YouTube upload integration
 
 ## Project Structure
 
 ```
 StudioLite/
-├── app.py           # Streamlit web interface
-├── remover.py       # Core video processing logic
-├── requirements.txt # Python dependencies
+├── app.py                # Streamlit web interface
+├── remover.py            # Core video/image/PDF processing logic
+├── transcriber.py        # WhisperX speech-to-text transcription
+├── youtube_uploader.py   # YouTube OAuth 2.0 upload integration
+├── requirements.txt      # Python dependencies
 └── README.md
 ```
 

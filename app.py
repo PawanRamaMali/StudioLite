@@ -4,6 +4,8 @@
 import streamlit as st
 import tempfile
 import os
+import ffmpeg
+from audio_recorder_streamlit import audio_recorder
 from remover import WatermarkRemover
 from youtube_uploader import (
     YouTubeUploader, check_dependencies, check_client_secrets, get_category_list
@@ -90,6 +92,18 @@ def display_cached_video(cache_key, label=None):
     return False
 
 
+def _is_h264_mp4(file_path):
+    """Check if file is already an H.264 MP4 (browser-compatible)."""
+    try:
+        probe = ffmpeg.probe(file_path)
+        video_stream = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
+        if video_stream and video_stream.get('codec_name') == 'h264' and file_path.lower().endswith('.mp4'):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def display_video_browser_compatible(input_path, source_cache_key, label=None):
     """
     Display video with automatic conversion to H.264 for browser compatibility.
@@ -102,16 +116,20 @@ def display_video_browser_compatible(input_path, source_cache_key, label=None):
     converted_key = f"{source_cache_key}_converted"
 
     if get_cached_video(converted_key) is None:
-        # Convert to H.264 MP4 for browser compatibility
-        with st.spinner("Preparing video for preview..."):
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-                preview_path = tmp.name
-            if remover.export_video(input_path, preview_path, "mp4", "medium", None):
-                cache_video_file(preview_path, converted_key)
-                os.unlink(preview_path)
-            else:
-                # Fallback to original if conversion fails
-                st.session_state.video_cache[converted_key] = get_cached_video(source_cache_key)
+        if _is_h264_mp4(input_path):
+            # Already browser-compatible, use original bytes directly
+            st.session_state.video_cache[converted_key] = get_cached_video(source_cache_key)
+        else:
+            # Convert to H.264 MP4 for browser compatibility (fast preset for preview)
+            with st.spinner("Preparing video for preview..."):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+                    preview_path = tmp.name
+                if remover.export_video(input_path, preview_path, "mp4", "low", None):
+                    cache_video_file(preview_path, converted_key)
+                    os.unlink(preview_path)
+                else:
+                    # Fallback to original if conversion fails
+                    st.session_state.video_cache[converted_key] = get_cached_video(source_cache_key)
 
     if label:
         st.subheader(label)
@@ -623,27 +641,59 @@ elif tool == "Transcribe":
 
     st.info(f"Device: **{get_device().upper()}** | {whisperx_msg}")
 
-    uploaded_file = st.file_uploader(
-        "Upload video or audio",
-        type=["mp4", "mov", "avi", "mkv", "mp3", "wav", "m4a", "flac", "ogg", "webm"],
-        key="transcribe_upload"
-    )
+    # Input source selection
+    input_mode = st.radio("Input Source", ["Upload File", "Record Microphone"], horizontal=True)
 
-    if uploaded_file:
-        file_ext = os.path.splitext(uploaded_file.name)[1].lower()
-        is_video = file_ext in [".mp4", ".mov", ".avi", ".mkv", ".webm"]
+    input_path = None
+    is_video = False
+    source_name = None
 
-        if get_cached_video("input") is None:
-            input_path = save_uploaded_file(uploaded_file, "input")
-        else:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
-                tmp.write(get_cached_video("input"))
+    if input_mode == "Upload File":
+        uploaded_file = st.file_uploader(
+            "Upload video or audio",
+            type=["mp4", "mov", "avi", "mkv", "mp3", "wav", "m4a", "flac", "ogg", "webm"],
+            key="transcribe_upload"
+        )
+
+        if uploaded_file:
+            file_ext = os.path.splitext(uploaded_file.name)[1].lower()
+            is_video = file_ext in [".mp4", ".mov", ".avi", ".mkv", ".webm"]
+            source_name = uploaded_file.name
+
+            if get_cached_video("input") is None:
+                input_path = save_uploaded_file(uploaded_file, "input")
+            else:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+                    tmp.write(get_cached_video("input"))
+                    input_path = tmp.name
+
+            file_size_mb = len(get_cached_video("input")) / (1024 * 1024)
+            st.success(f"Loaded: **{uploaded_file.name}** ({file_size_mb:.1f} MB)")
+
+    else:
+        st.markdown("Click the microphone icon to start recording. Click again to stop.")
+        audio_bytes = audio_recorder(
+            text="",
+            recording_color="#e74c3c",
+            neutral_color="#6c757d",
+            icon_size="2x",
+            pause_threshold=60.0,
+        )
+
+        if audio_bytes:
+            st.audio(audio_bytes, format="audio/wav")
+            source_name = "microphone_recording.wav"
+
+            # Save recorded audio to temp file and cache
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                tmp.write(audio_bytes)
                 input_path = tmp.name
+            st.session_state.video_cache["input"] = audio_bytes
 
-        # File info
-        file_size_mb = len(get_cached_video("input")) / (1024 * 1024)
-        st.success(f"Loaded: **{uploaded_file.name}** ({file_size_mb:.1f} MB)")
+            file_size_mb = len(audio_bytes) / (1024 * 1024)
+            st.success(f"Recorded: **{file_size_mb:.2f} MB** of audio")
 
+    if input_path:
         # Transcription Settings FIRST
         st.subheader("Transcription Settings")
 
@@ -807,7 +857,7 @@ elif tool == "Transcribe":
                 st.download_button(
                     "Download Text (.txt)",
                     text,
-                    f"{os.path.splitext(uploaded_file.name)[0]}_transcription.txt",
+                    f"{os.path.splitext(source_name)[0]}_transcription.txt",
                     "text/plain"
                 )
 
@@ -821,7 +871,7 @@ elif tool == "Transcribe":
                     st.download_button(
                         "Download SRT",
                         srt_content,
-                        f"{os.path.splitext(uploaded_file.name)[0]}.srt",
+                        f"{os.path.splitext(source_name)[0]}.srt",
                         "text/plain"
                     )
 
@@ -829,13 +879,13 @@ elif tool == "Transcribe":
                     st.download_button(
                         "Download VTT",
                         vtt_content,
-                        f"{os.path.splitext(uploaded_file.name)[0]}.vtt",
+                        f"{os.path.splitext(source_name)[0]}.vtt",
                         "text/plain"
                     )
 
         os.unlink(input_path)
     else:
-        st.info("Upload a video or audio file to transcribe.")
+        st.info("Upload a file or record from your microphone to transcribe.")
 
 
 # =====================

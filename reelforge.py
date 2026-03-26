@@ -36,7 +36,11 @@ from mpv2.config import (
 )
 from mpv2.utils import rem_temp_files, fetch_songs, choose_random_song
 from mpv2.classes.Tts import TTS
-from mpv2.llm_provider import select_model, generate_text, list_models, check_ollama_connection
+from mpv2.llm_provider import (
+    select_model, generate_text, list_models, check_ollama_connection,
+    check_backend_status, select_backend, get_backend, get_gguf_models,
+    download_model, RECOMMENDED_MODELS, check_llamacpp_available,
+)
 
 from moviepy.editor import (
     ImageClip, AudioFileClip, concatenate_videoclips,
@@ -343,8 +347,17 @@ def rf_generate_full(topic, language, sentence_count, image_provider, sdxl_model
     fetch_songs()
 
     cfg = load_config()
-    model = cfg.get("ollama_model") or "llama3.2:3b"
-    select_model(model)
+    # Set backend and model
+    backend = cfg.get("llm_backend", "llamacpp")
+    select_backend(backend)
+    if backend == "ollama":
+        model = cfg.get("ollama_model") or "llama3.2:3b"
+        select_model(model)
+    else:
+        # For llama.cpp, use the first available GGUF model or the configured one
+        gguf_model = cfg.get("gguf_model", "")
+        if gguf_model:
+            select_model(gguf_model)
 
     progress(1, 7, "Generating script...")
     script = rf_generate_script(topic, language, int(sentence_count))

@@ -17,7 +17,8 @@ from transcriber import (
 )
 from reelforge import (
     load_config, save_config, list_local_models, list_ollama_models,
-    rf_generate_full, check_ollama_connection,
+    rf_generate_full, check_ollama_connection, check_backend_status,
+    get_gguf_models, download_model, RECOMMENDED_MODELS, check_llamacpp_available,
 )
 
 st.set_page_config(page_title="StudioLite - Video Editor", layout="wide")
@@ -1192,15 +1193,14 @@ elif tool == "Settings":
     col_status1, col_status2, col_status3 = st.columns(3)
 
     with col_status1:
-        ollama_ok, ollama_msg = check_ollama_connection()
-        if ollama_ok:
-            st.success("Ollama: Connected")
-            available_models = list_ollama_models()
-            if available_models:
-                st.caption(f"Models: {', '.join(available_models[:3])}{'...' if len(available_models) > 3 else ''}")
+        llamacpp_ok, llamacpp_msg = check_llamacpp_available()
+        gguf_models = get_gguf_models()
+        if llamacpp_ok and gguf_models:
+            st.success(f"llama.cpp: {len(gguf_models)} model(s)")
+        elif llamacpp_ok:
+            st.warning("llama.cpp: No models")
         else:
-            st.error("Ollama: Not Available")
-            st.caption("[Install Ollama](https://ollama.com/download)")
+            st.error("llama.cpp: Not installed")
 
     with col_status2:
         from transcriber import check_whisperx_installed, get_device
@@ -1221,11 +1221,56 @@ elif tool == "Settings":
     st.markdown("---")
 
     # LLM Settings
-    with st.expander("LLM (Ollama)", expanded=True):
-        st.markdown("Configure Ollama for AI text generation in ReelForge.")
-        c_ollama_url = st.text_input("Ollama Base URL", value=cfg.get("ollama_base_url", "http://127.0.0.1:11434"))
-        c_ollama_model = st.text_input("Ollama Model", value=cfg.get("ollama_model", ""), placeholder="e.g., llama3.2:3b")
-        st.caption("Run `ollama pull llama3.2:3b` to download a model")
+    with st.expander("LLM (Text Generation)", expanded=True):
+        st.markdown("Configure the AI backend for script generation in ReelForge.")
+
+        # Backend selection
+        backends = ["llamacpp", "ollama"]
+        current_backend = cfg.get("llm_backend", "llamacpp")
+        c_llm_backend = st.selectbox(
+            "LLM Backend",
+            backends,
+            index=backends.index(current_backend) if current_backend in backends else 0,
+            help="llamacpp (recommended): Works offline with GGUF models. Ollama: Requires Ollama server."
+        )
+
+        if c_llm_backend == "llamacpp":
+            st.markdown("**llama.cpp (GGUF Models)**")
+            gguf_models = get_gguf_models()
+            if gguf_models:
+                c_gguf_model = st.selectbox("Select Model", gguf_models, index=0)
+            else:
+                st.warning("No GGUF models found. Download one below.")
+                c_gguf_model = ""
+
+            # Model download section
+            st.markdown("**Download Models**")
+            for model_info in RECOMMENDED_MODELS:
+                col_m1, col_m2 = st.columns([3, 1])
+                with col_m1:
+                    st.markdown(f"**{model_info['name']}** ({model_info['size']})")
+                    st.caption(model_info['description'])
+                with col_m2:
+                    if st.button(f"Download", key=f"dl_{model_info['id']}", use_container_width=True):
+                        with st.spinner(f"Downloading {model_info['name']}..."):
+                            try:
+                                path = download_model(model_info['id'], model_info['file'])
+                                st.success(f"Downloaded to {path}")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Download failed: {e}")
+
+        else:  # Ollama
+            st.markdown("**Ollama**")
+            ollama_ok, ollama_msg = check_ollama_connection()
+            if ollama_ok:
+                st.success("Ollama is running")
+            else:
+                st.warning("Ollama not running. [Install Ollama](https://ollama.com/download)")
+
+            c_ollama_url = st.text_input("Ollama Base URL", value=cfg.get("ollama_base_url", "http://127.0.0.1:11434"))
+            c_ollama_model = st.text_input("Ollama Model", value=cfg.get("ollama_model", ""), placeholder="e.g., mistral:7b")
+            st.caption("Run `ollama pull mistral:7b` to download a model")
 
     # Image Generation Settings
     with st.expander("Image Generation", expanded=True):
@@ -1290,8 +1335,13 @@ elif tool == "Settings":
 
     # Save button
     if st.button("Save All Settings", type="primary", use_container_width=True):
-        cfg["ollama_base_url"] = c_ollama_url
-        cfg["ollama_model"] = c_ollama_model
+        cfg["llm_backend"] = c_llm_backend
+        if c_llm_backend == "llamacpp":
+            if 'c_gguf_model' in dir() and c_gguf_model:
+                cfg["gguf_model"] = c_gguf_model
+        else:
+            cfg["ollama_base_url"] = c_ollama_url
+            cfg["ollama_model"] = c_ollama_model
         cfg["image_provider"] = c_img_provider
         cfg["nanobanana2_api_key"] = c_nb2_key
         cfg["nanobanana2_model"] = c_nb2_model

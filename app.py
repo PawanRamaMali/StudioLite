@@ -19,6 +19,7 @@ from reelforge import (
     load_config, save_config, list_local_models, list_ollama_models,
     rf_generate_full, check_ollama_connection, check_backend_status,
     get_gguf_models, download_model, RECOMMENDED_MODELS, check_llamacpp_available,
+    select_backend, get_backend,
 )
 
 st.set_page_config(page_title="StudioLite - Video Editor", layout="wide")
@@ -1080,23 +1081,37 @@ elif tool == "ReelForge":
 
     cfg = load_config()
 
-    # Check Ollama connection status
-    ollama_ok, ollama_msg = check_ollama_connection()
-    if ollama_ok:
-        st.success("Ollama connected")
+    # Check LLM backend status (llama.cpp or Ollama)
+    backend = cfg.get("llm_backend", "llamacpp")
+    select_backend(backend)
+
+    backend_ok, backend_msg = check_backend_status()
+    if backend_ok:
+        st.success(f"LLM ready ({backend}: {backend_msg})")
     else:
-        st.error("Ollama not available")
-        st.markdown("""
-        **ReelForge requires Ollama for AI text generation.**
+        st.error(f"LLM not available: {backend_msg}")
+        if backend == "llamacpp":
+            st.markdown("""
+            **ReelForge requires a GGUF model for text generation.**
 
-        **Setup Instructions:**
-        1. Install Ollama: `curl -fsSL https://ollama.com/install.sh | sh`
-        2. Start Ollama: `ollama serve`
-        3. Pull a model: `ollama pull llama3.2:3b`
-        4. Configure the model name in **Settings** page
+            **Setup Instructions:**
+            1. Go to **Settings** page
+            2. Download a model (e.g., Mistral 7B or Phi-3)
+            3. The model will be used automatically
 
-        [Download Ollama](https://ollama.com/download)
-        """)
+            Or switch to Ollama backend in Settings.
+            """)
+        else:
+            st.markdown("""
+            **Ollama is not running.**
+
+            **Setup Instructions:**
+            1. Install Ollama: `curl -fsSL https://ollama.com/install.sh | sh`
+            2. Start Ollama: `ollama serve`
+            3. Pull a model: `ollama pull llama3.2:3b`
+
+            Or switch to llama.cpp backend in Settings for offline use.
+            """)
 
     # --- Generation tab ---
     gen_tab = st.container()

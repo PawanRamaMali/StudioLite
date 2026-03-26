@@ -226,17 +226,26 @@ def rf_generate_image_sdxl(prompt, model_name=None):
     has_local = model_name or (os.path.isdir(models_dir) and any(f.endswith(".safetensors") for f in os.listdir(models_dir)))
 
     try:
+        # Enhanced prompt for better quality
+        enhanced_prompt = f"{prompt}, high quality, detailed, sharp focus, professional photography, 8k resolution"
+        negative = "blurry, low quality, deformed, ugly, bad anatomy, text, watermark, grainy, noisy, oversaturated"
+
         if has_local:
             result = _sdxl_pipe(
-                prompt=prompt,
-                negative_prompt="blurry, low quality, deformed, ugly, bad anatomy, text, watermark",
-                num_inference_steps=20, guidance_scale=7.0, width=768, height=1024,
+                prompt=enhanced_prompt,
+                negative_prompt=negative,
+                num_inference_steps=25, guidance_scale=7.5, width=768, height=1344,
             )
         else:
-            result = _sdxl_pipe(prompt=prompt, num_inference_steps=4, guidance_scale=0.0, width=768, height=1024)
+            # SDXL Turbo - use more steps for better quality
+            result = _sdxl_pipe(
+                prompt=enhanced_prompt,
+                negative_prompt=negative,
+                num_inference_steps=8, guidance_scale=2.0, width=768, height=1344,
+            )
         img = result.images[0]
         path = os.path.join(ROOT_DIR, ".mp", f"{uuid4()}.png")
-        img.save(path)
+        img.save(path, quality=95)
         return path
     except Exception as e:
         print(f"Image generation error: {e}")
@@ -306,24 +315,46 @@ def rf_combine_video(images, tts_path):
             tot_dur += clip.duration
 
     final_clip = concatenate_videoclips(clips).set_fps(30)
-    song = choose_random_song()
-    song_clip = AudioFileClip(song).set_fps(44100).fx(afx.volumex, 0.1)
-    comp_audio = CompositeAudioClip([tts_clip.set_fps(44100), song_clip])
-    final_clip = final_clip.set_audio(comp_audio).set_duration(tts_clip.duration)
+
+    # Try to add background music, but make it optional
+    try:
+        song = choose_random_song()
+        song_clip = AudioFileClip(song).set_fps(44100).fx(afx.volumex, 0.1)
+        comp_audio = CompositeAudioClip([tts_clip.set_fps(44100), song_clip])
+        final_clip = final_clip.set_audio(comp_audio).set_duration(tts_clip.duration)
+    except Exception as e:
+        print(f"Background music not available: {e}")
+        # Use TTS audio only (no background music)
+        final_clip = final_clip.set_audio(tts_clip.set_fps(44100)).set_duration(tts_clip.duration)
 
     try:
         srt_path = rf_generate_subtitles(tts_path)
         if srt_path:
             equalize_subtitles(srt_path, 10)
             subs = SubtitlesClip(srt_path, generator)
-            subs.set_pos(("center", "center"))
-            final_clip = CompositeVideoClip([final_clip, subs])
+            # set_pos returns a new clip, need to assign it
+            subs = subs.set_pos(("center", "bottom"))
+            subs = subs.set_duration(final_clip.duration)
+            final_clip = CompositeVideoClip([final_clip, subs], size=(1080, 1920))
     except Exception as e:
         print(f"Subtitles failed: {e}")
+        import traceback
+        traceback.print_exc()
 
     # Specify temp_audiofile to avoid [Errno 22] on Windows
     temp_audio = os.path.join(tempfile.gettempdir(), f"reelforge_audio_{uuid4()}.mp3")
-    final_clip.write_videofile(combined_path, threads=threads, temp_audiofile=temp_audio)
+    final_clip.write_videofile(
+        combined_path,
+        threads=threads,
+        temp_audiofile=temp_audio,
+        fps=30,
+        codec='libx264',
+        audio_codec='aac',
+        audio_fps=44100,
+        audio_bitrate='192k',
+        verbose=False,
+        logger=None,
+    )
     # Cleanup temp audio
     if os.path.exists(temp_audio):
         os.remove(temp_audio)

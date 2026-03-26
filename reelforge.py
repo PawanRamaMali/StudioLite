@@ -9,6 +9,7 @@ import re
 import base64
 import time
 import tempfile
+import random
 
 import PIL.Image
 if not hasattr(PIL.Image, "ANTIALIAS"):
@@ -24,6 +25,76 @@ if sys.platform == "win32":
 
 import requests
 from uuid import uuid4
+
+# ---------------------------------------------------------------------------
+# Recommended SDXL Models for Realistic Human Faces
+# ---------------------------------------------------------------------------
+RECOMMENDED_IMAGE_MODELS = [
+    {
+        "name": "RealVisXL V4.0",
+        "id": "SG161222/RealVisXL_V4.0",
+        "file": "RealVisXL_V4.0.safetensors",
+        "size": "6.5 GB",
+        "description": "Best for photorealistic humans and faces",
+        "style": "photorealistic",
+    },
+    {
+        "name": "Juggernaut XL V9",
+        "id": "RunDiffusion/Juggernaut-XL-v9",
+        "file": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors",
+        "size": "6.5 GB",
+        "description": "Excellent for realistic portraits and people",
+        "style": "photorealistic",
+    },
+    {
+        "name": "DreamShaper XL",
+        "id": "Lykon/dreamshaper-xl-v2-turbo",
+        "file": "DreamShaperXL_Turbo_v2_1.safetensors",
+        "size": "6.5 GB",
+        "description": "Fast, versatile, good for stylized content",
+        "style": "artistic",
+    },
+    {
+        "name": "SDXL Turbo (Default)",
+        "id": "stabilityai/sdxl-turbo",
+        "file": "sd_xl_turbo_1.0_fp16.safetensors",
+        "size": "6.5 GB",
+        "description": "Fast generation, good for quick previews",
+        "style": "general",
+    },
+]
+
+# Image style presets for different content types
+IMAGE_STYLE_PRESETS = {
+    "photorealistic": {
+        "positive": "photorealistic, ultra detailed, sharp focus, professional photography, 8k, natural lighting, realistic skin texture, detailed eyes",
+        "negative": "cartoon, anime, illustration, painting, drawing, blurry, low quality, deformed, ugly, bad anatomy, text, watermark, oversaturated, plastic skin",
+    },
+    "cinematic": {
+        "positive": "cinematic shot, movie still, dramatic lighting, film grain, shallow depth of field, professional color grading, 35mm film",
+        "negative": "cartoon, anime, blurry, low quality, amateur, overexposed, flat lighting",
+    },
+    "artistic": {
+        "positive": "digital art, trending on artstation, highly detailed, vivid colors, professional illustration, concept art",
+        "negative": "blurry, low quality, deformed, ugly, bad anatomy, text, watermark",
+    },
+    "portrait": {
+        "positive": "professional portrait, studio lighting, sharp focus, detailed face, realistic eyes, natural skin, DSLR quality, bokeh background",
+        "negative": "deformed face, ugly, blurry, low quality, bad anatomy, distorted features, extra limbs, text, watermark",
+    },
+}
+
+# Subtitle style presets
+SUBTITLE_STYLES = {
+    "classic": {"color": "#FFFFFF", "stroke_color": "black", "stroke_width": 3, "fontsize": 80},
+    "bold_yellow": {"color": "#FFFF00", "stroke_color": "black", "stroke_width": 5, "fontsize": 100},
+    "neon_pink": {"color": "#FF1493", "stroke_color": "#000000", "stroke_width": 4, "fontsize": 90},
+    "minimal": {"color": "#FFFFFF", "stroke_color": "#333333", "stroke_width": 2, "fontsize": 70},
+    "news": {"color": "#FFFFFF", "stroke_color": "#CC0000", "stroke_width": 4, "fontsize": 85},
+}
+
+# Video transition types
+TRANSITION_TYPES = ["none", "crossfade", "fade_black", "slide_left", "zoom_in"]
 
 # Import from local mpv2 package (copied from MoneyPrinterV2/src)
 from mpv2.config import (
@@ -83,6 +154,100 @@ def list_ollama_models():
         return list_models()
     except Exception:
         return []
+
+
+def download_image_model(model_id: str, filename: str = None, progress_callback=None) -> str:
+    """Download an SDXL model from Hugging Face."""
+    from huggingface_hub import hf_hub_download
+
+    models_dir = os.path.join(ROOT_DIR, "models")
+    os.makedirs(models_dir, exist_ok=True)
+
+    local_path = hf_hub_download(
+        repo_id=model_id,
+        filename=filename,
+        local_dir=models_dir,
+        local_dir_use_symlinks=False,
+    )
+    return local_path
+
+
+# ---------------------------------------------------------------------------
+# Video Effects
+# ---------------------------------------------------------------------------
+def apply_ken_burns(clip, effect="zoom_in", intensity=0.1):
+    """Apply Ken Burns zoom/pan effect to a clip."""
+    from moviepy.editor import vfx
+
+    duration = clip.duration
+
+    if effect == "zoom_in":
+        # Start zoomed out, end zoomed in
+        def zoom_func(t):
+            return 1 + (intensity * t / duration)
+        return clip.resize(zoom_func)
+
+    elif effect == "zoom_out":
+        # Start zoomed in, end zoomed out
+        def zoom_func(t):
+            return 1 + intensity - (intensity * t / duration)
+        return clip.resize(zoom_func)
+
+    elif effect == "pan_left":
+        # Pan from right to left
+        def position_func(t):
+            x = int(clip.w * intensity * (1 - t / duration))
+            return (x, 0)
+        return clip.set_position(position_func)
+
+    elif effect == "pan_right":
+        # Pan from left to right
+        def position_func(t):
+            x = int(-clip.w * intensity + clip.w * intensity * t / duration)
+            return (x, 0)
+        return clip.set_position(position_func)
+
+    return clip
+
+
+def apply_transition(clip1, clip2, transition_type="crossfade", duration=0.5):
+    """Apply transition between two clips."""
+    from moviepy.editor import CompositeVideoClip, concatenate_videoclips
+
+    if transition_type == "none" or duration <= 0:
+        return concatenate_videoclips([clip1, clip2])
+
+    elif transition_type == "crossfade":
+        # Crossfade transition
+        clip1 = clip1.crossfadeout(duration)
+        clip2 = clip2.crossfadein(duration)
+        # Overlap the clips
+        clip2 = clip2.set_start(clip1.duration - duration)
+        return CompositeVideoClip([clip1, clip2])
+
+    elif transition_type == "fade_black":
+        # Fade to black transition
+        clip1 = clip1.fadeout(duration / 2)
+        clip2 = clip2.fadein(duration / 2)
+        return concatenate_videoclips([clip1, clip2])
+
+    return concatenate_videoclips([clip1, clip2])
+
+
+def apply_color_filter(clip, filter_type="none"):
+    """Apply color filter/grading to clip."""
+    from moviepy.editor import vfx
+
+    if filter_type == "warm":
+        return clip.fx(vfx.colorx, 1.1)  # Slightly warmer
+    elif filter_type == "cool":
+        return clip.fx(vfx.colorx, 0.9)  # Slightly cooler
+    elif filter_type == "vintage":
+        return clip.fx(vfx.colorx, 0.85)
+    elif filter_type == "vivid":
+        return clip.fx(vfx.colorx, 1.2)
+
+    return clip
 
 
 # ---------------------------------------------------------------------------
@@ -220,28 +385,38 @@ def rf_load_sdxl_pipeline(model_name=None):
     _sdxl_loaded_model = model_name
 
 
-def rf_generate_image_sdxl(prompt, model_name=None):
+def rf_generate_image_sdxl(prompt, model_name=None, style="photorealistic", steps=None, guidance=None):
     rf_load_sdxl_pipeline(model_name)
     models_dir = os.path.join(ROOT_DIR, "models")
     has_local = model_name or (os.path.isdir(models_dir) and any(f.endswith(".safetensors") for f in os.listdir(models_dir)))
 
+    # Get style preset
+    style_preset = IMAGE_STYLE_PRESETS.get(style, IMAGE_STYLE_PRESETS["photorealistic"])
+
     try:
-        # Enhanced prompt for better quality
-        enhanced_prompt = f"{prompt}, high quality, detailed, sharp focus, professional photography, 8k resolution"
-        negative = "blurry, low quality, deformed, ugly, bad anatomy, text, watermark, grainy, noisy, oversaturated"
+        # Enhanced prompt with style preset
+        enhanced_prompt = f"{prompt}, {style_preset['positive']}"
+        negative = style_preset['negative']
 
         if has_local:
+            # Full SDXL model - more steps for quality
             result = _sdxl_pipe(
                 prompt=enhanced_prompt,
                 negative_prompt=negative,
-                num_inference_steps=25, guidance_scale=7.5, width=768, height=1344,
+                num_inference_steps=steps or 30,
+                guidance_scale=guidance or 7.5,
+                width=768,
+                height=1344,
             )
         else:
-            # SDXL Turbo - use more steps for better quality
+            # SDXL Turbo - optimized for speed
             result = _sdxl_pipe(
                 prompt=enhanced_prompt,
                 negative_prompt=negative,
-                num_inference_steps=8, guidance_scale=2.0, width=768, height=1344,
+                num_inference_steps=steps or 8,
+                guidance_scale=guidance or 2.0,
+                width=768,
+                height=1344,
             )
         img = result.images[0]
         path = os.path.join(ROOT_DIR, ".mp", f"{uuid4()}.png")
@@ -252,10 +427,10 @@ def rf_generate_image_sdxl(prompt, model_name=None):
         return None
 
 
-def rf_generate_image(prompt, provider="sdxl_turbo", model_name=None):
+def rf_generate_image(prompt, provider="sdxl_turbo", model_name=None, style="photorealistic", steps=None, guidance=None):
     if provider == "nanobanana2":
         return rf_generate_image_nanobanana2(prompt)
-    return rf_generate_image_sdxl(prompt, model_name)
+    return rf_generate_image_sdxl(prompt, model_name, style, steps, guidance)
 
 
 def rf_generate_subtitles(audio_path):
@@ -286,7 +461,7 @@ def rf_generate_subtitles(audio_path):
     return srt_path
 
 
-def rf_combine_video(images, tts_path):
+def rf_combine_video(images, tts_path, subtitle_style="bold_yellow", ken_burns_effect="zoom_in", transition="none", color_filter="none"):
     # Use tempfile for the output to avoid path issues
     combined_path = os.path.join(tempfile.gettempdir(), f"reelforge_{uuid4()}.mp4")
     threads = get_threads()
@@ -294,13 +469,23 @@ def rf_combine_video(images, tts_path):
     max_duration = tts_clip.duration
     req_dur = max_duration / len(images)
 
+    # Get subtitle style
+    sub_style = SUBTITLE_STYLES.get(subtitle_style, SUBTITLE_STYLES["bold_yellow"])
+
     generator = lambda txt: TextClip(
         txt, font=os.path.join(get_fonts_dir(), get_font()),
-        fontsize=100, color="#FFFF00", stroke_color="black", stroke_width=5,
+        fontsize=sub_style["fontsize"],
+        color=sub_style["color"],
+        stroke_color=sub_style["stroke_color"],
+        stroke_width=sub_style["stroke_width"],
         size=(1080, 1920), method="caption",
     )
 
+    # Ken Burns effects to cycle through
+    kb_effects = ["zoom_in", "zoom_out", "pan_left", "pan_right"] if ken_burns_effect == "random" else [ken_burns_effect]
+
     clips, tot_dur = [], 0
+    effect_idx = 0
     while tot_dur < max_duration:
         for img_path in images:
             clip = ImageClip(img_path)
@@ -311,10 +496,39 @@ def rf_combine_video(images, tts_path):
             else:
                 clip = crop(clip, width=round(0.5625 * clip.h), height=clip.h, x_center=clip.w / 2, y_center=clip.h / 2)
             clip = clip.resize((1080, 1920))
+
+            # Apply Ken Burns effect
+            if ken_burns_effect != "none":
+                current_effect = kb_effects[effect_idx % len(kb_effects)]
+                try:
+                    clip = apply_ken_burns(clip, effect=current_effect, intensity=0.08)
+                except Exception as e:
+                    print(f"Ken Burns effect failed: {e}")
+                effect_idx += 1
+
+            # Apply color filter
+            if color_filter != "none":
+                try:
+                    clip = apply_color_filter(clip, color_filter)
+                except Exception as e:
+                    print(f"Color filter failed: {e}")
+
             clips.append(clip)
             tot_dur += clip.duration
 
-    final_clip = concatenate_videoclips(clips).set_fps(30)
+    # Apply transitions between clips if requested
+    if transition != "none" and len(clips) > 1:
+        try:
+            transitioned_clips = [clips[0]]
+            for i in range(1, len(clips)):
+                combined = apply_transition(transitioned_clips[-1], clips[i], transition, duration=0.3)
+                transitioned_clips[-1] = combined
+            final_clip = transitioned_clips[0].set_fps(30)
+        except Exception as e:
+            print(f"Transition failed, using simple concatenation: {e}")
+            final_clip = concatenate_videoclips(clips).set_fps(30)
+    else:
+        final_clip = concatenate_videoclips(clips).set_fps(30)
 
     # Try to add background music, but make it optional
     try:
@@ -364,10 +578,33 @@ def rf_combine_video(images, tts_path):
 # ---------------------------------------------------------------------------
 # Full generation pipeline
 # ---------------------------------------------------------------------------
-def rf_generate_full(topic, language, sentence_count, image_provider, sdxl_model, progress_callback=None):
+def rf_generate_full(
+    topic,
+    language,
+    sentence_count,
+    image_provider,
+    sdxl_model,
+    progress_callback=None,
+    # New customization options
+    image_style="photorealistic",
+    image_steps=None,
+    image_guidance=None,
+    subtitle_style="bold_yellow",
+    ken_burns_effect="zoom_in",
+    transition="none",
+    color_filter="none",
+    num_images=3,
+):
     """
     Generate a complete short video. Returns dict with all outputs.
     progress_callback(step, total, message) is called for UI updates.
+
+    New options:
+    - image_style: "photorealistic", "cinematic", "artistic", "portrait"
+    - subtitle_style: "classic", "bold_yellow", "neon_pink", "minimal", "news"
+    - ken_burns_effect: "none", "zoom_in", "zoom_out", "pan_left", "pan_right", "random"
+    - transition: "none", "crossfade", "fade_black"
+    - color_filter: "none", "warm", "cool", "vintage", "vivid"
     """
     def progress(step, total, msg):
         if progress_callback:
@@ -390,38 +627,56 @@ def rf_generate_full(topic, language, sentence_count, image_provider, sdxl_model
         if gguf_model:
             select_model(gguf_model)
 
-    progress(1, 7, "Generating script...")
+    progress(1, 8, "Generating script...")
     script = rf_generate_script(topic, language, int(sentence_count))
 
-    progress(2, 7, "Generating metadata...")
+    progress(2, 8, "Generating metadata...")
     metadata = rf_generate_metadata(topic, script)
 
-    progress(3, 7, "Generating image prompts...")
+    progress(3, 8, "Generating image prompts...")
     prompts = rf_generate_prompts(topic, script)
+    # Limit to requested number of images
+    prompts = prompts[:num_images]
 
-    progress(4, 7, "Generating images...")
+    progress(4, 8, f"Generating {len(prompts)} images ({image_style} style)...")
     images = []
     for i, p in enumerate(prompts):
-        path = rf_generate_image(p, provider=image_provider, model_name=sdxl_model if sdxl_model else None)
+        progress(4, 8, f"Generating image {i+1}/{len(prompts)}...")
+        path = rf_generate_image(
+            p,
+            provider=image_provider,
+            model_name=sdxl_model if sdxl_model else None,
+            style=image_style,
+            steps=image_steps,
+            guidance=image_guidance,
+        )
         if path:
             images.append(path)
 
     if not images:
         raise RuntimeError("No images were generated. Check your image provider settings.")
 
-    progress(5, 7, "Generating TTS audio...")
+    progress(5, 8, "Generating TTS audio...")
     tts = TTS()
     clean_script = re.sub(r"[^\w\s.?!]", "", script)
     tts_path = os.path.join(ROOT_DIR, ".mp", f"{uuid4()}.wav")
     tts.synthesize(clean_script, tts_path)
 
-    progress(6, 7, "Combining video...")
-    video_path = rf_combine_video(images, tts_path)
+    progress(6, 8, "Combining video with effects...")
+    video_path = rf_combine_video(
+        images,
+        tts_path,
+        subtitle_style=subtitle_style,
+        ken_burns_effect=ken_burns_effect,
+        transition=transition,
+        color_filter=color_filter,
+    )
 
-    progress(7, 7, "Done!")
+    progress(7, 8, "Finalizing...")
 
     # Copy outputs to temp dir so Streamlit can serve them
     import shutil
+    progress(8, 8, "Done!")
     out_dir = tempfile.mkdtemp(prefix="reelforge_")
     local_images = []
     for img_path in images:

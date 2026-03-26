@@ -20,6 +20,9 @@ from reelforge import (
     rf_generate_full, check_ollama_connection, check_backend_status,
     get_gguf_models, download_model, RECOMMENDED_MODELS, check_llamacpp_available,
     select_backend, get_backend,
+    # New imports for enhanced features
+    RECOMMENDED_IMAGE_MODELS, IMAGE_STYLE_PRESETS, SUBTITLE_STYLES, TRANSITION_TYPES,
+    download_image_model,
 )
 
 st.set_page_config(page_title="StudioLite - Video Editor", layout="wide")
@@ -1137,6 +1140,51 @@ elif tool == "ReelForge":
                 else:
                     st.info("No local SDXL models found. Place .safetensors files in the `models/` folder, or use **nanobanana2** (Gemini) provider instead.")
 
+            # Image style preset
+            rf_image_style = st.selectbox(
+                "Image Style",
+                list(IMAGE_STYLE_PRESETS.keys()),
+                index=0,
+                help="photorealistic: Best for human faces | portrait: Optimized for faces | cinematic: Movie-like shots"
+            )
+
+            # Advanced image settings (collapsed by default)
+            with st.expander("Advanced Image Settings"):
+                rf_image_steps = st.slider("Inference Steps", 4, 50, 30 if rf_model else 8, help="More steps = better quality but slower")
+                rf_image_guidance = st.slider("Guidance Scale", 1.0, 15.0, 7.5 if rf_model else 2.0, help="Higher = more prompt adherence")
+
+            st.subheader("Video Effects")
+            col_fx1, col_fx2 = st.columns(2)
+            with col_fx1:
+                rf_ken_burns = st.selectbox(
+                    "Motion Effect",
+                    ["zoom_in", "zoom_out", "pan_left", "pan_right", "random", "none"],
+                    index=0,
+                    help="Ken Burns zoom/pan effect on images"
+                )
+            with col_fx2:
+                rf_transition = st.selectbox(
+                    "Transitions",
+                    ["none", "crossfade", "fade_black"],
+                    index=0,
+                    help="Transition between image clips"
+                )
+
+            col_fx3, col_fx4 = st.columns(2)
+            with col_fx3:
+                rf_color_filter = st.selectbox(
+                    "Color Filter",
+                    ["none", "warm", "cool", "vintage", "vivid"],
+                    index=0
+                )
+            with col_fx4:
+                rf_subtitle_style = st.selectbox(
+                    "Subtitle Style",
+                    list(SUBTITLE_STYLES.keys()),
+                    index=1,  # Default to bold_yellow
+                    help="Customize subtitle appearance"
+                )
+
             generate_clicked = st.button("Generate Video", type="primary", use_container_width=True)
 
         with col_output:
@@ -1157,12 +1205,23 @@ elif tool == "ReelForge":
                         image_provider=rf_provider,
                         sdxl_model=rf_model,
                         progress_callback=on_progress,
+                        # New customization options
+                        image_style=rf_image_style,
+                        image_steps=rf_image_steps if 'rf_image_steps' in dir() else None,
+                        image_guidance=rf_image_guidance if 'rf_image_guidance' in dir() else None,
+                        subtitle_style=rf_subtitle_style,
+                        ken_burns_effect=rf_ken_burns,
+                        transition=rf_transition,
+                        color_filter=rf_color_filter,
+                        num_images=rf_num_images,
                     )
                     st.session_state.rf_result = result
                     progress_bar.progress(1.0, text="Done!")
                     status_text.empty()
                 except Exception as e:
                     st.error(f"Generation failed: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
 
             result = st.session_state.rf_result
             if result:
@@ -1298,6 +1357,32 @@ elif tool == "Settings":
             index=img_providers.index(current_provider) if current_provider in img_providers else 0
         )
 
+        st.markdown("**SDXL Models (Local)**")
+        st.caption("Download realistic face models for better image quality")
+        local_sdxl = list_local_models()
+        if local_sdxl:
+            st.success(f"Installed: {', '.join(local_sdxl[:3])}{'...' if len(local_sdxl) > 3 else ''}")
+
+        for model_info in RECOMMENDED_IMAGE_MODELS:
+            col_m1, col_m2 = st.columns([3, 1])
+            with col_m1:
+                st.markdown(f"**{model_info['name']}** ({model_info['size']}) - {model_info['style']}")
+                st.caption(model_info['description'])
+            with col_m2:
+                # Check if already downloaded
+                is_downloaded = model_info['file'] in local_sdxl
+                if is_downloaded:
+                    st.success("Installed")
+                elif st.button(f"Download", key=f"dl_img_{model_info['id']}", use_container_width=True):
+                    with st.spinner(f"Downloading {model_info['name']}..."):
+                        try:
+                            path = download_image_model(model_info['id'], model_info['file'])
+                            st.success(f"Downloaded!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Download failed: {e}")
+
+        st.markdown("---")
         st.markdown("**NanoBanana2 (Gemini)**")
         cc1, cc2 = st.columns(2)
         with cc1:
@@ -1318,7 +1403,18 @@ elif tool == "Settings":
     # TTS & STT Settings
     with st.expander("TTS & Speech-to-Text"):
         st.markdown("Configure text-to-speech and speech-to-text settings.")
-        c_tts_voice = st.text_input("TTS Voice", value=cfg.get("tts_voice", "Jasper"))
+
+        st.markdown("**Text-to-Speech**")
+        tts_voices = ["Jasper", "Luna", "Marcus", "Elena", "Thomas", "Sofia", "Alex", "Emma"]
+        current_voice = cfg.get("tts_voice", "Jasper")
+        c_tts_voice = st.selectbox(
+            "TTS Voice",
+            tts_voices,
+            index=tts_voices.index(current_voice) if current_voice in tts_voices else 0,
+            help="Male: Jasper, Marcus, Thomas, Alex | Female: Luna, Elena, Sofia, Emma"
+        )
+
+        st.markdown("**Speech-to-Text**")
         c_stt = st.selectbox("STT Provider", ["local_whisper", "third_party_assemblyai"], index=0)
         cc5, cc6, cc7 = st.columns(3)
         with cc5:

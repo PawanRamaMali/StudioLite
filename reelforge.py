@@ -14,14 +14,6 @@ import PIL.Image
 if not hasattr(PIL.Image, "ANTIALIAS"):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
-# MoneyPrinterV2 path
-MPV2_ROOT = r"C:\Github\MoneyPrinterV2"
-MPV2_SRC = os.path.join(MPV2_ROOT, "src")
-
-# Add MPV2 src/ to path if not already
-if MPV2_SRC not in sys.path:
-    sys.path.insert(0, MPV2_SRC)
-
 # Fix Windows encoding
 if sys.platform == "win32":
     try:
@@ -33,8 +25,8 @@ if sys.platform == "win32":
 import requests
 from uuid import uuid4
 
-# MPV2 imports
-from config import (
+# Import from local mpv2 package (copied from MoneyPrinterV2/src)
+from mpv2.config import (
     ROOT_DIR, assert_folder_structure,
     get_nanobanana2_api_key, get_nanobanana2_api_base_url, get_nanobanana2_model,
     get_nanobanana2_aspect_ratio, get_threads,
@@ -42,9 +34,9 @@ from config import (
     get_stt_provider, get_whisper_model, get_whisper_device, get_whisper_compute_type,
     equalize_subtitles,
 )
-from utils import rem_temp_files, fetch_songs, choose_random_song
-from classes.Tts import TTS
-from llm_provider import select_model, generate_text, list_models
+from mpv2.utils import rem_temp_files, fetch_songs, choose_random_song
+from mpv2.classes.Tts import TTS
+from mpv2.llm_provider import select_model, generate_text, list_models
 
 from moviepy.editor import (
     ImageClip, AudioFileClip, concatenate_videoclips,
@@ -325,7 +317,12 @@ def rf_combine_video(images, tts_path):
     except Exception as e:
         print(f"Subtitles failed: {e}")
 
-    final_clip.write_videofile(combined_path, threads=threads)
+    # Specify temp_audiofile to avoid [Errno 22] on Windows
+    temp_audio = os.path.join(tempfile.gettempdir(), f"reelforge_audio_{uuid4()}.mp3")
+    final_clip.write_videofile(combined_path, threads=threads, temp_audiofile=temp_audio)
+    # Cleanup temp audio
+    if os.path.exists(temp_audio):
+        os.remove(temp_audio)
     return combined_path
 
 

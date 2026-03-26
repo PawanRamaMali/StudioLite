@@ -18,3 +18,9 @@ Thumbs.db
 client_secrets.json
 youtube_token.pickle
 *TEMP_MPY*
+
+# ReelForge
+config.json
+models/
+Songs/
+.mp/

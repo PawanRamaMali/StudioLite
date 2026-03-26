@@ -17,7 +17,7 @@ from transcriber import (
 )
 from reelforge import (
     load_config, save_config, list_local_models, list_ollama_models,
-    rf_generate_full,
+    rf_generate_full, check_ollama_connection,
 )
 
 st.set_page_config(page_title="StudioLite - Video Editor", layout="wide")
@@ -38,7 +38,7 @@ tool = st.sidebar.radio(
     "Select Tool",
     ["Remove Watermark", "Trim / Cut", "Add Image Overlay", "Change Speed",
      "Merge Videos", "Extract Frame", "Export Video", "Transcribe", "View & Publish",
-     "ReelForge"]
+     "ReelForge", "Settings"]
 )
 
 # Clear cache when switching tools
@@ -1079,8 +1079,26 @@ elif tool == "ReelForge":
 
     cfg = load_config()
 
-    # --- Generation tab and Config tab ---
-    gen_tab, config_tab = st.tabs(["Generate", "Settings"])
+    # Check Ollama connection status
+    ollama_ok, ollama_msg = check_ollama_connection()
+    if ollama_ok:
+        st.success("Ollama connected")
+    else:
+        st.error("Ollama not available")
+        st.markdown("""
+        **ReelForge requires Ollama for AI text generation.**
+
+        **Setup Instructions:**
+        1. Install Ollama: `curl -fsSL https://ollama.com/install.sh | sh`
+        2. Start Ollama: `ollama serve`
+        3. Pull a model: `ollama pull llama3.2:3b`
+        4. Configure the model name in **Settings** page
+
+        [Download Ollama](https://ollama.com/download)
+        """)
+
+    # --- Generation tab ---
+    gen_tab = st.container()
 
     with gen_tab:
         col_input, col_output = st.columns([1, 2])
@@ -1101,7 +1119,7 @@ elif tool == "ReelForge":
                 if models:
                     rf_model = st.selectbox("SDXL Model", models)
                 else:
-                    st.info("No .safetensors models found in MoneyPrinterV2/models/")
+                    st.info("No local SDXL models found. Place .safetensors files in the `models/` folder, or use **nanobanana2** (Gemini) provider instead.")
 
             generate_clicked = st.button("Generate Video", type="primary", use_container_width=True)
 
@@ -1160,67 +1178,138 @@ elif tool == "ReelForge":
                         use_container_width=True,
                     )
 
-    with config_tab:
-        st.subheader("MoneyPrinterV2 Configuration")
-        st.caption("These settings are saved to config.json")
+# ============================================================
+# SETTINGS PAGE
+# ============================================================
+elif tool == "Settings":
+    st.title("Settings")
+    st.caption("Configure StudioLite and ReelForge settings")
 
-        with st.expander("LLM (Ollama)", expanded=True):
-            c_ollama_url = st.text_input("Ollama Base URL", value=cfg.get("ollama_base_url", "http://127.0.0.1:11434"), key="rf_ollama_url")
-            c_ollama_model = st.text_input("Ollama Model", value=cfg.get("ollama_model", ""), key="rf_ollama_model")
+    cfg = load_config()
 
-        with st.expander("Image Generation", expanded=True):
-            c_img_provider = st.selectbox("Default Provider", ["sdxl_turbo", "nanobanana2", "fooocus"], index=["sdxl_turbo", "nanobanana2", "fooocus"].index(cfg.get("image_provider", "sdxl_turbo")), key="rf_img_prov")
-            cc1, cc2 = st.columns(2)
-            with cc1:
-                c_nb2_key = st.text_input("NanoBanana2 API Key", value=cfg.get("nanobanana2_api_key", ""), type="password", key="rf_nb2_key")
-                c_nb2_model = st.text_input("NanoBanana2 Model", value=cfg.get("nanobanana2_model", ""), key="rf_nb2_model")
-            with cc2:
-                c_nb2_url = st.text_input("NanoBanana2 API URL", value=cfg.get("nanobanana2_api_base_url", ""), key="rf_nb2_url")
-                c_nb2_ratio = st.selectbox("Aspect Ratio", ["9:16", "16:9", "1:1", "4:3"], index=["9:16", "16:9", "1:1", "4:3"].index(cfg.get("nanobanana2_aspect_ratio", "9:16")), key="rf_nb2_ratio")
-            cc3, cc4 = st.columns(2)
-            with cc3:
-                c_fooocus_url = st.text_input("Fooocus API URL", value=cfg.get("fooocus_api_url", "http://127.0.0.1:8888"), key="rf_fooocus_url")
-            with cc4:
-                c_fooocus_style = st.text_input("Fooocus Style", value=cfg.get("fooocus_style", "Fooocus V2"), key="rf_fooocus_style")
+    # Status indicators
+    st.subheader("System Status")
+    col_status1, col_status2, col_status3 = st.columns(3)
 
-        with st.expander("TTS & Speech-to-Text"):
-            c_tts_voice = st.text_input("TTS Voice", value=cfg.get("tts_voice", "Jasper"), key="rf_tts_voice")
-            c_stt = st.selectbox("STT Provider", ["local_whisper", "third_party_assemblyai"], index=0, key="rf_stt")
-            cc5, cc6, cc7 = st.columns(3)
-            with cc5:
-                c_whisper_m = st.selectbox("Whisper Model", ["tiny", "base", "small", "medium", "large"], index=1, key="rf_whisper_m")
-            with cc6:
-                c_whisper_d = st.text_input("Whisper Device", value=cfg.get("whisper_device", "auto"), key="rf_whisper_d")
-            with cc7:
-                c_whisper_c = st.text_input("Compute Type", value=cfg.get("whisper_compute_type", "int8"), key="rf_whisper_c")
+    with col_status1:
+        ollama_ok, ollama_msg = check_ollama_connection()
+        if ollama_ok:
+            st.success("Ollama: Connected")
+            available_models = list_ollama_models()
+            if available_models:
+                st.caption(f"Models: {', '.join(available_models[:3])}{'...' if len(available_models) > 3 else ''}")
+        else:
+            st.error("Ollama: Not Available")
+            st.caption("[Install Ollama](https://ollama.com/download)")
 
-        with st.expander("Video Settings"):
-            cc8, cc9 = st.columns(2)
-            with cc8:
-                c_sentences = st.slider("Default Sentence Count", 2, 12, cfg.get("script_sentence_length", 8), key="rf_sent_len")
-                c_threads = st.slider("MoviePy Threads", 1, 16, cfg.get("threads", 2), key="rf_threads")
-            with cc9:
-                c_font = st.text_input("Font", value=cfg.get("font", "bold_font.ttf"), key="rf_font")
-                c_magick = st.text_input("ImageMagick Path", value=cfg.get("imagemagick_path", ""), key="rf_magick")
+    with col_status2:
+        from transcriber import check_whisperx_installed, get_device
+        whisper_ok, whisper_msg = check_whisperx_installed()
+        if whisper_ok:
+            st.success(f"Whisper: {get_device().upper()}")
+        else:
+            st.warning("Whisper: Not Available")
 
-        if st.button("Save Settings", type="primary", key="rf_save_cfg"):
-            cfg["ollama_base_url"] = c_ollama_url
-            cfg["ollama_model"] = c_ollama_model
-            cfg["image_provider"] = c_img_provider
-            cfg["nanobanana2_api_key"] = c_nb2_key
-            cfg["nanobanana2_model"] = c_nb2_model
-            cfg["nanobanana2_api_base_url"] = c_nb2_url
-            cfg["nanobanana2_aspect_ratio"] = c_nb2_ratio
-            cfg["fooocus_api_url"] = c_fooocus_url
-            cfg["fooocus_style"] = c_fooocus_style
-            cfg["tts_voice"] = c_tts_voice
-            cfg["stt_provider"] = c_stt
-            cfg["whisper_model"] = c_whisper_m
-            cfg["whisper_device"] = c_whisper_d
-            cfg["whisper_compute_type"] = c_whisper_c
-            cfg["script_sentence_length"] = c_sentences
-            cfg["threads"] = c_threads
-            cfg["font"] = c_font
-            cfg["imagemagick_path"] = c_magick
-            save_config(cfg)
-            st.success("Configuration saved!")
+    with col_status3:
+        import torch
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            st.success(f"GPU: {gpu_name[:20]}...")
+        else:
+            st.warning("GPU: CPU Only")
+
+    st.markdown("---")
+
+    # LLM Settings
+    with st.expander("LLM (Ollama)", expanded=True):
+        st.markdown("Configure Ollama for AI text generation in ReelForge.")
+        c_ollama_url = st.text_input("Ollama Base URL", value=cfg.get("ollama_base_url", "http://127.0.0.1:11434"))
+        c_ollama_model = st.text_input("Ollama Model", value=cfg.get("ollama_model", ""), placeholder="e.g., llama3.2:3b")
+        st.caption("Run `ollama pull llama3.2:3b` to download a model")
+
+    # Image Generation Settings
+    with st.expander("Image Generation", expanded=True):
+        st.markdown("Configure image generation providers for ReelForge.")
+        img_providers = ["nanobanana2", "sdxl_turbo", "fooocus"]
+        current_provider = cfg.get("image_provider", "nanobanana2")
+        c_img_provider = st.selectbox(
+            "Default Provider",
+            img_providers,
+            index=img_providers.index(current_provider) if current_provider in img_providers else 0
+        )
+
+        st.markdown("**NanoBanana2 (Gemini)**")
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            c_nb2_key = st.text_input("API Key", value=cfg.get("nanobanana2_api_key", ""), type="password")
+            c_nb2_model = st.text_input("Model", value=cfg.get("nanobanana2_model", "gemini-3.1-flash-image-preview"))
+        with cc2:
+            c_nb2_url = st.text_input("API URL", value=cfg.get("nanobanana2_api_base_url", "https://generativelanguage.googleapis.com/v1beta"))
+            c_nb2_ratio = st.selectbox("Aspect Ratio", ["9:16", "16:9", "1:1", "4:3"],
+                                       index=["9:16", "16:9", "1:1", "4:3"].index(cfg.get("nanobanana2_aspect_ratio", "9:16")))
+
+        st.markdown("**Fooocus**")
+        cc3, cc4 = st.columns(2)
+        with cc3:
+            c_fooocus_url = st.text_input("Fooocus API URL", value=cfg.get("fooocus_api_url", "http://127.0.0.1:8888"))
+        with cc4:
+            c_fooocus_style = st.text_input("Fooocus Style", value=cfg.get("fooocus_style", "Fooocus V2"))
+
+    # TTS & STT Settings
+    with st.expander("TTS & Speech-to-Text"):
+        st.markdown("Configure text-to-speech and speech-to-text settings.")
+        c_tts_voice = st.text_input("TTS Voice", value=cfg.get("tts_voice", "Jasper"))
+        c_stt = st.selectbox("STT Provider", ["local_whisper", "third_party_assemblyai"], index=0)
+        cc5, cc6, cc7 = st.columns(3)
+        with cc5:
+            c_whisper_m = st.selectbox("Whisper Model", ["tiny", "base", "small", "medium", "large"],
+                                       index=["tiny", "base", "small", "medium", "large"].index(cfg.get("whisper_model", "base")))
+        with cc6:
+            c_whisper_d = st.text_input("Whisper Device", value=cfg.get("whisper_device", "auto"))
+        with cc7:
+            c_whisper_c = st.selectbox("Compute Type", ["int8", "float16", "float32"],
+                                       index=["int8", "float16", "float32"].index(cfg.get("whisper_compute_type", "int8")))
+
+    # Video Settings
+    with st.expander("Video Settings"):
+        st.markdown("Configure video generation and export settings.")
+        cc8, cc9 = st.columns(2)
+        with cc8:
+            c_sentences = st.slider("Default Script Sentences", 2, 12, cfg.get("script_sentence_length", 4))
+            c_threads = st.slider("MoviePy Threads", 1, 16, cfg.get("threads", 2))
+        with cc9:
+            c_font = st.text_input("Font", value=cfg.get("font", "bold_font.ttf"))
+            c_magick = st.text_input("ImageMagick Path", value=cfg.get("imagemagick_path", "/usr/bin/convert"))
+
+    # General Settings
+    with st.expander("General"):
+        c_verbose = st.checkbox("Verbose Logging", value=cfg.get("verbose", True))
+        c_headless = st.checkbox("Headless Mode", value=cfg.get("headless", False))
+
+    st.markdown("---")
+
+    # Save button
+    if st.button("Save All Settings", type="primary", use_container_width=True):
+        cfg["ollama_base_url"] = c_ollama_url
+        cfg["ollama_model"] = c_ollama_model
+        cfg["image_provider"] = c_img_provider
+        cfg["nanobanana2_api_key"] = c_nb2_key
+        cfg["nanobanana2_model"] = c_nb2_model
+        cfg["nanobanana2_api_base_url"] = c_nb2_url
+        cfg["nanobanana2_aspect_ratio"] = c_nb2_ratio
+        cfg["fooocus_api_url"] = c_fooocus_url
+        cfg["fooocus_style"] = c_fooocus_style
+        cfg["tts_voice"] = c_tts_voice
+        cfg["stt_provider"] = c_stt
+        cfg["whisper_model"] = c_whisper_m
+        cfg["whisper_device"] = c_whisper_d
+        cfg["whisper_compute_type"] = c_whisper_c
+        cfg["script_sentence_length"] = c_sentences
+        cfg["threads"] = c_threads
+        cfg["font"] = c_font
+        cfg["imagemagick_path"] = c_magick
+        cfg["verbose"] = c_verbose
+        cfg["headless"] = c_headless
+        save_config(cfg)
+        st.success("Settings saved successfully!")
+        st.rerun()

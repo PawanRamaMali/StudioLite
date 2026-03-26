@@ -36,7 +36,7 @@ from mpv2.config import (
 )
 from mpv2.utils import rem_temp_files, fetch_songs, choose_random_song
 from mpv2.classes.Tts import TTS
-from mpv2.llm_provider import select_model, generate_text, list_models
+from mpv2.llm_provider import select_model, generate_text, list_models, check_ollama_connection
 
 from moviepy.editor import (
     ImageClip, AudioFileClip, concatenate_videoclips,

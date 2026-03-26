@@ -9,6 +9,21 @@ def _client() -> ollama.Client:
     return ollama.Client(host=get_ollama_base_url())
 
 
+def check_ollama_connection() -> tuple[bool, str]:
+    """
+    Check if Ollama is running and accessible.
+
+    Returns:
+        tuple: (is_connected, message)
+    """
+    try:
+        client = _client()
+        client.list()
+        return True, "Ollama is running"
+    except Exception as e:
+        return False, f"Failed to connect to Ollama. Please check that Ollama is downloaded, running and accessible. https://ollama.com/download"
+
+
 def list_models() -> list[str]:
     """
     Lists all models available on the local Ollama server.
@@ -16,8 +31,11 @@ def list_models() -> list[str]:
     Returns:
         models (list[str]): Sorted list of model names.
     """
-    response = _client().list()
-    return sorted(m.model for m in response.models)
+    try:
+        response = _client().list()
+        return sorted(m.model for m in response.models)
+    except Exception:
+        return []
 
 
 def select_model(model: str) -> None:
@@ -49,6 +67,11 @@ def generate_text(prompt: str, model_name: str = None) -> str:
     Returns:
         response (str): Generated text
     """
+    # First check if Ollama is accessible
+    connected, msg = check_ollama_connection()
+    if not connected:
+        raise RuntimeError(msg)
+
     model = model_name or _selected_model
     if not model:
         raise RuntimeError(

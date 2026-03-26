@@ -12,3 +12,17 @@ torch>=2.0.0
 torchaudio>=2.0.0
 whisperx>=3.1.0
 audio-recorder-streamlit>=0.0.8
+
+# ReelForge dependencies (AI video generation)
+ollama>=0.4.0
+requests>=2.28.0
+moviepy==1.0.3
+srt-equalizer>=0.1.0
+termcolor>=2.0.0
+kittentts>=0.8.0
+soundfile>=0.12.0
+diffusers>=0.37.0
+transformers>=4.30.0
+accelerate>=0.20.0
+safetensors>=0.3.0
+faster-whisper>=1.0.0

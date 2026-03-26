@@ -15,6 +15,10 @@ from transcriber import (
     get_language_list, get_language_code, get_device,
     MODEL_SIZES, COMPUTE_TYPES, OUTPUT_FORMATS
 )
+from reelforge import (
+    load_config, save_config, list_local_models, list_ollama_models,
+    rf_generate_full,
+)
 
 st.set_page_config(page_title="StudioLite - Video Editor", layout="wide")
 
@@ -33,7 +37,8 @@ st.sidebar.title("StudioLite")
 tool = st.sidebar.radio(
     "Select Tool",
     ["Remove Watermark", "Trim / Cut", "Add Image Overlay", "Change Speed",
-     "Merge Videos", "Extract Frame", "Export Video", "Transcribe", "View & Publish"]
+     "Merge Videos", "Extract Frame", "Export Video", "Transcribe", "View & Publish",
+     "ReelForge"]
 )
 
 # Clear cache when switching tools
@@ -1060,3 +1065,162 @@ elif tool == "View & Publish":
         os.unlink(input_path)
     else:
         st.info("Upload a video to preview and publish to YouTube.")
+
+# ============================================================
+# ReelForge — AI Short Video Generator
+# ============================================================
+elif tool == "ReelForge":
+    st.title("ReelForge")
+    st.caption("AI-powered short video generation")
+
+    # Init session state for ReelForge
+    if "rf_result" not in st.session_state:
+        st.session_state.rf_result = None
+
+    cfg = load_config()
+
+    # --- Generation tab and Config tab ---
+    gen_tab, config_tab = st.tabs(["Generate", "Settings"])
+
+    with gen_tab:
+        col_input, col_output = st.columns([1, 2])
+
+        with col_input:
+            st.subheader("Video Parameters")
+            rf_topic = st.text_input("Topic", value="Introduction to Data Science")
+            rf_language = st.text_input("Language", value="English")
+            rf_sentences = st.slider("Script sentences", 2, 12, cfg.get("script_sentence_length", 8))
+            rf_num_images = st.slider("Number of images", 2, 6, 3)
+
+            st.subheader("Image Generation")
+            rf_provider = st.selectbox("Provider", ["sdxl_turbo", "nanobanana2", "fooocus"], index=0)
+
+            rf_model = None
+            if rf_provider == "sdxl_turbo":
+                models = list_local_models()
+                if models:
+                    rf_model = st.selectbox("SDXL Model", models)
+                else:
+                    st.info("No .safetensors models found in MoneyPrinterV2/models/")
+
+            generate_clicked = st.button("Generate Video", type="primary", use_container_width=True)
+
+        with col_output:
+            if generate_clicked:
+                st.session_state.rf_result = None
+                progress_bar = st.progress(0, text="Starting...")
+                status_text = st.empty()
+
+                def on_progress(step, total, msg):
+                    progress_bar.progress(step / total, text=msg)
+                    status_text.text(msg)
+
+                try:
+                    result = rf_generate_full(
+                        topic=rf_topic,
+                        language=rf_language,
+                        sentence_count=rf_sentences,
+                        image_provider=rf_provider,
+                        sdxl_model=rf_model,
+                        progress_callback=on_progress,
+                    )
+                    st.session_state.rf_result = result
+                    progress_bar.progress(1.0, text="Done!")
+                    status_text.empty()
+                except Exception as e:
+                    st.error(f"Generation failed: {e}")
+
+            result = st.session_state.rf_result
+            if result:
+                st.subheader("Generated Script")
+                st.text_area("Script", result["script"], height=120, disabled=True)
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.text_input("Title", result["title"], disabled=True)
+                with c2:
+                    st.text_input("Description", result["description"][:200] + "...", disabled=True)
+
+                st.subheader("Generated Images")
+                img_cols = st.columns(len(result["images"]))
+                for i, img_path in enumerate(result["images"]):
+                    with img_cols[i]:
+                        st.image(img_path, use_container_width=True)
+
+                st.subheader("Final Video")
+                st.video(result["video_path"])
+
+                # Download button
+                with open(result["video_path"], "rb") as vf:
+                    st.download_button(
+                        "Download Video",
+                        vf.read(),
+                        file_name=f"reelforge_{rf_topic.replace(' ', '_')[:30]}.mp4",
+                        mime="video/mp4",
+                        use_container_width=True,
+                    )
+
+    with config_tab:
+        st.subheader("MoneyPrinterV2 Configuration")
+        st.caption("These settings are saved to config.json")
+
+        with st.expander("LLM (Ollama)", expanded=True):
+            c_ollama_url = st.text_input("Ollama Base URL", value=cfg.get("ollama_base_url", "http://127.0.0.1:11434"), key="rf_ollama_url")
+            c_ollama_model = st.text_input("Ollama Model", value=cfg.get("ollama_model", ""), key="rf_ollama_model")
+
+        with st.expander("Image Generation", expanded=True):
+            c_img_provider = st.selectbox("Default Provider", ["sdxl_turbo", "nanobanana2", "fooocus"], index=["sdxl_turbo", "nanobanana2", "fooocus"].index(cfg.get("image_provider", "sdxl_turbo")), key="rf_img_prov")
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                c_nb2_key = st.text_input("NanoBanana2 API Key", value=cfg.get("nanobanana2_api_key", ""), type="password", key="rf_nb2_key")
+                c_nb2_model = st.text_input("NanoBanana2 Model", value=cfg.get("nanobanana2_model", ""), key="rf_nb2_model")
+            with cc2:
+                c_nb2_url = st.text_input("NanoBanana2 API URL", value=cfg.get("nanobanana2_api_base_url", ""), key="rf_nb2_url")
+                c_nb2_ratio = st.selectbox("Aspect Ratio", ["9:16", "16:9", "1:1", "4:3"], index=["9:16", "16:9", "1:1", "4:3"].index(cfg.get("nanobanana2_aspect_ratio", "9:16")), key="rf_nb2_ratio")
+            cc3, cc4 = st.columns(2)
+            with cc3:
+                c_fooocus_url = st.text_input("Fooocus API URL", value=cfg.get("fooocus_api_url", "http://127.0.0.1:8888"), key="rf_fooocus_url")
+            with cc4:
+                c_fooocus_style = st.text_input("Fooocus Style", value=cfg.get("fooocus_style", "Fooocus V2"), key="rf_fooocus_style")
+
+        with st.expander("TTS & Speech-to-Text"):
+            c_tts_voice = st.text_input("TTS Voice", value=cfg.get("tts_voice", "Jasper"), key="rf_tts_voice")
+            c_stt = st.selectbox("STT Provider", ["local_whisper", "third_party_assemblyai"], index=0, key="rf_stt")
+            cc5, cc6, cc7 = st.columns(3)
+            with cc5:
+                c_whisper_m = st.selectbox("Whisper Model", ["tiny", "base", "small", "medium", "large"], index=1, key="rf_whisper_m")
+            with cc6:
+                c_whisper_d = st.text_input("Whisper Device", value=cfg.get("whisper_device", "auto"), key="rf_whisper_d")
+            with cc7:
+                c_whisper_c = st.text_input("Compute Type", value=cfg.get("whisper_compute_type", "int8"), key="rf_whisper_c")
+
+        with st.expander("Video Settings"):
+            cc8, cc9 = st.columns(2)
+            with cc8:
+                c_sentences = st.slider("Default Sentence Count", 2, 12, cfg.get("script_sentence_length", 8), key="rf_sent_len")
+                c_threads = st.slider("MoviePy Threads", 1, 16, cfg.get("threads", 2), key="rf_threads")
+            with cc9:
+                c_font = st.text_input("Font", value=cfg.get("font", "bold_font.ttf"), key="rf_font")
+                c_magick = st.text_input("ImageMagick Path", value=cfg.get("imagemagick_path", ""), key="rf_magick")
+
+        if st.button("Save Settings", type="primary", key="rf_save_cfg"):
+            cfg["ollama_base_url"] = c_ollama_url
+            cfg["ollama_model"] = c_ollama_model
+            cfg["image_provider"] = c_img_provider
+            cfg["nanobanana2_api_key"] = c_nb2_key
+            cfg["nanobanana2_model"] = c_nb2_model
+            cfg["nanobanana2_api_base_url"] = c_nb2_url
+            cfg["nanobanana2_aspect_ratio"] = c_nb2_ratio
+            cfg["fooocus_api_url"] = c_fooocus_url
+            cfg["fooocus_style"] = c_fooocus_style
+            cfg["tts_voice"] = c_tts_voice
+            cfg["stt_provider"] = c_stt
+            cfg["whisper_model"] = c_whisper_m
+            cfg["whisper_device"] = c_whisper_d
+            cfg["whisper_compute_type"] = c_whisper_c
+            cfg["script_sentence_length"] = c_sentences
+            cfg["threads"] = c_threads
+            cfg["font"] = c_font
+            cfg["imagemagick_path"] = c_magick
+            save_config(cfg)
+            st.success("Configuration saved!")

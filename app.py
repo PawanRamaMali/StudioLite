@@ -44,7 +44,7 @@ tool = st.sidebar.radio(
     "Select Tool",
     ["Remove Watermark", "Trim / Cut", "Add Image Overlay", "Change Speed",
      "Merge Videos", "Extract Frame", "Export Video", "Transcribe", "View & Publish",
-     "ReelForge", "Settings"]
+     "ReelForge", "Video Generator", "Settings"]
 )
 
 # Clear cache when switching tools
@@ -1254,6 +1254,238 @@ elif tool == "ReelForge":
                 st.text_area("Description", result["description"], disabled=True, height=80)
                 if result.get("total_duration"):
                     st.metric("Total Duration", f"{result['total_duration']:.1f}s")
+
+# ============================================================
+# VIDEO GENERATOR PAGE
+# ============================================================
+elif tool == "Video Generator":
+    st.title("Video Generator")
+    st.markdown("Generate real AI videos using CogVideoX diffusion models")
+
+    from videogen import VideoGenerator, check_system_requirements, VideoGenConfig
+    from uuid import uuid4
+
+    # System requirements check
+    ok, msg, vram_info = check_system_requirements()
+
+    if not ok:
+        st.error(f"System requirements not met: {msg}")
+        st.info("Video generation requires a CUDA-capable GPU with at least 6GB VRAM.")
+        st.stop()
+
+    # Display GPU info
+    st.info(f"GPU: {vram_info['gpu_name']} | VRAM: {vram_info['free_vram']:.1f}GB available")
+
+    # Initialize session state
+    if "vg_result" not in st.session_state:
+        st.session_state.vg_result = None
+    if "vg_generating" not in st.session_state:
+        st.session_state.vg_generating = False
+
+    # Two-column layout
+    input_col, output_col = st.columns([1, 1.5])
+
+    with input_col:
+        # Mode selection
+        vg_mode = st.radio(
+            "Generation Mode",
+            ["Text to Video", "Image to Video", "Extend Video"],
+            horizontal=True,
+            help="Choose how to generate your video"
+        )
+
+        # Prompt input
+        vg_prompt = st.text_area(
+            "Describe the video",
+            placeholder="A panda playing guitar in a bamboo forest, cinematic lighting, smooth camera movement...",
+            height=120,
+            help="Describe what should happen in the video. Be specific about motion and style."
+        )
+
+        # Mode-specific inputs
+        vg_image_file = None
+        vg_video_file = None
+
+        if vg_mode == "Image to Video":
+            vg_image_file = st.file_uploader(
+                "Upload image to animate",
+                type=["png", "jpg", "jpeg"],
+                help="Upload a still image to animate"
+            )
+            if vg_image_file:
+                st.image(vg_image_file, caption="Input image", use_container_width=True)
+
+        elif vg_mode == "Extend Video":
+            vg_video_file = st.file_uploader(
+                "Upload video to extend",
+                type=["mp4", "mov", "avi"],
+                help="Upload a video to extend or transform"
+            )
+            if vg_video_file:
+                st.video(vg_video_file)
+
+        # Settings expander
+        with st.expander("Advanced Settings", expanded=False):
+            vram = vram_info["free_vram"]
+
+            # Model selection based on VRAM
+            model_options = ["2B (8GB VRAM)", "5B (16GB+ VRAM)"]
+            default_model_idx = 0 if vram < 16 else 1
+            vg_model_choice = st.selectbox(
+                "Model Size",
+                model_options,
+                index=default_model_idx,
+                help="Larger models produce better quality but need more VRAM"
+            )
+
+            # Frame count
+            vg_num_frames = st.select_slider(
+                "Video Length",
+                options=[49, 81],
+                value=49,
+                format_func=lambda x: f"{x} frames (~{x/8:.0f}s)",
+                help="More frames = longer video but slower generation"
+            )
+
+            # Guidance scale
+            vg_guidance = st.slider(
+                "Prompt Strength",
+                min_value=1.0,
+                max_value=15.0,
+                value=6.0,
+                step=0.5,
+                help="Higher values follow the prompt more closely"
+            )
+
+            # Quantization
+            vg_use_quant = st.checkbox(
+                "Use INT8 Quantization (lower VRAM)",
+                value=vram < 16,
+                help="Reduces VRAM usage with minimal quality loss"
+            )
+
+            # Seed
+            vg_use_seed = st.checkbox("Use fixed seed (reproducible results)")
+            vg_seed = None
+            if vg_use_seed:
+                vg_seed = st.number_input("Seed", min_value=0, max_value=2**32-1, value=42)
+
+        # Generate button
+        vg_generate_btn = st.button(
+            "Generate Video",
+            type="primary",
+            use_container_width=True,
+            disabled=st.session_state.vg_generating
+        )
+
+    with output_col:
+        if vg_generate_btn and vg_prompt:
+            st.session_state.vg_generating = True
+            st.session_state.vg_result = None
+
+            progress_bar = st.progress(0, text="Initializing...")
+            status_text = st.empty()
+
+            def on_progress(step, total, msg):
+                progress_bar.progress(step / total, text=msg)
+                status_text.text(msg)
+
+            # Configure generator
+            config = VideoGenConfig(
+                model_variant="2b" if "2B" in vg_model_choice else "5b",
+                num_frames=vg_num_frames,
+                guidance_scale=vg_guidance,
+                quantization="int8" if vg_use_quant else "none",
+                seed=vg_seed,
+            )
+
+            generator = VideoGenerator(config)
+
+            try:
+                if vg_mode == "Text to Video":
+                    on_progress(0, 5, "Starting text-to-video generation...")
+                    result = generator.generate_text2video(
+                        vg_prompt,
+                        progress_callback=on_progress
+                    )
+
+                elif vg_mode == "Image to Video" and vg_image_file:
+                    on_progress(0, 5, "Processing image...")
+                    # Save uploaded image
+                    img_dir = os.path.join(os.path.dirname(__file__), ".mp")
+                    os.makedirs(img_dir, exist_ok=True)
+                    img_path = os.path.join(img_dir, f"upload_{uuid4()}.png")
+                    with open(img_path, "wb") as f:
+                        f.write(vg_image_file.read())
+
+                    result = generator.generate_image2video(
+                        img_path,
+                        vg_prompt,
+                        progress_callback=on_progress
+                    )
+
+                elif vg_mode == "Extend Video" and vg_video_file:
+                    on_progress(0, 5, "Processing video...")
+                    # Save uploaded video
+                    vid_dir = os.path.join(os.path.dirname(__file__), ".mp")
+                    os.makedirs(vid_dir, exist_ok=True)
+                    vid_path = os.path.join(vid_dir, f"upload_{uuid4()}.mp4")
+                    with open(vid_path, "wb") as f:
+                        f.write(vg_video_file.read())
+
+                    result = generator.generate_video2video(
+                        vid_path,
+                        vg_prompt,
+                        progress_callback=on_progress
+                    )
+                else:
+                    st.warning("Please provide all required inputs")
+                    result = None
+
+                if result:
+                    st.session_state.vg_result = result
+                    progress_bar.progress(1.0, text="Complete!")
+                    st.success("Video generated successfully!")
+
+            except Exception as e:
+                st.error(f"Generation failed: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+
+            finally:
+                generator.unload()
+                st.session_state.vg_generating = False
+
+        elif vg_generate_btn and not vg_prompt:
+            st.warning("Please enter a prompt describing the video")
+
+        # Display result
+        if st.session_state.vg_result and os.path.exists(st.session_state.vg_result):
+            st.subheader("Generated Video")
+            st.video(st.session_state.vg_result)
+
+            # Download button
+            with open(st.session_state.vg_result, "rb") as f:
+                video_bytes = f.read()
+            st.download_button(
+                "Download Video",
+                video_bytes,
+                file_name="generated_video.mp4",
+                mime="video/mp4",
+                use_container_width=True
+            )
+
+            # Show details
+            with st.expander("Generation Details"):
+                st.json({
+                    "mode": vg_mode,
+                    "model": vg_model_choice,
+                    "frames": vg_num_frames,
+                    "guidance_scale": vg_guidance,
+                    "quantization": "INT8" if vg_use_quant else "None",
+                    "seed": vg_seed,
+                })
+
 
 # ============================================================
 # SETTINGS PAGE

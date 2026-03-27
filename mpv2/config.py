@@ -415,3 +415,47 @@ def get_default_aspect_ratio() -> str:
     """
     with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
         return json.load(file).get("default_aspect_ratio", "9:16")
+
+
+def get_videogen_model_variant() -> str:
+    """
+    Gets the video generation model variant.
+
+    Returns:
+        variant (str): Model variant ("2b" or "5b")
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("videogen_model_variant", "2b")
+
+
+def get_videogen_num_frames() -> int:
+    """
+    Gets the number of frames for video generation.
+
+    Returns:
+        frames (int): Number of frames (49 or 81)
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("videogen_num_frames", 49)
+
+
+def get_videogen_guidance_scale() -> float:
+    """
+    Gets the guidance scale for video generation.
+
+    Returns:
+        scale (float): Guidance scale
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("videogen_guidance_scale", 6.0)
+
+
+def get_videogen_quantization() -> str:
+    """
+    Gets the quantization setting for video generation.
+
+    Returns:
+        quantization (str): Quantization mode ("none", "int8", "auto")
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("videogen_quantization", "auto")

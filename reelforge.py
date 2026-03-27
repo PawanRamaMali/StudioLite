@@ -533,13 +533,16 @@ def rf_combine_video(images, tts_path, subtitle_style="bold_yellow", ken_burns_e
     # Try to add background music, but make it optional
     try:
         song = choose_random_song()
-        song_clip = AudioFileClip(song).set_fps(44100).fx(afx.volumex, 0.1)
-        comp_audio = CompositeAudioClip([tts_clip.set_fps(44100), song_clip])
+        song_clip = AudioFileClip(song).fx(afx.volumex, 0.1)
+        # Set duration to match TTS
+        song_clip = song_clip.set_duration(tts_clip.duration)
+        comp_audio = CompositeAudioClip([tts_clip, song_clip])
+        comp_audio = comp_audio.set_duration(tts_clip.duration)
         final_clip = final_clip.set_audio(comp_audio).set_duration(tts_clip.duration)
     except Exception as e:
         print(f"Background music not available: {e}")
         # Use TTS audio only (no background music)
-        final_clip = final_clip.set_audio(tts_clip.set_fps(44100)).set_duration(tts_clip.duration)
+        final_clip = final_clip.set_audio(tts_clip).set_duration(tts_clip.duration)
 
     try:
         srt_path = rf_generate_subtitles(tts_path)
@@ -556,22 +559,36 @@ def rf_combine_video(images, tts_path, subtitle_style="bold_yellow", ken_burns_e
         traceback.print_exc()
 
     # Specify temp_audiofile to avoid [Errno 22] on Windows
-    temp_audio = os.path.join(tempfile.gettempdir(), f"reelforge_audio_{uuid4()}.mp3")
-    final_clip.write_videofile(
-        combined_path,
-        threads=threads,
-        temp_audiofile=temp_audio,
-        fps=30,
-        codec='libx264',
-        audio_codec='aac',
-        audio_fps=44100,
-        audio_bitrate='192k',
-        verbose=False,
-        logger=None,
-    )
+    temp_audio = os.path.join(tempfile.gettempdir(), f"reelforge_audio_{uuid4()}.m4a")
+    try:
+        final_clip.write_videofile(
+            combined_path,
+            threads=threads,
+            temp_audiofile=temp_audio,
+            fps=30,
+            codec='libx264',
+            audio_codec='aac',
+            verbose=False,
+            logger=None,
+        )
+    except AttributeError as e:
+        # Fallback for MoviePy audio writer bug
+        print(f"Audio writer issue, trying alternative method: {e}")
+        final_clip.write_videofile(
+            combined_path,
+            threads=threads,
+            fps=30,
+            codec='libx264',
+            audio=True,
+            verbose=False,
+            logger=None,
+        )
     # Cleanup temp audio
     if os.path.exists(temp_audio):
-        os.remove(temp_audio)
+        try:
+            os.remove(temp_audio)
+        except Exception:
+            pass
     return combined_path
 
 

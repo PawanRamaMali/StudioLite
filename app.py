@@ -20,9 +20,10 @@ from reelforge import (
     rf_generate_full, check_ollama_connection, check_backend_status,
     get_gguf_models, download_model, RECOMMENDED_MODELS, check_llamacpp_available,
     select_backend, get_backend,
-    # New imports for enhanced features
-    RECOMMENDED_IMAGE_MODELS, IMAGE_STYLE_PRESETS, SUBTITLE_STYLES, TRANSITION_TYPES,
-    download_image_model,
+    # Enhanced features
+    RECOMMENDED_IMAGE_MODELS, IMAGE_STYLE_PRESETS, SUBTITLE_STYLES,
+    MOTION_EFFECTS, COLOR_FILTERS, download_image_model, ASPECT_RATIOS,
+    list_background_music, get_music_dir,
 )
 
 st.set_page_config(page_title="StudioLite - Video Editor", layout="wide")
@@ -1076,182 +1077,183 @@ elif tool == "View & Publish":
 # ============================================================
 elif tool == "ReelForge":
     st.title("ReelForge")
-    st.caption("AI-powered short video generation")
+    st.markdown("Generate AI-powered short videos with synced speech and visuals")
 
-    # Init session state for ReelForge
+    # Init session state
     if "rf_result" not in st.session_state:
         st.session_state.rf_result = None
 
     cfg = load_config()
-
-    # Check LLM backend status (llama.cpp or Ollama)
     backend = cfg.get("llm_backend", "llamacpp")
     select_backend(backend)
 
+    # Status check (compact)
     backend_ok, backend_msg = check_backend_status()
-    if backend_ok:
-        st.success(f"LLM ready ({backend}: {backend_msg})")
-    else:
-        st.error(f"LLM not available: {backend_msg}")
-        if backend == "llamacpp":
-            st.markdown("""
-            **ReelForge requires a GGUF model for text generation.**
+    if not backend_ok:
+        st.error(f"LLM not ready: {backend_msg}. Go to Settings to configure.")
+        st.stop()
 
-            **Setup Instructions:**
-            1. Go to **Settings** page
-            2. Download a model (e.g., Mistral 7B or Phi-3)
-            3. The model will be used automatically
+    # Main layout: Input on left, Output on right
+    input_col, output_col = st.columns([1, 2])
 
-            Or switch to Ollama backend in Settings.
-            """)
-        else:
-            st.markdown("""
-            **Ollama is not running.**
+    with input_col:
+        st.markdown("### Create Video")
 
-            **Setup Instructions:**
-            1. Install Ollama: `curl -fsSL https://ollama.com/install.sh | sh`
-            2. Start Ollama: `ollama serve`
-            3. Pull a model: `ollama pull llama3.2:3b`
+        # Basic settings
+        rf_topic = st.text_input("Topic", placeholder="What is your video about?")
+        rf_num_images = st.slider("Number of Scenes", 2, 6, 3, help="Each scene = 1 image + 1 spoken sentence")
 
-            Or switch to llama.cpp backend in Settings for offline use.
-            """)
+        # Aspect Ratio selector
+        st.markdown("**Video Format**")
+        aspect_ratio_labels = {
+            "9:16": "Portrait (9:16)",
+            "16:9": "Landscape (16:9)",
+            "1:1": "Square (1:1)",
+            "4:5": "Instagram (4:5)",
+        }
+        rf_aspect_ratio = st.radio(
+            "Aspect Ratio",
+            options=list(ASPECT_RATIOS.keys()),
+            format_func=lambda x: aspect_ratio_labels.get(x, x),
+            horizontal=True,
+            label_visibility="collapsed",
+        )
 
-    # --- Generation tab ---
-    gen_tab = st.container()
+        # Collapsible settings
+        with st.expander("Style & Effects", expanded=False):
+            rf_image_style = st.selectbox("Visual Style", list(IMAGE_STYLE_PRESETS.keys()), index=0)
+            rf_subtitle_style = st.selectbox("Text Style", list(SUBTITLE_STYLES.keys()), index=1)
+            col_e1, col_e2 = st.columns(2)
+            with col_e1:
+                rf_ken_burns = st.selectbox("Motion", MOTION_EFFECTS, index=0)
+            with col_e2:
+                rf_color_filter = st.selectbox("Filter", COLOR_FILTERS, index=0)
 
-    with gen_tab:
-        col_input, col_output = st.columns([1, 2])
+        with st.expander("Audio Settings", expanded=False):
+            rf_music_enabled = st.checkbox("Add Background Music", value=cfg.get("background_music_enabled", False))
+            if rf_music_enabled:
+                rf_music_volume = st.slider(
+                    "Music Volume",
+                    min_value=0.05,
+                    max_value=0.5,
+                    value=cfg.get("background_music_volume", 0.15),
+                    step=0.05,
+                    help="Lower values keep music subtle behind narration"
+                )
+                # Show available music files
+                available_music = list_background_music()
+                if available_music:
+                    music_options = ["Random"] + available_music
+                    rf_music_file = st.selectbox("Music Track", music_options, index=0)
+                    if rf_music_file == "Random":
+                        rf_music_path = None
+                    else:
+                        rf_music_path = str(get_music_dir() / rf_music_file)
+                else:
+                    st.info("Add .mp3 or .wav files to the 'music' folder for background music")
+                    rf_music_path = None
+            else:
+                rf_music_volume = 0.15
+                rf_music_path = None
 
-        with col_input:
-            st.subheader("Video Parameters")
-            rf_topic = st.text_input("Topic", value="Introduction to Data Science")
+        with st.expander("Advanced", expanded=False):
             rf_language = st.text_input("Language", value="English")
-            rf_sentences = st.slider("Script sentences", 2, 12, cfg.get("script_sentence_length", 8))
-            rf_num_images = st.slider("Number of images", 2, 6, 3)
-
-            st.subheader("Image Generation")
-            rf_provider = st.selectbox("Provider", ["sdxl_turbo", "nanobanana2", "fooocus"], index=0)
-
+            rf_provider = st.selectbox("Image Provider", ["sdxl_turbo", "nanobanana2"], index=0)
             rf_model = None
             if rf_provider == "sdxl_turbo":
                 models = list_local_models()
                 if models:
-                    rf_model = st.selectbox("SDXL Model", models)
-                else:
-                    st.info("No local SDXL models found. Place .safetensors files in the `models/` folder, or use **nanobanana2** (Gemini) provider instead.")
+                    rf_model = st.selectbox("Model", models)
+            rf_image_steps = st.slider("Quality (Steps)", 4, 50, 8)
+            rf_image_guidance = st.slider("Prompt Strength", 1.0, 15.0, 2.0)
 
-            # Image style preset
-            rf_image_style = st.selectbox(
-                "Image Style",
-                list(IMAGE_STYLE_PRESETS.keys()),
-                index=0,
-                help="photorealistic: Best for human faces | portrait: Optimized for faces | cinematic: Movie-like shots"
-            )
+        st.markdown("---")
+        generate_clicked = st.button("Generate Video", type="primary", use_container_width=True)
 
-            # Advanced image settings (collapsed by default)
-            with st.expander("Advanced Image Settings"):
-                rf_image_steps = st.slider("Inference Steps", 4, 50, 30 if rf_model else 8, help="More steps = better quality but slower")
-                rf_image_guidance = st.slider("Guidance Scale", 1.0, 15.0, 7.5 if rf_model else 2.0, help="Higher = more prompt adherence")
+    with output_col:
+        if generate_clicked and rf_topic:
+            st.session_state.rf_result = None
+            progress_bar = st.progress(0, text="Starting...")
 
-            st.subheader("Video Effects")
-            col_fx1, col_fx2 = st.columns(2)
-            with col_fx1:
-                rf_ken_burns = st.selectbox(
-                    "Motion Effect",
-                    ["zoom_in", "zoom_out", "pan_left", "pan_right", "random", "none"],
-                    index=0,
-                    help="Ken Burns zoom/pan effect on images"
+            def on_progress(step, total, msg):
+                progress_bar.progress(step / total, text=msg)
+
+            try:
+                result = rf_generate_full(
+                    topic=rf_topic,
+                    language=rf_language,
+                    sentence_count=rf_num_images,
+                    image_provider=rf_provider,
+                    sdxl_model=rf_model,
+                    progress_callback=on_progress,
+                    image_style=rf_image_style,
+                    image_steps=rf_image_steps,
+                    image_guidance=rf_image_guidance,
+                    subtitle_style=rf_subtitle_style,
+                    ken_burns_effect=rf_ken_burns,
+                    transition="none",
+                    color_filter=rf_color_filter,
+                    num_images=rf_num_images,
+                    aspect_ratio=rf_aspect_ratio,
+                    music_enabled=rf_music_enabled,
+                    music_path=rf_music_path,
+                    music_volume=rf_music_volume,
                 )
-            with col_fx2:
-                rf_transition = st.selectbox(
-                    "Transitions",
-                    ["none", "crossfade", "fade_black"],
-                    index=0,
-                    help="Transition between image clips"
-                )
-
-            col_fx3, col_fx4 = st.columns(2)
-            with col_fx3:
-                rf_color_filter = st.selectbox(
-                    "Color Filter",
-                    ["none", "warm", "cool", "vintage", "vivid"],
-                    index=0
-                )
-            with col_fx4:
-                rf_subtitle_style = st.selectbox(
-                    "Subtitle Style",
-                    list(SUBTITLE_STYLES.keys()),
-                    index=1,  # Default to bold_yellow
-                    help="Customize subtitle appearance"
-                )
-
-            generate_clicked = st.button("Generate Video", type="primary", use_container_width=True)
-
-        with col_output:
-            if generate_clicked:
-                st.session_state.rf_result = None
-                progress_bar = st.progress(0, text="Starting...")
-                status_text = st.empty()
-
-                def on_progress(step, total, msg):
-                    progress_bar.progress(step / total, text=msg)
-                    status_text.text(msg)
-
-                try:
-                    result = rf_generate_full(
-                        topic=rf_topic,
-                        language=rf_language,
-                        sentence_count=rf_sentences,
-                        image_provider=rf_provider,
-                        sdxl_model=rf_model,
-                        progress_callback=on_progress,
-                        # New customization options
-                        image_style=rf_image_style,
-                        image_steps=rf_image_steps if 'rf_image_steps' in dir() else None,
-                        image_guidance=rf_image_guidance if 'rf_image_guidance' in dir() else None,
-                        subtitle_style=rf_subtitle_style,
-                        ken_burns_effect=rf_ken_burns,
-                        transition=rf_transition,
-                        color_filter=rf_color_filter,
-                        num_images=rf_num_images,
-                    )
-                    st.session_state.rf_result = result
-                    progress_bar.progress(1.0, text="Done!")
-                    status_text.empty()
-                except Exception as e:
-                    st.error(f"Generation failed: {e}")
-                    import traceback
+                st.session_state.rf_result = result
+                progress_bar.progress(1.0, text="Complete!")
+            except Exception as e:
+                st.error(f"Generation failed: {e}")
+                import traceback
+                with st.expander("Error Details"):
                     st.code(traceback.format_exc())
 
-            result = st.session_state.rf_result
-            if result:
-                st.subheader("Generated Script")
-                st.text_area("Script", result["script"], height=120, disabled=True)
+        elif generate_clicked:
+            st.warning("Please enter a topic for your video.")
 
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.text_input("Title", result["title"], disabled=True)
-                with c2:
-                    st.text_input("Description", result["description"][:200] + "...", disabled=True)
+        # Display results
+        result = st.session_state.rf_result
+        if result:
+            # Video first (most important)
+            st.markdown("### Generated Video")
+            st.video(result["video_path"])
 
-                st.subheader("Generated Images")
-                img_cols = st.columns(len(result["images"]))
-                for i, img_path in enumerate(result["images"]):
-                    with img_cols[i]:
-                        st.image(img_path, use_container_width=True)
+            # Download button
+            with open(result["video_path"], "rb") as vf:
+                st.download_button(
+                    "Download Video",
+                    vf.read(),
+                    file_name=f"reelforge_{rf_topic.replace(' ', '_')[:20]}.mp4",
+                    mime="video/mp4",
+                    use_container_width=True,
+                )
 
-                st.subheader("Final Video")
-                st.video(result["video_path"])
+            # Scene breakdown - compact grid layout
+            with st.expander("Scene Breakdown", expanded=True):
+                scenes = result.get("scenes", [])
+                if scenes:
+                    # Create columns for scene grid (3 per row)
+                    cols_per_row = 3
+                    for row_start in range(0, len(scenes), cols_per_row):
+                        cols = st.columns(cols_per_row)
+                        for col_idx, scene_idx in enumerate(range(row_start, min(row_start + cols_per_row, len(scenes)))):
+                            scene = scenes[scene_idx]
+                            duration = scene.get("duration", 0)
+                            narration = scene.get("narration", scene.get("text", ""))
 
-                # Download button
-                with open(result["video_path"], "rb") as vf:
-                    st.download_button(
-                        "Download Video",
-                        vf.read(),
-                        file_name=f"reelforge_{rf_topic.replace(' ', '_')[:30]}.mp4",
-                        mime="video/mp4",
-                        use_container_width=True,
-                    )
+                            with cols[col_idx]:
+                                # Scene thumbnail
+                                if scene.get("image_path"):
+                                    st.image(scene["image_path"], use_container_width=True)
+                                # Scene info
+                                st.caption(f"**{scene_idx+1}.** {duration:.1f}s")
+                                st.markdown(f'"{narration[:60]}..."' if len(narration) > 60 else f'"{narration}"')
+
+            # Metadata
+            with st.expander("Video Metadata"):
+                st.text_input("Title", result["title"], disabled=True)
+                st.text_area("Description", result["description"], disabled=True, height=80)
+                if result.get("total_duration"):
+                    st.metric("Total Duration", f"{result['total_duration']:.1f}s")
 
 # ============================================================
 # SETTINGS PAGE
@@ -1404,15 +1406,42 @@ elif tool == "Settings":
     with st.expander("TTS & Speech-to-Text"):
         st.markdown("Configure text-to-speech and speech-to-text settings.")
 
-        st.markdown("**Text-to-Speech**")
-        tts_voices = ["Jasper", "Luna", "Marcus", "Elena", "Thomas", "Sofia", "Alex", "Emma"]
-        current_voice = cfg.get("tts_voice", "Jasper")
-        c_tts_voice = st.selectbox(
-            "TTS Voice",
-            tts_voices,
-            index=tts_voices.index(current_voice) if current_voice in tts_voices else 0,
-            help="Male: Jasper, Marcus, Thomas, Alex | Female: Luna, Elena, Sofia, Emma"
+        st.markdown("**Text-to-Speech Engine**")
+        tts_engines = ["piper", "kitten"]
+        current_engine = cfg.get("tts_engine", "piper")
+        c_tts_engine = st.selectbox(
+            "TTS Engine",
+            tts_engines,
+            index=tts_engines.index(current_engine) if current_engine in tts_engines else 0,
+            help="Piper: High-quality neural TTS (recommended). KittenTTS: Lightweight, faster but lower quality."
         )
+
+        # Show voices based on engine
+        if c_tts_engine == "piper":
+            piper_voices = ["Amy", "Ryan", "Lessac", "Kristin", "Bryce", "Danny", "Joe", "Kathleen"]
+            current_voice = cfg.get("tts_voice", "Amy")
+            c_tts_voice = st.selectbox(
+                "Voice",
+                piper_voices,
+                index=piper_voices.index(current_voice) if current_voice in piper_voices else 0,
+                help="High-quality neural voices. Models download automatically."
+            )
+        else:
+            kitten_voices = ["Jasper", "Luna", "Marcus", "Elena", "Thomas", "Sofia", "Alex", "Emma"]
+            current_voice = cfg.get("tts_voice", "Jasper")
+            c_tts_voice = st.selectbox(
+                "Voice",
+                kitten_voices,
+                index=kitten_voices.index(current_voice) if current_voice in kitten_voices else 0,
+                help="Male: Jasper, Marcus, Thomas, Alex | Female: Luna, Elena, Sofia, Emma"
+            )
+
+        st.markdown("**Background Music Defaults**")
+        cc_m1, cc_m2 = st.columns(2)
+        with cc_m1:
+            c_music_enabled = st.checkbox("Enable by Default", value=cfg.get("background_music_enabled", False))
+        with cc_m2:
+            c_music_volume = st.slider("Default Volume", 0.05, 0.5, cfg.get("background_music_volume", 0.15), 0.05)
 
         st.markdown("**Speech-to-Text**")
         c_stt = st.selectbox("STT Provider", ["local_whisper", "third_party_assemblyai"], index=0)
@@ -1460,7 +1489,10 @@ elif tool == "Settings":
         cfg["nanobanana2_aspect_ratio"] = c_nb2_ratio
         cfg["fooocus_api_url"] = c_fooocus_url
         cfg["fooocus_style"] = c_fooocus_style
+        cfg["tts_engine"] = c_tts_engine
         cfg["tts_voice"] = c_tts_voice
+        cfg["background_music_enabled"] = c_music_enabled
+        cfg["background_music_volume"] = c_music_volume
         cfg["stt_provider"] = c_stt
         cfg["whisper_model"] = c_whisper_m
         cfg["whisper_device"] = c_whisper_d

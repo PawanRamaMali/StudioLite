@@ -234,6 +234,18 @@ def get_tts_voice() -> str:
     with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
         return json.load(file).get("tts_voice", "Jasper")
 
+
+def get_tts_engine() -> str:
+    """
+    Gets the TTS engine from the config file.
+
+    Returns:
+        engine (str): The TTS engine ("piper" or "kitten")
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("tts_engine", "piper")
+
+
 def get_assemblyai_api_key() -> str:
     """
     Gets the AssemblyAI API key.
@@ -370,3 +382,36 @@ def get_fooocus_style() -> str:
     """
     with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
         return json.load(file).get("fooocus_style", "Fooocus V2")
+
+
+def get_background_music_enabled() -> bool:
+    """
+    Gets whether background music is enabled.
+
+    Returns:
+        enabled (bool): True if background music is enabled
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("background_music_enabled", False)
+
+
+def get_background_music_volume() -> float:
+    """
+    Gets the background music volume level.
+
+    Returns:
+        volume (float): Volume level (0.0 - 1.0)
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("background_music_volume", 0.15)
+
+
+def get_default_aspect_ratio() -> str:
+    """
+    Gets the default video aspect ratio.
+
+    Returns:
+        ratio (str): Aspect ratio ("9:16", "16:9", "1:1", "4:5")
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("default_aspect_ratio", "9:16")

@@ -1260,9 +1260,9 @@ elif tool == "ReelForge":
 # ============================================================
 elif tool == "Video Generator":
     st.title("Video Generator")
-    st.markdown("Generate real AI videos using CogVideoX diffusion models")
+    st.markdown("Generate real videos using CogVideoX or LTX-Video diffusion models")
 
-    from videogen import VideoGenerator, check_system_requirements, VideoGenConfig
+    from videogen import VideoGenerator, check_system_requirements, VideoGenConfig, get_available_engines
     from uuid import uuid4
 
     # System requirements check
@@ -1286,6 +1286,21 @@ elif tool == "Video Generator":
     input_col, output_col = st.columns([1, 1.5])
 
     with input_col:
+        # Engine selection
+        vram = vram_info["free_vram"]
+        engines = get_available_engines()
+
+        # Recommend LTX for high VRAM, CogVideoX for low VRAM
+        default_engine_idx = 1 if vram >= 12 else 0
+        vg_engine = st.radio(
+            "Video Engine",
+            ["CogVideoX", "LTX-Video (Best Quality)"],
+            index=default_engine_idx,
+            horizontal=True,
+            help="LTX-Video: Best quality, 30 FPS, requires 10GB+ VRAM. CogVideoX: Good quality, works on 8GB+"
+        )
+        engine_key = "ltx" if "LTX" in vg_engine else "cogvideox"
+
         # Mode selection
         vg_mode = st.radio(
             "Generation Mode",
@@ -1326,45 +1341,100 @@ elif tool == "Video Generator":
 
         # Settings expander
         with st.expander("Advanced Settings", expanded=False):
-            vram = vram_info["free_vram"]
+            # Engine-specific model selection
+            if engine_key == "ltx":
+                ltx_model_options = ["Base (10GB)", "Distilled - Fast (10GB)", "0.9.7 Dev (16GB)", "0.9.8 13B (24GB)"]
+                ltx_model_keys = ["base", "distilled", "0.9.7", "0.9.8"]
+                if vram >= 24:
+                    default_ltx_idx = 3
+                elif vram >= 16:
+                    default_ltx_idx = 2
+                else:
+                    default_ltx_idx = 1
 
-            # Model selection based on VRAM
-            model_options = ["2B (8GB VRAM)", "5B (16GB+ VRAM)"]
-            default_model_idx = 0 if vram < 16 else 1
-            vg_model_choice = st.selectbox(
-                "Model Size",
-                model_options,
-                index=default_model_idx,
-                help="Larger models produce better quality but need more VRAM"
-            )
+                vg_ltx_model_choice = st.selectbox(
+                    "LTX Model",
+                    ltx_model_options,
+                    index=default_ltx_idx,
+                    help="Larger models produce better quality. Distilled is fastest."
+                )
+                vg_ltx_model = ltx_model_keys[ltx_model_options.index(vg_ltx_model_choice)]
 
-            # Frame count
-            vg_num_frames = st.select_slider(
-                "Video Length",
-                options=[49, 81],
-                value=49,
-                format_func=lambda x: f"{x} frames (~{x/8:.0f}s)",
-                help="More frames = longer video but slower generation"
-            )
+                # Frame count for LTX
+                vg_num_frames = st.select_slider(
+                    "Video Length",
+                    options=[81, 121, 161],
+                    value=161,
+                    format_func=lambda x: f"{x} frames (~{x/24:.1f}s at 24fps)",
+                    help="LTX supports up to 161 frames at 24-30 FPS"
+                )
 
-            # Guidance scale
-            vg_guidance = st.slider(
-                "Prompt Strength",
-                min_value=1.0,
-                max_value=15.0,
-                value=6.0,
-                step=0.5,
-                help="Higher values follow the prompt more closely"
-            )
+                # Guidance scale - different for distilled
+                is_distilled = vg_ltx_model == "distilled"
+                vg_guidance = st.slider(
+                    "Prompt Strength",
+                    min_value=1.0,
+                    max_value=10.0,
+                    value=1.0 if is_distilled else 5.0,
+                    step=0.5,
+                    help="Distilled models work best with guidance=1.0"
+                )
 
-            # Quantization
-            vg_use_quant = st.checkbox(
-                "Use INT8 Quantization (lower VRAM)",
-                value=vram < 16,
-                help="Reduces VRAM usage with minimal quality loss"
-            )
+                # Steps - fewer for distilled
+                vg_steps = st.slider(
+                    "Inference Steps",
+                    min_value=4 if is_distilled else 20,
+                    max_value=10 if is_distilled else 50,
+                    value=8 if is_distilled else 50,
+                    help="Distilled models need only 4-10 steps"
+                )
 
-            # Seed
+                vg_model_variant = None
+                vg_use_quant = False
+
+            else:
+                # CogVideoX settings
+                model_options = ["2B (8GB VRAM)", "5B (16GB+ VRAM)"]
+                default_model_idx = 0 if vram < 16 else 1
+                vg_model_choice = st.selectbox(
+                    "CogVideoX Model",
+                    model_options,
+                    index=default_model_idx,
+                    help="Larger models produce better quality but need more VRAM"
+                )
+                vg_model_variant = "2b" if "2B" in vg_model_choice else "5b"
+
+                # Frame count for CogVideoX
+                vg_num_frames = st.select_slider(
+                    "Video Length",
+                    options=[49, 81],
+                    value=49,
+                    format_func=lambda x: f"{x} frames (~{x/8:.0f}s at 8fps)",
+                    help="More frames = longer video but slower generation"
+                )
+
+                # Guidance scale
+                vg_guidance = st.slider(
+                    "Prompt Strength",
+                    min_value=1.0,
+                    max_value=15.0,
+                    value=6.0,
+                    step=0.5,
+                    help="Higher values follow the prompt more closely"
+                )
+
+                vg_steps = 50
+
+                # Quantization
+                vg_use_quant = st.checkbox(
+                    "Use INT8 Quantization (lower VRAM)",
+                    value=vram < 16,
+                    help="Reduces VRAM usage with minimal quality loss"
+                )
+
+                vg_ltx_model = None
+
+            # Seed (common)
             vg_use_seed = st.checkbox("Use fixed seed (reproducible results)")
             vg_seed = None
             if vg_use_seed:
@@ -1390,14 +1460,30 @@ elif tool == "Video Generator":
                 progress_bar.progress(step / total, text=msg)
                 status_text.text(msg)
 
-            # Configure generator
-            config = VideoGenConfig(
-                model_variant="2b" if "2B" in vg_model_choice else "5b",
-                num_frames=vg_num_frames,
-                guidance_scale=vg_guidance,
-                quantization="int8" if vg_use_quant else "none",
-                seed=vg_seed,
-            )
+            # Configure generator based on selected engine
+            if engine_key == "ltx":
+                config = VideoGenConfig(
+                    engine="ltx",
+                    ltx_model=vg_ltx_model,
+                    num_frames=vg_num_frames,
+                    num_inference_steps=vg_steps,
+                    guidance_scale=vg_guidance,
+                    width=768 if vram >= 16 else 704,
+                    height=512,
+                    fps=24,
+                    seed=vg_seed,
+                )
+            else:
+                config = VideoGenConfig(
+                    engine="cogvideox",
+                    model_variant=vg_model_variant,
+                    num_frames=vg_num_frames,
+                    num_inference_steps=vg_steps,
+                    guidance_scale=vg_guidance,
+                    quantization="int8" if vg_use_quant else "none",
+                    fps=8,
+                    seed=vg_seed,
+                )
 
             generator = VideoGenerator(config)
 

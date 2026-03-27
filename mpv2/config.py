@@ -459,3 +459,47 @@ def get_videogen_quantization() -> str:
     """
     with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
         return json.load(file).get("videogen_quantization", "auto")
+
+
+def get_videogen_engine() -> str:
+    """
+    Gets the video generation engine.
+
+    Returns:
+        engine (str): Engine name ("cogvideox" or "ltx")
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("videogen_engine", "ltx")
+
+
+def get_videogen_ltx_model() -> str:
+    """
+    Gets the LTX-Video model variant.
+
+    Returns:
+        model (str): LTX model ("base", "distilled", "0.9.7", "0.9.8")
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("videogen_ltx_model", "distilled")
+
+
+def get_videogen_ltx_num_frames() -> int:
+    """
+    Gets the number of frames for LTX-Video generation.
+
+    Returns:
+        frames (int): Number of frames (81, 121, or 161)
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("videogen_ltx_num_frames", 161)
+
+
+def get_videogen_ltx_fps() -> int:
+    """
+    Gets the FPS for LTX-Video generation.
+
+    Returns:
+        fps (int): Frames per second (typically 24)
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("videogen_ltx_fps", 24)

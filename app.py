@@ -44,7 +44,7 @@ tool = st.sidebar.radio(
     "Select Tool",
     ["Remove Watermark", "Trim / Cut", "Add Image Overlay", "Change Speed",
      "Merge Videos", "Extract Frame", "Export Video", "Transcribe", "View & Publish",
-     "ReelForge", "Video Generator", "Settings"]
+     "ReelForge", "Video Generator", "Logs", "Settings"]
 )
 
 # Clear cache when switching tools
@@ -1260,7 +1260,7 @@ elif tool == "ReelForge":
 # ============================================================
 elif tool == "Video Generator":
     st.title("Video Generator")
-    st.markdown("Generate real videos using CogVideoX or LTX-Video diffusion models")
+    st.markdown("Generate real videos using Wan 2.1, LTX-Video, or CogVideoX diffusion models")
 
     from videogen import VideoGenerator, check_system_requirements, VideoGenConfig, get_available_engines
     from uuid import uuid4
@@ -1290,16 +1290,16 @@ elif tool == "Video Generator":
         vram = vram_info["free_vram"]
         engines = get_available_engines()
 
-        # Recommend LTX for high VRAM, CogVideoX for low VRAM
-        default_engine_idx = 1 if vram >= 12 else 0
+        # Recommend Wan for most cases, LTX for high VRAM
+        default_engine_idx = 0  # Wan is recommended for most VRAM levels
         vg_engine = st.radio(
             "Video Engine",
-            ["CogVideoX", "LTX-Video (Best Quality)"],
+            ["Wan 2.1 (Recommended)", "LTX-Video (Fast)", "CogVideoX"],
             index=default_engine_idx,
             horizontal=True,
-            help="LTX-Video: Best quality, 30 FPS, requires 10GB+ VRAM. CogVideoX: Good quality, works on 8GB+"
+            help="Wan 2.1: Best quality, works on 8GB+. LTX-Video: Fast, 30 FPS. CogVideoX: Good quality, 8GB+"
         )
-        engine_key = "ltx" if "LTX" in vg_engine else "cogvideox"
+        engine_key = "wan" if "Wan" in vg_engine else ("ltx" if "LTX" in vg_engine else "cogvideox")
 
         # Mode selection
         vg_mode = st.radio(
@@ -1309,12 +1309,38 @@ elif tool == "Video Generator":
             help="Choose how to generate your video"
         )
 
+        # Sample prompts for inspiration
+        sample_prompts = {
+            "Custom (write your own)": "",
+            "Cinematic Nature": "A majestic eagle soaring through a dramatic mountain landscape at golden hour, with snow-capped peaks in the background, volumetric clouds, cinematic camera tracking shot following the bird, ultra detailed feathers catching the warm sunlight, 4K quality",
+            "Urban Time-lapse": "Busy city intersection at night transitioning from dusk to night, car light trails forming streams of red and white, neon signs flickering on, pedestrians moving in fast motion, reflections on wet pavement after rain, dynamic timelapse style",
+            "Ocean Waves": "Crystal clear turquoise ocean waves gently rolling onto a pristine white sand beach, aerial drone shot slowly descending, palm trees swaying in the breeze, golden sunset light reflecting off the water surface, peaceful and serene atmosphere",
+            "Dancing Flames": "Mesmerizing campfire flames dancing in slow motion against a dark night sky, sparks floating upward like tiny stars, warm orange and red colors, close-up macro shot with shallow depth of field, cozy autumn forest setting",
+            "Space Journey": "Spaceship traveling through a colorful nebula in deep space, passing by giant gas planets with swirling storms, stars streaking past as the ship accelerates to warp speed, epic sci-fi cinematography, lens flares and particle effects",
+            "Underwater World": "Vibrant coral reef teeming with tropical fish of all colors, camera slowly gliding through the underwater paradise, sunbeams piercing through the crystal clear water, a sea turtle gracefully swimming past, National Geographic documentary style",
+            "Forest Magic": "Enchanted forest path covered in morning mist, golden sunlight filtering through ancient oak trees, fireflies and magical particles floating in the air, a deer walking peacefully through the scene, fantasy fairy tale atmosphere",
+            "Robot Future": "Humanoid robot in a futuristic laboratory slowly awakening, LED lights flickering on across its chrome body, camera orbiting around as it takes its first steps, holographic displays in the background, Blade Runner aesthetic",
+            "Coffee Art": "Hot espresso being poured into a ceramic cup in extreme slow motion, creating intricate latte art patterns, steam rising elegantly, macro lens capturing every droplet and swirl, warm cafe lighting, ASMR satisfying visuals",
+            "Storm Power": "Dramatic thunderstorm over open plains, lightning bolts striking the ground in the distance, dark ominous clouds rolling across the sky, wind bending tall grass, cinematic wide shot capturing nature's raw power, moody atmosphere"
+        }
+
+        selected_sample = st.selectbox(
+            "Sample Prompts (optional)",
+            list(sample_prompts.keys()),
+            index=0,
+            help="Select a sample prompt for inspiration or write your own"
+        )
+
+        # Get the prompt value
+        default_prompt = sample_prompts[selected_sample]
+
         # Prompt input
         vg_prompt = st.text_area(
             "Describe the video",
+            value=default_prompt,
             placeholder="A panda playing guitar in a bamboo forest, cinematic lighting, smooth camera movement...",
             height=120,
-            help="Describe what should happen in the video. Be specific about motion and style."
+            help="Describe what should happen in the video. Be specific about motion, camera movement, and style."
         )
 
         # Mode-specific inputs
@@ -1342,7 +1368,69 @@ elif tool == "Video Generator":
         # Settings expander
         with st.expander("Advanced Settings", expanded=False):
             # Engine-specific model selection
-            if engine_key == "ltx":
+            if engine_key == "wan":
+                # Wan 2.1/2.2 settings
+                wan_model_options = ["1.3B (8GB VRAM)", "14B (16GB VRAM)", "2.2-14B (24GB VRAM)"]
+                wan_model_keys = ["1.3b", "14b", "2.2-14b"]
+                if vram >= 24:
+                    default_wan_idx = 2
+                elif vram >= 16:
+                    default_wan_idx = 1
+                else:
+                    default_wan_idx = 0
+
+                vg_wan_model_choice = st.selectbox(
+                    "Wan Model",
+                    wan_model_options,
+                    index=default_wan_idx,
+                    help="1.3B: Fast, 8GB VRAM. 14B: Best quality, needs 16GB+. 2.2-14B: Latest version."
+                )
+                vg_wan_model = wan_model_keys[wan_model_options.index(vg_wan_model_choice)]
+
+                # Resolution for Wan
+                wan_res_options = ["480p (Fast)", "720p (Better Quality)"]
+                wan_res_keys = ["480p", "720p"]
+                default_res_idx = 1 if vram >= 16 else 0
+                vg_wan_resolution_choice = st.selectbox(
+                    "Resolution",
+                    wan_res_options,
+                    index=default_res_idx,
+                    help="720p requires more VRAM but produces sharper video"
+                )
+                vg_wan_resolution = wan_res_keys[wan_res_options.index(vg_wan_resolution_choice)]
+
+                # Frame count for Wan
+                vg_num_frames = st.select_slider(
+                    "Video Length",
+                    options=[49, 81, 121],
+                    value=81,
+                    format_func=lambda x: f"{x} frames (~{x/24:.1f}s at 24fps)",
+                    help="Wan supports up to 121 frames"
+                )
+
+                # Guidance scale
+                vg_guidance = st.slider(
+                    "Prompt Strength",
+                    min_value=1.0,
+                    max_value=10.0,
+                    value=5.0,
+                    step=0.5,
+                    help="Higher values follow the prompt more closely"
+                )
+
+                vg_steps = st.slider(
+                    "Inference Steps",
+                    min_value=20,
+                    max_value=50,
+                    value=30,
+                    help="More steps = better quality but slower"
+                )
+
+                vg_model_variant = None
+                vg_use_quant = False
+                vg_ltx_model = None
+
+            elif engine_key == "ltx":
                 ltx_model_options = ["Base (10GB)", "Distilled - Fast (10GB)", "0.9.7 Dev (16GB)", "0.9.8 13B (24GB)"]
                 ltx_model_keys = ["base", "distilled", "0.9.7", "0.9.8"]
                 if vram >= 24:
@@ -1453,15 +1541,31 @@ elif tool == "Video Generator":
             st.session_state.vg_generating = True
             st.session_state.vg_result = None
 
+            # Show what's being generated
+            engine_name = "Wan 2.1" if engine_key == "wan" else ("LTX-Video" if engine_key == "ltx" else "CogVideoX")
+            st.info(f"Generating {vg_num_frames} frames using **{engine_name}**...")
+
+            # Progress indicators
             progress_bar = st.progress(0, text="Initializing...")
             status_text = st.empty()
 
             def on_progress(step, total, msg):
-                progress_bar.progress(step / total, text=msg)
-                status_text.text(msg)
+                progress_bar.progress(min(step / total, 1.0), text=msg)
+                status_text.text(f"Step {step}/{total}: {msg}")
 
             # Configure generator based on selected engine
-            if engine_key == "ltx":
+            if engine_key == "wan":
+                config = VideoGenConfig(
+                    engine="wan",
+                    wan_model=vg_wan_model,
+                    wan_resolution=vg_wan_resolution,
+                    num_frames=vg_num_frames,
+                    num_inference_steps=vg_steps,
+                    guidance_scale=vg_guidance,
+                    fps=24,
+                    seed=vg_seed,
+                )
+            elif engine_key == "ltx":
                 config = VideoGenConfig(
                     engine="ltx",
                     ltx_model=vg_ltx_model,
@@ -1486,17 +1590,18 @@ elif tool == "Video Generator":
                 )
 
             generator = VideoGenerator(config)
+            result = None
 
             try:
                 if vg_mode == "Text to Video":
-                    on_progress(0, 5, "Starting text-to-video generation...")
+                    on_progress(0, 5, "Loading text-to-video pipeline...")
                     result = generator.generate_text2video(
                         vg_prompt,
                         progress_callback=on_progress
                     )
 
                 elif vg_mode == "Image to Video" and vg_image_file:
-                    on_progress(0, 5, "Processing image...")
+                    on_progress(0, 5, "Processing uploaded image...")
                     # Save uploaded image
                     img_dir = os.path.join(os.path.dirname(__file__), ".mp")
                     os.makedirs(img_dir, exist_ok=True)
@@ -1511,7 +1616,7 @@ elif tool == "Video Generator":
                     )
 
                 elif vg_mode == "Extend Video" and vg_video_file:
-                    on_progress(0, 5, "Processing video...")
+                    on_progress(0, 5, "Processing uploaded video...")
                     # Save uploaded video
                     vid_dir = os.path.join(os.path.dirname(__file__), ".mp")
                     os.makedirs(vid_dir, exist_ok=True)
@@ -1526,17 +1631,19 @@ elif tool == "Video Generator":
                     )
                 else:
                     st.warning("Please provide all required inputs")
-                    result = None
 
                 if result:
                     st.session_state.vg_result = result
                     progress_bar.progress(1.0, text="Complete!")
+                    status_text.empty()
                     st.success("Video generated successfully!")
+                    st.balloons()
 
             except Exception as e:
                 st.error(f"Generation failed: {e}")
                 import traceback
-                st.code(traceback.format_exc())
+                with st.expander("Error Details"):
+                    st.code(traceback.format_exc())
 
             finally:
                 generator.unload()
@@ -1563,14 +1670,103 @@ elif tool == "Video Generator":
 
             # Show details
             with st.expander("Generation Details"):
-                st.json({
-                    "mode": vg_mode,
-                    "model": vg_model_choice,
-                    "frames": vg_num_frames,
-                    "guidance_scale": vg_guidance,
-                    "quantization": "INT8" if vg_use_quant else "None",
-                    "seed": vg_seed,
-                })
+                if engine_key == "wan":
+                    st.json({
+                        "engine": "Wan 2.1/2.2",
+                        "mode": vg_mode,
+                        "model": vg_wan_model,
+                        "resolution": vg_wan_resolution,
+                        "frames": vg_num_frames,
+                        "guidance_scale": vg_guidance,
+                        "seed": vg_seed,
+                    })
+                elif engine_key == "ltx":
+                    st.json({
+                        "engine": "LTX-Video",
+                        "mode": vg_mode,
+                        "model": vg_ltx_model,
+                        "frames": vg_num_frames,
+                        "guidance_scale": vg_guidance,
+                        "seed": vg_seed,
+                    })
+                else:
+                    st.json({
+                        "engine": "CogVideoX",
+                        "mode": vg_mode,
+                        "model": vg_model_variant,
+                        "frames": vg_num_frames,
+                        "guidance_scale": vg_guidance,
+                        "quantization": "INT8" if vg_use_quant else "None",
+                        "seed": vg_seed,
+                    })
+
+
+# ============================================================
+# LOGS PAGE
+# ============================================================
+elif tool == "Logs":
+    st.title("Generation Logs")
+    st.caption("View logs from Video Generator and other background processes")
+
+    from videogen import get_generation_logs, get_recent_logs, clear_logs, videogen_logger
+
+    # Controls row
+    col1, col2, col3 = st.columns([1, 1, 2])
+
+    with col1:
+        auto_refresh = st.checkbox("Auto-refresh", value=True, help="Automatically refresh logs every 2 seconds")
+
+    with col2:
+        if st.button("Clear Logs", type="secondary"):
+            clear_logs()
+            st.rerun()
+
+    with col3:
+        log_lines = st.select_slider(
+            "Lines to show",
+            options=[50, 100, 200, 500],
+            value=200
+        )
+
+    # Auto-refresh mechanism
+    if auto_refresh:
+        import time
+        st.empty()
+        time.sleep(0.1)  # Small delay to ensure state is fresh
+
+    # Get logs (already formatted as strings)
+    log_entries = get_recent_logs(limit=log_lines)
+
+    if log_entries:
+        # Display in a code block with scrolling
+        st.code("\n".join(log_entries), language="log")
+
+        # Stats
+        st.caption(f"Showing {len(log_entries)} log entries")
+    else:
+        st.info("No logs yet. Generate a video to see logs here.")
+
+    # Log file info
+    with st.expander("Log File Location"):
+        log_file = videogen_logger.log_file
+        st.text(f"Log file: {log_file}")
+        if os.path.exists(log_file):
+            file_size = os.path.getsize(log_file)
+            st.text(f"File size: {file_size / 1024:.1f} KB")
+
+    # Auto-refresh trigger
+    if auto_refresh:
+        import streamlit.components.v1 as components
+        components.html(
+            """
+            <script>
+                setTimeout(function() {
+                    window.parent.document.querySelector('[data-testid="stApp"]').click();
+                }, 2000);
+            </script>
+            """,
+            height=0
+        )
 
 
 # ============================================================

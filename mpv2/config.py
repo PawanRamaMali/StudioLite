@@ -503,3 +503,25 @@ def get_videogen_ltx_fps() -> int:
     """
     with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
         return json.load(file).get("videogen_ltx_fps", 24)
+
+
+def get_videogen_wan_model() -> str:
+    """
+    Gets the Wan model variant.
+
+    Returns:
+        model (str): Wan model ("1.3b", "14b", "2.2-14b")
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("videogen_wan_model", "1.3b")
+
+
+def get_videogen_wan_resolution() -> str:
+    """
+    Gets the Wan video resolution.
+
+    Returns:
+        resolution (str): Resolution ("480p" or "720p")
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("videogen_wan_resolution", "480p")

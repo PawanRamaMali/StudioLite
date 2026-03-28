@@ -1,5 +1,5 @@
 """
-VideoGenerator - Real video generation using CogVideoX and LTX-Video.
+VideoGenerator - Real video generation using CogVideoX, LTX-Video, and Wan 2.1/2.2.
 
 Supports:
 - Text-to-Video: Generate video from text prompt
@@ -7,12 +7,23 @@ Supports:
 - Video-to-Video: Extend or modify existing video
 
 Engines:
+- Wan 2.1/2.2: Best quality, MoE architecture, 8-16GB VRAM (RECOMMENDED)
+- LTX-Video: Fast generation, real-time 30 FPS, up to 161 frames
 - CogVideoX: Good quality, 2B/5B models, 6-10s clips
-- LTX-Video: Best quality, real-time generation, 30 FPS, up to 161 frames
 """
 import os
 import gc
 import torch
+import logging
+from datetime import datetime
+from collections import deque
+from threading import Lock
+
+# Use HDD for HuggingFace cache if available (for large model storage)
+HDD_HF_CACHE = "/mnt/hdd/huggingface"
+if os.path.exists("/mnt/hdd") and os.access("/mnt/hdd", os.W_OK):
+    os.environ.setdefault("HF_HOME", HDD_HF_CACHE)
+    os.makedirs(HDD_HF_CACHE, exist_ok=True)
 from dataclasses import dataclass
 from uuid import uuid4
 from typing import Optional, Callable, Tuple, Dict, Any
@@ -20,12 +31,99 @@ from typing import Optional, Callable, Tuple, Dict, Any
 # Root directory
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Logging configuration
+LOG_FILE = os.path.join(ROOT_DIR, ".mp", "videogen.log")
+MAX_LOG_ENTRIES = 500  # Keep last 500 log entries in memory
+
+
+class VideoGenLogger:
+    """Thread-safe logger for video generation with in-memory buffer."""
+
+    _instance = None
+    _lock = Lock()
+
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+        self._logs = deque(maxlen=MAX_LOG_ENTRIES)
+        self._log_lock = Lock()
+        self._log_file = LOG_FILE
+
+        # Ensure log directory exists
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+    @property
+    def log_file(self) -> str:
+        """Get the log file path."""
+        return self._log_file
+
+    def log(self, level: str, message: str) -> None:
+        """Add a log entry."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry = f"[{timestamp}] [{level.upper()}] {message}"
+
+        with self._log_lock:
+            self._logs.append(entry)
+            # Also write to file
+            try:
+                with open(LOG_FILE, "a") as f:
+                    f.write(entry + "\n")
+            except Exception:
+                pass  # Don't fail on log write errors
+
+    def info(self, message: str) -> None:
+        self.log("INFO", message)
+
+    def warning(self, message: str) -> None:
+        self.log("WARNING", message)
+
+    def error(self, message: str) -> None:
+        self.log("ERROR", message)
+
+    def debug(self, message: str) -> None:
+        self.log("DEBUG", message)
+
+    def get_logs(self, limit: int = 100) -> list:
+        """Get recent log entries."""
+        with self._log_lock:
+            logs = list(self._logs)
+            return logs[-limit:] if limit else logs
+
+    def clear(self) -> None:
+        """Clear in-memory logs."""
+        with self._log_lock:
+            self._logs.clear()
+
+    def get_log_file_contents(self, lines: int = 200) -> str:
+        """Read last N lines from log file."""
+        try:
+            if not os.path.exists(LOG_FILE):
+                return ""
+            with open(LOG_FILE, "r") as f:
+                all_lines = f.readlines()
+                return "".join(all_lines[-lines:])
+        except Exception as e:
+            return f"Error reading log file: {e}"
+
+
+# Global logger instance
+videogen_logger = VideoGenLogger()
+
 
 @dataclass
 class VideoGenConfig:
     """Configuration for video generation."""
     # Engine selection
-    engine: str = "cogvideox"           # "cogvideox" or "ltx"
+    engine: str = "wan"                 # "wan", "ltx", or "cogvideox"
 
     # CogVideoX settings
     model_variant: str = "2b"           # "2b" or "5b" for CogVideoX
@@ -33,17 +131,21 @@ class VideoGenConfig:
     # LTX-Video settings
     ltx_model: str = "base"             # "base", "distilled", "0.9.7", "0.9.8"
 
+    # Wan 2.1/2.2 settings
+    wan_model: str = "1.3b"             # "1.3b", "14b", "2.2-14b", "2.2-1.3b"
+    wan_resolution: str = "480p"        # "480p" or "720p"
+
     # Common settings
-    num_frames: int = 49                # CogVideoX: 49/81, LTX: 161 recommended
+    num_frames: int = 49                # CogVideoX: 49/81, LTX: 161, Wan: 81
     num_inference_steps: int = 50       # LTX distilled: 4-10, others: 50
-    guidance_scale: float = 6.0         # LTX distilled: 1.0, CogVideoX: 6.0
-    width: int = 720                    # LTX: 704, CogVideoX: 720
-    height: int = 480                   # LTX: 512, CogVideoX: 480
-    fps: int = 24                       # LTX: 24-30, CogVideoX: 8
+    guidance_scale: float = 6.0         # LTX distilled: 1.0, CogVideoX: 6.0, Wan: 5.0
+    width: int = 720                    # LTX: 704, CogVideoX: 720, Wan: 832/1280
+    height: int = 480                   # LTX: 512, CogVideoX: 480, Wan: 480/720
+    fps: int = 24                       # LTX: 24-30, CogVideoX: 8, Wan: 16
     enable_cpu_offload: bool = True
     quantization: str = "auto"          # "none", "int8", "auto"
     use_vae_slicing: bool = True
-    use_vae_tiling: bool = True         # For LTX memory optimization
+    use_vae_tiling: bool = True         # For LTX/Wan memory optimization
     seed: Optional[int] = None
 
 
@@ -63,6 +165,133 @@ class VideoGenerator:
         self._current_mode = None
         self._loaded_model_id = None
         self._current_engine = None
+
+    def estimate_vram_required(self) -> float:
+        """
+        Estimate VRAM required for current configuration in GB.
+
+        Based on real-world testing:
+        - Wan 1.3B with 121 frames @ 480p uses ~42-45GB VRAM
+        - Frame count significantly impacts memory (latent space growth)
+        - Resolution scales ~2.25x from 480p to 720p
+
+        Returns:
+            Estimated VRAM needed in GB
+        """
+        # Base VRAM for model weights + inference overhead
+        base_vram = {
+            "wan": {
+                "1.3b": 12.0,   # Actual: ~12GB base for model
+                "14b": 28.0,    # ~28GB for 14B model
+                "2.2-14b": 30.0,
+                "2.2-1.3b": 12.0,
+            },
+            "ltx": {
+                "base": 12.0,
+                "distilled": 10.0,
+                "0.9.7": 12.0,
+                "0.9.8": 18.0,
+            },
+            "cogvideox": {
+                "2b": 10.0,
+                "5b": 18.0,
+            },
+        }
+
+        engine = self.config.engine
+        if engine == "wan":
+            model_key = self.config.wan_model.lower()
+            model_vram = base_vram["wan"].get(model_key, 12.0)
+        elif engine == "ltx":
+            model_key = self.config.ltx_model.lower()
+            model_vram = base_vram["ltx"].get(model_key, 12.0)
+        else:
+            model_key = self.config.model_variant.lower()
+            model_vram = base_vram["cogvideox"].get(model_key, 12.0)
+
+        # Frame count scaling - critical for Wan!
+        # Based on testing: 121 frames needs ~42GB vs 49 frames ~18GB
+        # Roughly: 0.25GB per frame beyond 49 frames
+        num_frames = self.config.num_frames
+        if num_frames <= 49:
+            frame_overhead = 0
+        elif num_frames <= 81:
+            frame_overhead = (num_frames - 49) * 0.2  # ~6GB for 81 frames
+        else:
+            frame_overhead = 6.0 + (num_frames - 81) * 0.35  # ~20GB more for 121 frames
+
+        # Resolution scaling (480p baseline)
+        if engine == "wan" and self.config.wan_resolution == "720p":
+            resolution_factor = 2.25  # 720p uses ~2.25x more VRAM
+        else:
+            resolution_factor = 1.0
+
+        # VAE decoding spike (temporary but can cause OOM)
+        vae_overhead = 4.0
+
+        # Total with 10% safety margin
+        total = (model_vram + frame_overhead * resolution_factor + vae_overhead) * 1.1
+
+        return round(total, 1)
+
+    def check_memory_for_generation(self) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Check if there's enough VRAM for generation with current config.
+
+        Returns:
+            Tuple of (can_proceed, message, info_dict)
+        """
+        if not torch.cuda.is_available():
+            return False, "CUDA GPU required", {}
+
+        try:
+            # Get current memory state
+            props = torch.cuda.get_device_properties(0)
+            total_vram = props.total_memory / (1024**3)
+            allocated = torch.cuda.memory_allocated(0) / (1024**3)
+            reserved = torch.cuda.memory_reserved(0) / (1024**3)
+            free_vram = total_vram - reserved  # Use reserved as it's what's actually held
+
+            # Estimate required VRAM
+            required_vram = self.estimate_vram_required()
+
+            info = {
+                "gpu_name": props.name,
+                "total_vram": round(total_vram, 2),
+                "allocated_vram": round(allocated, 2),
+                "reserved_vram": round(reserved, 2),
+                "free_vram": round(free_vram, 2),
+                "required_vram": required_vram,
+                "engine": self.config.engine,
+                "model": self.config.wan_model if self.config.engine == "wan" else
+                         self.config.ltx_model if self.config.engine == "ltx" else
+                         self.config.model_variant,
+                "num_frames": self.config.num_frames,
+            }
+
+            if free_vram < required_vram:
+                # Build helpful suggestion
+                suggestions = []
+                if self.config.num_frames > 49:
+                    suggestions.append(f"reduce frames from {self.config.num_frames} to 49")
+                if self.config.engine == "wan" and self.config.wan_resolution == "720p":
+                    suggestions.append("use 480p instead of 720p")
+                if self.config.engine == "wan" and "14b" in self.config.wan_model:
+                    suggestions.append("use 1.3b model instead of 14b")
+                if not suggestions:
+                    suggestions.append("close other GPU applications")
+
+                suggestion_text = " or ".join(suggestions)
+
+                return False, (
+                    f"Insufficient VRAM: {free_vram:.1f}GB free, ~{required_vram:.1f}GB required. "
+                    f"Try: {suggestion_text}."
+                ), info
+
+            return True, "OK", info
+
+        except Exception as e:
+            return False, f"Memory check failed: {e}", {}
 
     def check_requirements(self) -> Tuple[bool, str, Dict[str, Any]]:
         """
@@ -109,42 +338,41 @@ class VideoGenerator:
         vram = info["free_vram"]
 
         if vram >= 24:
-            # High-end GPU: Use LTX-Video for best quality
-            self.config.engine = "ltx"
-            self.config.ltx_model = "0.9.7"
-            self.config.num_frames = 161
+            # High-end GPU: Use Wan 2.2 14B for best quality
+            self.config.engine = "wan"
+            self.config.wan_model = "2.2-14b"
+            self.config.wan_resolution = "720p"
+            self.config.num_frames = 81
             self.config.enable_cpu_offload = False
-            self.config.width = 768
-            self.config.height = 512
-            self.config.fps = 24
+            self.config.fps = 16
             self.config.guidance_scale = 5.0
         elif vram >= 16:
-            # Mid-range: LTX distilled for speed
-            self.config.engine = "ltx"
-            self.config.ltx_model = "distilled"
-            self.config.num_frames = 161
-            self.config.enable_cpu_offload = True
-            self.config.width = 704
-            self.config.height = 512
-            self.config.fps = 24
-            self.config.guidance_scale = 1.0
-            self.config.num_inference_steps = 8
-        elif vram >= 12:
-            # Lower mid-range: CogVideoX 5B or LTX base
-            self.config.engine = "ltx"
-            self.config.ltx_model = "base"
+            # Mid-range: Wan 2.1 14B with CPU offload
+            self.config.engine = "wan"
+            self.config.wan_model = "14b"
+            self.config.wan_resolution = "480p"
             self.config.num_frames = 81
             self.config.enable_cpu_offload = True
-            self.config.width = 704
-            self.config.height = 480
-            self.config.fps = 24
-        elif vram >= 8:
-            # Entry-level: CogVideoX 2B
-            self.config.engine = "cogvideox"
-            self.config.model_variant = "2b"
-            self.config.quantization = "int8"
+            self.config.fps = 16
+            self.config.guidance_scale = 5.0
+        elif vram >= 12:
+            # Lower mid-range: Wan 2.1 1.3B for best quality/VRAM ratio
+            self.config.engine = "wan"
+            self.config.wan_model = "1.3b"
+            self.config.wan_resolution = "480p"
+            self.config.num_frames = 81
             self.config.enable_cpu_offload = True
+            self.config.fps = 16
+            self.config.guidance_scale = 5.0
+        elif vram >= 8:
+            # Entry-level: Wan 2.1 1.3B (best for 8GB)
+            self.config.engine = "wan"
+            self.config.wan_model = "1.3b"
+            self.config.wan_resolution = "480p"
             self.config.num_frames = 49
+            self.config.enable_cpu_offload = True
+            self.config.fps = 16
+            self.config.guidance_scale = 5.0
         else:
             # Minimal: CogVideoX 2B with aggressive optimization
             self.config.engine = "cogvideox"
@@ -174,6 +402,137 @@ class VideoGenerator:
             return f"THUDM/CogVideoX-{self.config.model_variant}"
         else:
             raise ValueError(f"Unknown mode: {mode}")
+
+    def _get_wan_model_id(self, mode: str) -> str:
+        """Get Wan 2.1/2.2 HuggingFace model ID."""
+        model = self.config.wan_model.lower()
+        resolution = self.config.wan_resolution.lower()
+
+        if mode == "text2video":
+            if model == "2.2-14b" or model == "14b-2.2":
+                return "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+            elif model == "14b":
+                return "Wan-AI/Wan2.1-T2V-14B-Diffusers"
+            elif model == "2.2-1.3b" or model == "1.3b-2.2":
+                # Wan 2.2 doesn't have 1.3B, use 2.1
+                return "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+            else:  # default to 1.3b (Wan 2.1)
+                return "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+        elif mode == "image2video":
+            # Wan I2V models available:
+            # - Wan2.2-I2V-A14B-Diffusers (best quality, 14B)
+            # - Wan2.1-I2V-14B-480P-Diffusers
+            # - Wan2.1-I2V-14B-720P-Diffusers
+            if "2.2" in model:
+                return "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+            elif resolution == "720p":
+                return "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
+            else:  # 480p
+                return "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers"
+        else:
+            raise ValueError(f"Wan does not support mode: {mode}")
+
+    def _load_wan_pipeline(self, mode: str, progress_callback: Callable = None) -> None:
+        """Load Wan 2.1/2.2 pipeline."""
+        from diffusers import WanPipeline, WanImageToVideoPipeline, AutoencoderKLWan
+        import os
+
+        model_id = self._get_wan_model_id(mode)
+
+        # Skip if already loaded
+        if (self._pipeline is not None and
+            self._current_mode == mode and
+            self._loaded_model_id == model_id and
+            self._current_engine == "wan"):
+            return
+
+        # Unload existing pipeline
+        if self._pipeline is not None:
+            if progress_callback:
+                progress_callback(0, 100, "Unloading previous model...")
+            self.unload()
+
+        # Set longer timeout for large model downloads
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")
+
+        if progress_callback:
+            progress_callback(10, 100, f"Downloading Wan VAE (~1GB)...")
+
+        # Wan requires VAE to be loaded separately in float32 for precision
+        # Retry logic for network issues
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                vae = AutoencoderKLWan.from_pretrained(
+                    model_id,
+                    subfolder="vae",
+                    torch_dtype=torch.float32,
+                )
+                break
+            except OSError as e:
+                if "Connection timed out" in str(e) or "timed out" in str(e).lower():
+                    if attempt < max_retries - 1:
+                        if progress_callback:
+                            progress_callback(10, 100, f"Network timeout, retrying ({attempt + 2}/{max_retries})...")
+                        continue
+                    raise RuntimeError(
+                        f"Download timed out after {max_retries} attempts. "
+                        "Try again later or check your network connection. "
+                        "You can also pre-download with: "
+                        f"huggingface-cli download {model_id}"
+                    ) from e
+                raise
+
+        if progress_callback:
+            progress_callback(40, 100, f"Downloading Wan pipeline (~7GB)...")
+
+        # Select pipeline class
+        if mode == "image2video":
+            PipelineClass = WanImageToVideoPipeline
+        else:
+            PipelineClass = WanPipeline
+
+        for attempt in range(max_retries):
+            try:
+                self._pipeline = PipelineClass.from_pretrained(
+                    model_id,
+                    vae=vae,
+                    torch_dtype=torch.bfloat16,
+                )
+                break
+            except OSError as e:
+                if "Connection timed out" in str(e) or "timed out" in str(e).lower():
+                    if attempt < max_retries - 1:
+                        if progress_callback:
+                            progress_callback(40, 100, f"Network timeout, retrying ({attempt + 2}/{max_retries})...")
+                        continue
+                    raise RuntimeError(
+                        f"Download timed out after {max_retries} attempts. "
+                        "Try again later or check your network connection."
+                    ) from e
+                raise
+
+        if progress_callback:
+            progress_callback(70, 100, "Configuring memory optimization...")
+
+        # Apply memory optimizations
+        if self.config.enable_cpu_offload:
+            self._pipeline.enable_model_cpu_offload()
+        else:
+            self._pipeline.to("cuda")
+
+        if self.config.use_vae_tiling:
+            self._pipeline.vae.enable_tiling()
+
+        if self.config.use_vae_slicing:
+            self._pipeline.vae.enable_slicing()
+
+        self._current_mode = mode
+        self._loaded_model_id = model_id
+        self._current_engine = "wan"
+
+        if progress_callback:
+            progress_callback(100, 100, "Wan model loaded!")
 
     def _load_ltx_pipeline(self, mode: str, progress_callback: Callable = None) -> None:
         """Load LTX-Video pipeline."""
@@ -308,7 +667,9 @@ class VideoGenerator:
             mode: "text2video", "image2video", or "video2video"
             progress_callback: Optional callback for progress updates
         """
-        if self.config.engine == "ltx":
+        if self.config.engine == "wan":
+            self._load_wan_pipeline(mode, progress_callback)
+        elif self.config.engine == "ltx":
             self._load_ltx_pipeline(mode, progress_callback)
         else:
             self._load_cogvideox_pipeline(mode, progress_callback)
@@ -321,14 +682,16 @@ class VideoGenerator:
     ) -> str:
         """Generate video using LTX-Video."""
         from diffusers.utils import export_to_video
+        import time
 
         if progress_callback:
-            progress_callback(0, 5, "Loading LTX-Video model...")
+            progress_callback(0, 100, "Loading LTX-Video model...")
 
-        self._load_ltx_pipeline("text2video", progress_callback)
+        # Load pipeline without passing progress_callback to avoid scale mismatch
+        self._load_ltx_pipeline("text2video", None)
 
         if progress_callback:
-            progress_callback(1, 5, "Generating video frames (this may take a while)...")
+            progress_callback(10, 100, "Model loaded. Starting inference...")
 
         generator = None
         if self.config.seed is not None:
@@ -336,6 +699,22 @@ class VideoGenerator:
 
         # LTX-specific parameters
         is_distilled = "distilled" in self.config.ltx_model.lower()
+
+        # Create step callback for progress reporting
+        total_steps = self.config.num_inference_steps
+        start_time = time.time()
+
+        def step_callback(pipe, step_index, timestep, callback_kwargs):
+            if progress_callback:
+                # Map inference steps to 10-90% of progress bar
+                step_progress = 10 + int((step_index / total_steps) * 80)
+                elapsed = time.time() - start_time
+                eta = (elapsed / max(step_index, 1)) * (total_steps - step_index)
+                progress_callback(
+                    step_progress, 100,
+                    f"Inference step {step_index + 1}/{total_steps} (ETA: {int(eta)}s)"
+                )
+            return callback_kwargs
 
         output = self._pipeline(
             prompt=prompt,
@@ -348,10 +727,11 @@ class VideoGenerator:
             decode_timestep=0.03,
             decode_noise_scale=0.025,
             generator=generator,
+            callback_on_step_end=step_callback,
         )
 
         if progress_callback:
-            progress_callback(4, 5, "Encoding video...")
+            progress_callback(92, 100, "Encoding video to MP4...")
 
         output_dir = os.path.join(ROOT_DIR, ".mp")
         os.makedirs(output_dir, exist_ok=True)
@@ -360,7 +740,7 @@ class VideoGenerator:
         export_to_video(output.frames[0], output_path, fps=self.config.fps)
 
         if progress_callback:
-            progress_callback(5, 5, "Complete!")
+            progress_callback(100, 100, "Complete!")
 
         return output_path
 
@@ -373,26 +753,44 @@ class VideoGenerator:
         """Generate video from image using LTX-Video."""
         from PIL import Image
         from diffusers.utils import export_to_video
+        import time
 
         if progress_callback:
-            progress_callback(0, 5, "Loading image...")
+            progress_callback(0, 100, "Loading image...")
 
         image = Image.open(image_path).convert("RGB")
         image = image.resize((self.config.width, self.config.height))
 
         if progress_callback:
-            progress_callback(1, 5, "Loading LTX-Video model...")
+            progress_callback(5, 100, "Loading LTX-Video model...")
 
-        self._load_ltx_pipeline("image2video", progress_callback)
+        # Load pipeline without passing progress_callback to avoid scale mismatch
+        self._load_ltx_pipeline("image2video", None)
 
         if progress_callback:
-            progress_callback(2, 5, "Generating video frames...")
+            progress_callback(10, 100, "Model loaded. Starting inference...")
 
         generator = None
         if self.config.seed is not None:
             generator = torch.Generator(device="cuda").manual_seed(self.config.seed)
 
         is_distilled = "distilled" in self.config.ltx_model.lower()
+
+        # Create step callback for progress reporting
+        total_steps = self.config.num_inference_steps
+        start_time = time.time()
+
+        def step_callback(pipe, step_index, timestep, callback_kwargs):
+            if progress_callback:
+                # Map inference steps to 10-90% of progress bar
+                step_progress = 10 + int((step_index / total_steps) * 80)
+                elapsed = time.time() - start_time
+                eta = (elapsed / max(step_index, 1)) * (total_steps - step_index)
+                progress_callback(
+                    step_progress, 100,
+                    f"Inference step {step_index + 1}/{total_steps} (ETA: {int(eta)}s)"
+                )
+            return callback_kwargs
 
         output = self._pipeline(
             image=image,
@@ -406,10 +804,11 @@ class VideoGenerator:
             decode_timestep=0.03,
             decode_noise_scale=0.025,
             generator=generator,
+            callback_on_step_end=step_callback,
         )
 
         if progress_callback:
-            progress_callback(4, 5, "Encoding video...")
+            progress_callback(92, 100, "Encoding video to MP4...")
 
         output_dir = os.path.join(ROOT_DIR, ".mp")
         os.makedirs(output_dir, exist_ok=True)
@@ -418,7 +817,157 @@ class VideoGenerator:
         export_to_video(output.frames[0], output_path, fps=self.config.fps)
 
         if progress_callback:
-            progress_callback(5, 5, "Complete!")
+            progress_callback(100, 100, "Complete!")
+
+        return output_path
+
+    def _generate_wan_text2video(
+        self,
+        prompt: str,
+        negative_prompt: str = None,
+        progress_callback: Callable = None,
+    ) -> str:
+        """Generate video using Wan 2.1/2.2."""
+        from diffusers.utils import export_to_video
+        from diffusers.callbacks import PipelineCallback
+        import time
+
+        if progress_callback:
+            progress_callback(0, 100, "Loading Wan model...")
+
+        # Load pipeline without passing progress_callback to avoid scale mismatch
+        self._load_wan_pipeline("text2video", None)
+
+        if progress_callback:
+            progress_callback(10, 100, "Model loaded. Starting inference...")
+
+        generator = None
+        if self.config.seed is not None:
+            generator = torch.Generator(device="cuda").manual_seed(self.config.seed)
+
+        # Wan-specific resolution settings
+        if self.config.wan_resolution == "720p":
+            width, height = 1280, 720
+        else:  # 480p
+            width, height = 832, 480
+
+        # Create step callback for progress reporting
+        total_steps = self.config.num_inference_steps
+        start_time = time.time()
+
+        def step_callback(pipe, step_index, timestep, callback_kwargs):
+            if progress_callback:
+                # Map inference steps to 10-90% of progress bar
+                step_progress = 10 + int((step_index / total_steps) * 80)
+                elapsed = time.time() - start_time
+                eta = (elapsed / max(step_index, 1)) * (total_steps - step_index)
+                progress_callback(
+                    step_progress, 100,
+                    f"Inference step {step_index + 1}/{total_steps} (ETA: {int(eta)}s)"
+                )
+            return callback_kwargs
+
+        output = self._pipeline(
+            prompt=prompt,
+            negative_prompt=negative_prompt or "low quality, blurry, distorted, disfigured",
+            width=width,
+            height=height,
+            num_frames=self.config.num_frames,
+            num_inference_steps=self.config.num_inference_steps,
+            guidance_scale=self.config.guidance_scale,
+            generator=generator,
+            callback_on_step_end=step_callback,
+        )
+
+        if progress_callback:
+            progress_callback(92, 100, "Encoding video to MP4...")
+
+        output_dir = os.path.join(ROOT_DIR, ".mp")
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"wan_video_{uuid4()}.mp4")
+
+        export_to_video(output.frames[0], output_path, fps=self.config.fps)
+
+        if progress_callback:
+            progress_callback(100, 100, "Complete!")
+
+        return output_path
+
+    def _generate_wan_image2video(
+        self,
+        image_path: str,
+        prompt: str,
+        progress_callback: Callable = None,
+    ) -> str:
+        """Generate video from image using Wan 2.1/2.2."""
+        from PIL import Image
+        from diffusers.utils import export_to_video
+        import time
+
+        if progress_callback:
+            progress_callback(0, 100, "Loading image...")
+
+        # Wan-specific resolution settings
+        if self.config.wan_resolution == "720p":
+            width, height = 1280, 720
+        else:  # 480p
+            width, height = 832, 480
+
+        image = Image.open(image_path).convert("RGB")
+        image = image.resize((width, height))
+
+        if progress_callback:
+            progress_callback(5, 100, "Loading Wan I2V model...")
+
+        # Load pipeline without passing progress_callback to avoid scale mismatch
+        self._load_wan_pipeline("image2video", None)
+
+        if progress_callback:
+            progress_callback(10, 100, "Model loaded. Starting inference...")
+
+        generator = None
+        if self.config.seed is not None:
+            generator = torch.Generator(device="cuda").manual_seed(self.config.seed)
+
+        # Create step callback for progress reporting
+        total_steps = self.config.num_inference_steps
+        start_time = time.time()
+
+        def step_callback(pipe, step_index, timestep, callback_kwargs):
+            if progress_callback:
+                step_progress = 10 + int((step_index / total_steps) * 80)
+                elapsed = time.time() - start_time
+                eta = (elapsed / max(step_index, 1)) * (total_steps - step_index)
+                progress_callback(
+                    step_progress, 100,
+                    f"Inference step {step_index + 1}/{total_steps} (ETA: {int(eta)}s)"
+                )
+            return callback_kwargs
+
+        output = self._pipeline(
+            image=image,
+            prompt=prompt,
+            negative_prompt="low quality, blurry, distorted, disfigured",
+            width=width,
+            height=height,
+            num_frames=self.config.num_frames,
+            num_inference_steps=self.config.num_inference_steps,
+            guidance_scale=self.config.guidance_scale,
+            generator=generator,
+            callback_on_step_end=step_callback,
+        )
+
+        if progress_callback:
+            progress_callback(92, 100, "Encoding video to MP4...")
+
+        output_dir = os.path.join(ROOT_DIR, ".mp")
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"wan_video_{uuid4()}.mp4")
+
+        export_to_video(output.frames[0], output_path, fps=self.config.fps)
+
+        if progress_callback:
+            progress_callback(100, 100, "Complete!")
 
         return output_path
 
@@ -438,23 +987,58 @@ class VideoGenerator:
 
         Returns:
             Path to generated video file
+
+        Raises:
+            RuntimeError: If insufficient VRAM available
         """
-        if self.config.engine == "ltx":
+        # Pre-generation memory check
+        can_proceed, msg, info = self.check_memory_for_generation()
+        if not can_proceed:
+            videogen_logger.error(f"Memory check failed: {msg}")
+            raise RuntimeError(msg)
+
+        videogen_logger.info(f"Starting T2V generation: engine={self.config.engine}, frames={self.config.num_frames}")
+        videogen_logger.info(f"Prompt: {prompt[:100]}...")
+        videogen_logger.info(f"VRAM info: {info.get('free_vram', 'N/A')}GB free / {info.get('total_vram', 'N/A')}GB total")
+
+        if self.config.engine == "wan":
+            return self._generate_wan_text2video(prompt, negative_prompt, progress_callback)
+        elif self.config.engine == "ltx":
             return self._generate_ltx_text2video(prompt, negative_prompt, progress_callback)
 
         # CogVideoX text2video
+        import time
+        from diffusers.utils import export_to_video
+
         if progress_callback:
-            progress_callback(0, 5, "Loading CogVideoX model...")
+            progress_callback(0, 100, "Loading CogVideoX model...")
 
         if self._current_mode != "text2video" or self._current_engine != "cogvideox":
-            self.load_pipeline("text2video", progress_callback)
+            # Load pipeline without passing progress_callback to avoid scale mismatch
+            self.load_pipeline("text2video", None)
 
         if progress_callback:
-            progress_callback(1, 5, "Generating video frames...")
+            progress_callback(10, 100, "Model loaded. Starting inference...")
 
         generator = None
         if self.config.seed is not None:
             generator = torch.Generator(device="cuda").manual_seed(self.config.seed)
+
+        # Create step callback for progress reporting
+        total_steps = self.config.num_inference_steps
+        start_time = time.time()
+
+        def step_callback(pipe, step_index, timestep, callback_kwargs):
+            if progress_callback:
+                # Map inference steps to 10-90% of progress bar
+                step_progress = 10 + int((step_index / total_steps) * 80)
+                elapsed = time.time() - start_time
+                eta = (elapsed / max(step_index, 1)) * (total_steps - step_index)
+                progress_callback(
+                    step_progress, 100,
+                    f"Inference step {step_index + 1}/{total_steps} (ETA: {int(eta)}s)"
+                )
+            return callback_kwargs
 
         output = self._pipeline(
             prompt=prompt,
@@ -463,12 +1047,11 @@ class VideoGenerator:
             num_inference_steps=self.config.num_inference_steps,
             guidance_scale=self.config.guidance_scale,
             generator=generator,
+            callback_on_step_end=step_callback,
         )
 
         if progress_callback:
-            progress_callback(4, 5, "Encoding video...")
-
-        from diffusers.utils import export_to_video
+            progress_callback(92, 100, "Encoding video to MP4...")
 
         output_dir = os.path.join(ROOT_DIR, ".mp")
         os.makedirs(output_dir, exist_ok=True)
@@ -477,7 +1060,7 @@ class VideoGenerator:
         export_to_video(output.frames[0], output_path, fps=self.config.fps)
 
         if progress_callback:
-            progress_callback(5, 5, "Complete!")
+            progress_callback(100, 100, "Complete!")
 
         return output_path
 
@@ -497,31 +1080,60 @@ class VideoGenerator:
 
         Returns:
             Path to generated video file
+
+        Raises:
+            RuntimeError: If insufficient VRAM available
         """
-        if self.config.engine == "ltx":
+        # Pre-generation memory check
+        can_proceed, msg, info = self.check_memory_for_generation()
+        if not can_proceed:
+            raise RuntimeError(msg)
+
+        if self.config.engine == "wan":
+            return self._generate_wan_image2video(image_path, prompt, progress_callback)
+        elif self.config.engine == "ltx":
             return self._generate_ltx_image2video(image_path, prompt, progress_callback)
 
         # CogVideoX image2video
         from PIL import Image
+        from diffusers.utils import export_to_video
+        import time
 
         if progress_callback:
-            progress_callback(0, 5, "Loading image...")
+            progress_callback(0, 100, "Loading image...")
 
         image = Image.open(image_path).convert("RGB")
         image = image.resize((self.config.width, self.config.height))
 
         if progress_callback:
-            progress_callback(1, 5, "Loading CogVideoX model...")
+            progress_callback(5, 100, "Loading CogVideoX model...")
 
         if self._current_mode != "image2video" or self._current_engine != "cogvideox":
-            self.load_pipeline("image2video", progress_callback)
+            # Load pipeline without passing progress_callback to avoid scale mismatch
+            self.load_pipeline("image2video", None)
 
         if progress_callback:
-            progress_callback(2, 5, "Generating video frames...")
+            progress_callback(10, 100, "Model loaded. Starting inference...")
 
         generator = None
         if self.config.seed is not None:
             generator = torch.Generator(device="cuda").manual_seed(self.config.seed)
+
+        # Create step callback for progress reporting
+        total_steps = self.config.num_inference_steps
+        start_time = time.time()
+
+        def step_callback(pipe, step_index, timestep, callback_kwargs):
+            if progress_callback:
+                # Map inference steps to 10-90% of progress bar
+                step_progress = 10 + int((step_index / total_steps) * 80)
+                elapsed = time.time() - start_time
+                eta = (elapsed / max(step_index, 1)) * (total_steps - step_index)
+                progress_callback(
+                    step_progress, 100,
+                    f"Inference step {step_index + 1}/{total_steps} (ETA: {int(eta)}s)"
+                )
+            return callback_kwargs
 
         output = self._pipeline(
             prompt=prompt,
@@ -530,12 +1142,11 @@ class VideoGenerator:
             num_inference_steps=self.config.num_inference_steps,
             guidance_scale=self.config.guidance_scale,
             generator=generator,
+            callback_on_step_end=step_callback,
         )
 
         if progress_callback:
-            progress_callback(4, 5, "Encoding video...")
-
-        from diffusers.utils import export_to_video
+            progress_callback(92, 100, "Encoding video to MP4...")
 
         output_dir = os.path.join(ROOT_DIR, ".mp")
         os.makedirs(output_dir, exist_ok=True)
@@ -544,7 +1155,7 @@ class VideoGenerator:
         export_to_video(output.frames[0], output_path, fps=self.config.fps)
 
         if progress_callback:
-            progress_callback(5, 5, "Complete!")
+            progress_callback(100, 100, "Complete!")
 
         return output_path
 
@@ -566,32 +1177,58 @@ class VideoGenerator:
 
         Returns:
             Path to generated video file
+
+        Raises:
+            RuntimeError: If insufficient VRAM available
         """
+        # Pre-generation memory check
+        can_proceed, msg, info = self.check_memory_for_generation()
+        if not can_proceed:
+            raise RuntimeError(msg)
+
         # Video2Video only supported by CogVideoX currently
+        import time
+        from diffusers.utils import load_video, export_to_video
+
         if self.config.engine == "ltx":
             # Fall back to CogVideoX for video2video
             original_engine = self.config.engine
             self.config.engine = "cogvideox"
 
         if progress_callback:
-            progress_callback(0, 5, "Loading video...")
-
-        from diffusers.utils import load_video
+            progress_callback(0, 100, "Loading video...")
 
         video = load_video(video_path)
 
         if progress_callback:
-            progress_callback(1, 5, "Loading model...")
+            progress_callback(5, 100, "Loading model...")
 
         if self._current_mode != "video2video" or self._current_engine != "cogvideox":
-            self.load_pipeline("video2video", progress_callback)
+            # Load pipeline without passing progress_callback to avoid scale mismatch
+            self.load_pipeline("video2video", None)
 
         if progress_callback:
-            progress_callback(2, 5, "Transforming video...")
+            progress_callback(10, 100, "Model loaded. Starting inference...")
 
         generator = None
         if self.config.seed is not None:
             generator = torch.Generator(device="cuda").manual_seed(self.config.seed)
+
+        # Create step callback for progress reporting
+        total_steps = self.config.num_inference_steps
+        start_time = time.time()
+
+        def step_callback(pipe, step_index, timestep, callback_kwargs):
+            if progress_callback:
+                # Map inference steps to 10-90% of progress bar
+                step_progress = 10 + int((step_index / total_steps) * 80)
+                elapsed = time.time() - start_time
+                eta = (elapsed / max(step_index, 1)) * (total_steps - step_index)
+                progress_callback(
+                    step_progress, 100,
+                    f"Inference step {step_index + 1}/{total_steps} (ETA: {int(eta)}s)"
+                )
+            return callback_kwargs
 
         output = self._pipeline(
             prompt=prompt,
@@ -600,12 +1237,11 @@ class VideoGenerator:
             num_inference_steps=self.config.num_inference_steps,
             guidance_scale=self.config.guidance_scale,
             generator=generator,
+            callback_on_step_end=step_callback,
         )
 
         if progress_callback:
-            progress_callback(4, 5, "Encoding video...")
-
-        from diffusers.utils import export_to_video
+            progress_callback(92, 100, "Encoding video to MP4...")
 
         output_dir = os.path.join(ROOT_DIR, ".mp")
         os.makedirs(output_dir, exist_ok=True)
@@ -614,7 +1250,7 @@ class VideoGenerator:
         export_to_video(output.frames[0], output_path, fps=self.config.fps)
 
         if progress_callback:
-            progress_callback(5, 5, "Complete!")
+            progress_callback(100, 100, "Complete!")
 
         return output_path
 
@@ -665,6 +1301,22 @@ def get_available_engines() -> Dict[str, Dict[str, Any]]:
         Dict of engine info
     """
     return {
+        "wan": {
+            "name": "Wan 2.1/2.2 (Recommended)",
+            "description": "Best quality, MoE architecture, 8-16GB VRAM",
+            "models": ["1.3b", "14b", "2.2-14b"],
+            "max_frames": 81,
+            "fps": 16,
+            "min_vram": 8,
+        },
+        "ltx": {
+            "name": "LTX-Video",
+            "description": "Fast generation, real-time 30 FPS, 161 frames",
+            "models": ["base", "distilled", "0.9.7", "0.9.8"],
+            "max_frames": 161,
+            "fps": 24,
+            "min_vram": 10,
+        },
         "cogvideox": {
             "name": "CogVideoX",
             "description": "Good quality, works on 8GB+ VRAM",
@@ -673,12 +1325,89 @@ def get_available_engines() -> Dict[str, Dict[str, Any]]:
             "fps": 8,
             "min_vram": 8,
         },
-        "ltx": {
-            "name": "LTX-Video",
-            "description": "Best quality, real-time 30 FPS, 161 frames",
-            "models": ["base", "distilled", "0.9.7", "0.9.8"],
-            "max_frames": 161,
-            "fps": 24,
-            "min_vram": 10,
-        },
     }
+
+
+def check_memory_for_config(config: VideoGenConfig) -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    Check if there's enough VRAM for the given configuration.
+
+    Args:
+        config: VideoGenConfig to check
+
+    Returns:
+        Tuple of (can_proceed, message, info_dict)
+    """
+    gen = VideoGenerator(config)
+    return gen.check_memory_for_generation()
+
+
+def get_vram_info() -> Dict[str, Any]:
+    """
+    Get current VRAM usage information.
+
+    Returns:
+        Dict with GPU info, or empty dict if no GPU
+    """
+    if not torch.cuda.is_available():
+        return {"available": False, "message": "No CUDA GPU detected"}
+
+    try:
+        props = torch.cuda.get_device_properties(0)
+        total_vram = props.total_memory / (1024**3)
+        allocated = torch.cuda.memory_allocated(0) / (1024**3)
+        reserved = torch.cuda.memory_reserved(0) / (1024**3)
+        free_vram = total_vram - reserved
+
+        return {
+            "available": True,
+            "gpu_name": props.name,
+            "total_vram_gb": round(total_vram, 2),
+            "allocated_vram_gb": round(allocated, 2),
+            "reserved_vram_gb": round(reserved, 2),
+            "free_vram_gb": round(free_vram, 2),
+            "cuda_version": torch.version.cuda,
+        }
+    except Exception as e:
+        return {"available": False, "message": str(e)}
+
+
+def get_generation_logs(lines: int = 200) -> str:
+    """
+    Get recent video generation logs.
+
+    Args:
+        lines: Number of lines to return
+
+    Returns:
+        Log content as string
+    """
+    return videogen_logger.get_log_file_contents(lines)
+
+
+def get_recent_logs(limit: int = 100) -> list:
+    """
+    Get recent log entries from memory.
+
+    Args:
+        limit: Maximum number of entries to return
+
+    Returns:
+        List of log entries
+    """
+    return videogen_logger.get_logs(limit)
+
+
+def clear_logs() -> None:
+    """Clear in-memory logs."""
+    videogen_logger.clear()
+
+
+def log_info(message: str) -> None:
+    """Log an info message."""
+    videogen_logger.info(message)
+
+
+def log_error(message: str) -> None:
+    """Log an error message."""
+    videogen_logger.error(message)

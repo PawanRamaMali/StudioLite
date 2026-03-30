@@ -16,6 +16,55 @@ A lightweight, web-based video editor and AI video generation studio built with 
 | **Transcribe** | Extract text from audio/video or microphone recording using WhisperX (SRT, VTT, JSON, TSV) |
 | **View & Publish** | Preview video and upload directly to YouTube via OAuth 2.0 |
 | **ReelForge** | AI-powered short video generation (LLM script + image gen + TTS + subtitles + background music) |
+| **Video Generator** | Real AI video generation using diffusion models (Wan 2.1/2.2, HunyuanVideo, LTX-Video, CogVideoX) |
+
+---
+
+## Video Generator - AI Video Diffusion
+
+Video Generator creates **real AI-generated video** using state-of-the-art diffusion models. Unlike ReelForge (which stitches images), this generates actual motion video frame-by-frame.
+
+### Supported Engines
+
+| Engine | VRAM | Description |
+|--------|------|-------------|
+| **Wan 2.1/2.2** | 8-24GB | Best quality, supports 1.3B (fast) and 14B (quality) models |
+| **HunyuanVideo** | 24GB+ | Tencent's 8.3B model, up to 1080p resolution |
+| **LTX-Video** | 8-12GB | Fast generation with distilled models |
+| **CogVideoX** | 8-16GB | Versatile with 2B and 5B variants |
+
+### Generation Modes
+
+- **Text to Video**: Generate video from text description
+- **Image to Video**: Animate a static image with AI motion
+- **Extend Video**: Continue/extend an existing video clip (Wan 2.2 only)
+
+### Features
+
+- **Scene-based Generation**: Create longer videos by generating multiple scenes
+- **Audio Integration**: Add AI-generated music/audio to videos
+- **Auto VRAM Detection**: Automatically configures optimal settings for your GPU
+- **Multiple Resolutions**: 480p, 720p, 832p (Wan), up to 1080p (HunyuanVideo)
+- **Quantization Support**: INT8 quantization for lower VRAM usage
+
+### Quick Start
+
+1. Select "Video Generator" from the sidebar
+2. Choose your generation mode (Text/Image/Extend)
+3. Enter a detailed prompt describing the video
+4. Adjust settings (engine, resolution, frames)
+5. Click "Generate Video"
+
+### Model Downloads
+
+Models are downloaded automatically on first use to `/mnt/hdd/huggingface/` (configurable via `HF_HOME`).
+
+| Model | Size | Use Case |
+|-------|------|----------|
+| Wan2.1-T2V-1.3B | ~8GB | Fast text-to-video, good for testing |
+| Wan2.1-T2V-14B | ~28GB | High-quality text-to-video |
+| Wan2.2-T2V-A14B | ~28GB | Latest Wan model with improvements |
+| Wan2.1-I2V-480P | ~28GB | Image-to-video animation |
 
 ---
 
@@ -163,11 +212,13 @@ All settings are stored in `config.json`. Here's the complete configuration refe
 StudioLite/
 ├── app.py                      # Streamlit web interface
 ├── reelforge.py                # ReelForge AI video generation engine
+├── videogen.py                 # Video Generator (diffusion-based video gen)
 ├── remover.py                  # Video/image/PDF watermark removal
 ├── transcriber.py              # WhisperX speech-to-text
 ├── youtube_uploader.py         # YouTube OAuth 2.0 upload
 ├── config.json                 # Application configuration
 ├── requirements.txt            # Python dependencies
+├── check_models.py             # Model download status checker
 │
 ├── mpv2/                       # Core modules
 │   ├── config.py               # Configuration getters
@@ -358,6 +409,8 @@ result = rf_generate_full(
 - **MoviePy** - Video compositing
 - **NumPy / SoundFile** - Audio processing
 - **SciPy** - Audio resampling and signal processing
+- **Diffusers** - Video generation pipelines (Wan, HunyuanVideo, LTX, CogVideoX)
+- **HuggingFace Hub** - Model downloading and caching
 
 ---
 

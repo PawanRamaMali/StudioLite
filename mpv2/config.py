@@ -525,3 +525,25 @@ def get_videogen_wan_resolution() -> str:
     """
     with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
         return json.load(file).get("videogen_wan_resolution", "480p")
+
+
+def get_videogen_hunyuan_model() -> str:
+    """
+    Gets the HunyuanVideo model variant.
+
+    Returns:
+        model (str): Model version ("1.0" or "1.5")
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("videogen_hunyuan_model", "1.5")
+
+
+def get_videogen_hunyuan_resolution() -> str:
+    """
+    Gets the HunyuanVideo resolution.
+
+    Returns:
+        resolution (str): Resolution ("540p", "720p", or "1080p")
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("videogen_hunyuan_resolution", "720p")

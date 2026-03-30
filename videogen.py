@@ -123,7 +123,7 @@ videogen_logger = VideoGenLogger()
 class VideoGenConfig:
     """Configuration for video generation."""
     # Engine selection
-    engine: str = "wan"                 # "wan", "ltx", or "cogvideox"
+    engine: str = "wan"                 # "wan", "ltx", "cogvideox", or "hunyuan"
 
     # CogVideoX settings
     model_variant: str = "2b"           # "2b" or "5b" for CogVideoX
@@ -135,8 +135,12 @@ class VideoGenConfig:
     wan_model: str = "1.3b"             # "1.3b", "14b", "2.2-14b", "2.2-1.3b"
     wan_resolution: str = "480p"        # "480p" or "720p"
 
+    # HunyuanVideo settings
+    hunyuan_model: str = "1.5"          # "1.0" or "1.5"
+    hunyuan_resolution: str = "720p"    # "540p", "720p", "1080p"
+
     # Common settings
-    num_frames: int = 49                # CogVideoX: 49/81, LTX: 161, Wan: 81
+    num_frames: int = 49                # CogVideoX: 49/81, LTX: 161, Wan: 81, Hunyuan: 129
     num_inference_steps: int = 50       # LTX distilled: 4-10, others: 50
     guidance_scale: float = 6.0         # LTX distilled: 1.0, CogVideoX: 6.0, Wan: 5.0
     width: int = 720                    # LTX: 704, CogVideoX: 720, Wan: 832/1280
@@ -186,6 +190,10 @@ class VideoGenerator:
                 "2.2-14b": 30.0,
                 "2.2-1.3b": 12.0,
             },
+            "hunyuan": {
+                "1.0": 24.0,    # HunyuanVideo 1.0 needs ~24GB
+                "1.5": 28.0,    # HunyuanVideo 1.5 needs ~28GB
+            },
             "ltx": {
                 "base": 12.0,
                 "distilled": 10.0,
@@ -202,6 +210,9 @@ class VideoGenerator:
         if engine == "wan":
             model_key = self.config.wan_model.lower()
             model_vram = base_vram["wan"].get(model_key, 12.0)
+        elif engine == "hunyuan":
+            model_key = self.config.hunyuan_model.lower()
+            model_vram = base_vram["hunyuan"].get(model_key, 24.0)
         elif engine == "ltx":
             model_key = self.config.ltx_model.lower()
             model_vram = base_vram["ltx"].get(model_key, 12.0)
@@ -223,6 +234,13 @@ class VideoGenerator:
         # Resolution scaling (480p baseline)
         if engine == "wan" and self.config.wan_resolution == "720p":
             resolution_factor = 2.25  # 720p uses ~2.25x more VRAM
+        elif engine == "hunyuan":
+            if self.config.hunyuan_resolution == "1080p":
+                resolution_factor = 4.0  # 1080p is much larger
+            elif self.config.hunyuan_resolution == "720p":
+                resolution_factor = 2.0
+            else:  # 540p
+                resolution_factor = 1.0
         else:
             resolution_factor = 1.0
 
@@ -659,6 +677,66 @@ class VideoGenerator:
         if progress_callback:
             progress_callback(100, 100, "CogVideoX model loaded!")
 
+    def _load_hunyuan_pipeline(self, mode: str, progress_callback: Callable = None) -> None:
+        """Load HunyuanVideo pipeline."""
+        from diffusers import HunyuanVideoPipeline
+        from transformers import LlamaModel, LlamaTokenizerFast, CLIPTextModel, CLIPTokenizer
+
+        # Get model ID based on version
+        if self.config.hunyuan_model == "1.5":
+            model_id = "hunyuanvideo-community/HunyuanVideo-1.5"
+        else:
+            model_id = "hunyuanvideo-community/HunyuanVideo"
+
+        # Skip if already loaded
+        if (self._pipeline is not None and
+            self._current_mode == mode and
+            self._loaded_model_id == model_id and
+            self._current_engine == "hunyuan"):
+            return
+
+        # Unload existing pipeline
+        if self._pipeline is not None:
+            if progress_callback:
+                progress_callback(0, 100, "Unloading previous model...")
+            self.unload()
+
+        if progress_callback:
+            progress_callback(10, 100, f"Loading HunyuanVideo ({model_id})...")
+
+        # Load pipeline with bfloat16 for efficiency
+        dtype = torch.bfloat16
+
+        if progress_callback:
+            progress_callback(30, 100, f"Downloading model weights (~14GB)...")
+
+        self._pipeline = HunyuanVideoPipeline.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+        )
+
+        if progress_callback:
+            progress_callback(70, 100, "Configuring memory optimization...")
+
+        # Apply memory optimizations
+        if self.config.enable_cpu_offload:
+            self._pipeline.enable_model_cpu_offload()
+        else:
+            self._pipeline.to("cuda")
+
+        if self.config.use_vae_tiling:
+            self._pipeline.vae.enable_tiling()
+
+        if self.config.use_vae_slicing:
+            self._pipeline.vae.enable_slicing()
+
+        self._current_mode = mode
+        self._loaded_model_id = model_id
+        self._current_engine = "hunyuan"
+
+        if progress_callback:
+            progress_callback(100, 100, "HunyuanVideo model loaded!")
+
     def load_pipeline(self, mode: str = "text2video", progress_callback: Callable = None) -> None:
         """
         Load the appropriate pipeline for the specified mode.
@@ -671,6 +749,8 @@ class VideoGenerator:
             self._load_wan_pipeline(mode, progress_callback)
         elif self.config.engine == "ltx":
             self._load_ltx_pipeline(mode, progress_callback)
+        elif self.config.engine == "hunyuan":
+            self._load_hunyuan_pipeline(mode, progress_callback)
         else:
             self._load_cogvideox_pipeline(mode, progress_callback)
 
@@ -971,6 +1051,79 @@ class VideoGenerator:
 
         return output_path
 
+    def _generate_hunyuan_text2video(
+        self,
+        prompt: str,
+        negative_prompt: str = None,
+        progress_callback: Callable = None,
+    ) -> str:
+        """Generate video using HunyuanVideo."""
+        from diffusers.utils import export_to_video
+        import time
+
+        if progress_callback:
+            progress_callback(0, 100, "Loading HunyuanVideo model...")
+
+        # Load pipeline without passing progress_callback to avoid scale mismatch
+        self._load_hunyuan_pipeline("text2video", None)
+
+        if progress_callback:
+            progress_callback(10, 100, "Model loaded. Starting inference...")
+
+        generator = None
+        if self.config.seed is not None:
+            generator = torch.Generator(device="cuda").manual_seed(self.config.seed)
+
+        # HunyuanVideo resolution settings
+        if self.config.hunyuan_resolution == "1080p":
+            width, height = 1920, 1080
+        elif self.config.hunyuan_resolution == "720p":
+            width, height = 1280, 720
+        else:  # 540p
+            width, height = 960, 540
+
+        # Create step callback for progress reporting
+        total_steps = self.config.num_inference_steps
+        start_time = time.time()
+
+        def step_callback(pipe, step_index, timestep, callback_kwargs):
+            if progress_callback:
+                # Map inference steps to 10-90% of progress bar
+                step_progress = 10 + int((step_index / total_steps) * 80)
+                elapsed = time.time() - start_time
+                eta = (elapsed / max(step_index, 1)) * (total_steps - step_index)
+                progress_callback(
+                    step_progress, 100,
+                    f"Inference step {step_index + 1}/{total_steps} (ETA: {int(eta)}s)"
+                )
+            return callback_kwargs
+
+        output = self._pipeline(
+            prompt=prompt,
+            negative_prompt=negative_prompt or "low quality, blurry, distorted, watermark",
+            width=width,
+            height=height,
+            num_frames=self.config.num_frames,
+            num_inference_steps=self.config.num_inference_steps,
+            guidance_scale=self.config.guidance_scale,
+            generator=generator,
+            callback_on_step_end=step_callback,
+        )
+
+        if progress_callback:
+            progress_callback(92, 100, "Encoding video to MP4...")
+
+        output_dir = os.path.join(ROOT_DIR, ".mp")
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"hunyuan_video_{uuid4()}.mp4")
+
+        export_to_video(output.frames[0], output_path, fps=self.config.fps)
+
+        if progress_callback:
+            progress_callback(100, 100, "Complete!")
+
+        return output_path
+
     def generate_text2video(
         self,
         prompt: str,
@@ -1005,6 +1158,8 @@ class VideoGenerator:
             return self._generate_wan_text2video(prompt, negative_prompt, progress_callback)
         elif self.config.engine == "ltx":
             return self._generate_ltx_text2video(prompt, negative_prompt, progress_callback)
+        elif self.config.engine == "hunyuan":
+            return self._generate_hunyuan_text2video(prompt, negative_prompt, progress_callback)
 
         # CogVideoX text2video
         import time
@@ -1159,6 +1314,118 @@ class VideoGenerator:
 
         return output_path
 
+    def _extract_last_frame(self, video_path: str) -> str:
+        """
+        Extract the last frame from a video for I2V continuation.
+
+        Args:
+            video_path: Path to input video
+
+        Returns:
+            Path to extracted frame image
+        """
+        import cv2
+        from PIL import Image
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video: {video_path}")
+
+        # Get total frame count and seek to last frame
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, total_frames - 1)
+
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret:
+            raise RuntimeError("Failed to extract last frame from video")
+
+        # Convert BGR to RGB and save
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(frame_rgb)
+
+        output_dir = os.path.join(ROOT_DIR, ".mp")
+        os.makedirs(output_dir, exist_ok=True)
+        frame_path = os.path.join(output_dir, f"last_frame_{uuid4()}.png")
+        img.save(frame_path)
+
+        return frame_path
+
+    def _generate_wan_video2video(
+        self,
+        video_path: str,
+        prompt: str,
+        strength: float = 0.8,
+        progress_callback: Callable = None,
+    ) -> str:
+        """
+        Extend video using Wan's I2V capability.
+        Extracts last frame and generates continuation.
+        """
+        if progress_callback:
+            progress_callback(0, 100, "Extracting last frame from video...")
+
+        # Extract last frame for continuation
+        last_frame_path = self._extract_last_frame(video_path)
+        videogen_logger.info(f"Extracted last frame: {last_frame_path}")
+
+        if progress_callback:
+            progress_callback(5, 100, "Generating video continuation...")
+
+        # Use I2V to continue from last frame
+        continuation_prompt = f"Continue the motion: {prompt}"
+        result = self._generate_wan_image2video(
+            last_frame_path,
+            continuation_prompt,
+            progress_callback
+        )
+
+        # Clean up temp frame
+        try:
+            os.remove(last_frame_path)
+        except Exception:
+            pass
+
+        return result
+
+    def _generate_ltx_video2video(
+        self,
+        video_path: str,
+        prompt: str,
+        strength: float = 0.8,
+        progress_callback: Callable = None,
+    ) -> str:
+        """
+        Extend video using LTX's I2V capability.
+        Extracts last frame and generates continuation.
+        """
+        if progress_callback:
+            progress_callback(0, 100, "Extracting last frame from video...")
+
+        # Extract last frame for continuation
+        last_frame_path = self._extract_last_frame(video_path)
+        videogen_logger.info(f"Extracted last frame: {last_frame_path}")
+
+        if progress_callback:
+            progress_callback(5, 100, "Generating video continuation...")
+
+        # Use I2V to continue from last frame
+        continuation_prompt = f"Continue the motion: {prompt}"
+        result = self._generate_ltx_image2video(
+            last_frame_path,
+            continuation_prompt,
+            progress_callback
+        )
+
+        # Clean up temp frame
+        try:
+            os.remove(last_frame_path)
+        except Exception:
+            pass
+
+        return result
+
     def generate_video2video(
         self,
         video_path: str,
@@ -1168,6 +1435,9 @@ class VideoGenerator:
     ) -> str:
         """
         Transform or extend an existing video.
+
+        For Wan and LTX: Uses I2V approach (extract last frame, generate continuation)
+        For CogVideoX: Uses native video-to-video pipeline
 
         Args:
             video_path: Path to input video
@@ -1186,14 +1456,21 @@ class VideoGenerator:
         if not can_proceed:
             raise RuntimeError(msg)
 
-        # Video2Video only supported by CogVideoX currently
+        videogen_logger.info(f"Starting V2V generation: engine={self.config.engine}")
+        videogen_logger.info(f"Input video: {video_path}")
+        videogen_logger.info(f"Prompt: {prompt[:100]}...")
+
+        # Wan uses I2V-based video extension
+        if self.config.engine == "wan":
+            return self._generate_wan_video2video(video_path, prompt, strength, progress_callback)
+
+        # LTX uses I2V-based video extension
+        if self.config.engine == "ltx":
+            return self._generate_ltx_video2video(video_path, prompt, strength, progress_callback)
+
+        # CogVideoX has native video-to-video support
         import time
         from diffusers.utils import load_video, export_to_video
-
-        if self.config.engine == "ltx":
-            # Fall back to CogVideoX for video2video
-            original_engine = self.config.engine
-            self.config.engine = "cogvideox"
 
         if progress_callback:
             progress_callback(0, 100, "Loading video...")
@@ -1309,6 +1586,15 @@ def get_available_engines() -> Dict[str, Dict[str, Any]]:
             "fps": 16,
             "min_vram": 8,
         },
+        "hunyuan": {
+            "name": "HunyuanVideo (High VRAM)",
+            "description": "Tencent's 8.3B model, 24GB+ VRAM, up to 1080p",
+            "models": ["1.0", "1.5"],
+            "max_frames": 129,
+            "fps": 24,
+            "min_vram": 24,
+            "resolutions": ["540p", "720p", "1080p"],
+        },
         "ltx": {
             "name": "LTX-Video",
             "description": "Fast generation, real-time 30 FPS, 161 frames",
@@ -1411,3 +1697,204 @@ def log_info(message: str) -> None:
 def log_error(message: str) -> None:
     """Log an error message."""
     videogen_logger.error(message)
+
+
+def concatenate_videos(video_paths: list, output_path: str = None, fps: int = None) -> str:
+    """
+    Concatenate multiple video clips into a single video.
+
+    Args:
+        video_paths: List of paths to video files to concatenate
+        output_path: Optional output path (auto-generated if not provided)
+        fps: Optional FPS (uses first video's FPS if not provided)
+
+    Returns:
+        Path to concatenated video
+    """
+    from moviepy.editor import VideoFileClip, concatenate_videoclips
+
+    if not video_paths:
+        raise ValueError("No video paths provided")
+
+    videogen_logger.info(f"Concatenating {len(video_paths)} videos...")
+
+    clips = []
+    for path in video_paths:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Video not found: {path}")
+        clips.append(VideoFileClip(path))
+
+    # Concatenate clips
+    final_clip = concatenate_videoclips(clips, method="compose")
+
+    # Generate output path if not provided
+    if output_path is None:
+        output_dir = os.path.join(ROOT_DIR, ".mp")
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"concatenated_{uuid4()}.mp4")
+
+    # Write output
+    target_fps = fps or clips[0].fps
+    final_clip.write_videofile(
+        output_path,
+        fps=target_fps,
+        codec="libx264",
+        audio_codec="aac" if final_clip.audio else None,
+        logger=None  # Suppress moviepy output
+    )
+
+    # Cleanup
+    for clip in clips:
+        clip.close()
+    final_clip.close()
+
+    videogen_logger.info(f"Concatenated video saved: {output_path}")
+    return output_path
+
+
+def add_audio_to_video(video_path: str, audio_path: str, output_path: str = None,
+                       volume: float = 1.0) -> str:
+    """
+    Add audio track to a video.
+
+    Args:
+        video_path: Path to video file
+        audio_path: Path to audio file (MP3, WAV, etc.)
+        output_path: Optional output path
+        volume: Audio volume multiplier (0.0 - 2.0)
+
+    Returns:
+        Path to video with audio
+    """
+    from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip
+
+    videogen_logger.info(f"Adding audio to video: {video_path}")
+
+    video = VideoFileClip(video_path)
+    audio = AudioFileClip(audio_path)
+
+    # Adjust audio duration to match video
+    if audio.duration > video.duration:
+        audio = audio.subclip(0, video.duration)
+    elif audio.duration < video.duration:
+        # Loop audio to fill video duration
+        loops_needed = int(video.duration / audio.duration) + 1
+        from moviepy.editor import concatenate_audioclips
+        audio = concatenate_audioclips([audio] * loops_needed).subclip(0, video.duration)
+
+    # Apply volume
+    audio = audio.volumex(volume)
+
+    # Combine with existing audio if present
+    if video.audio is not None:
+        combined_audio = CompositeAudioClip([video.audio, audio])
+        video = video.set_audio(combined_audio)
+    else:
+        video = video.set_audio(audio)
+
+    # Generate output path if not provided
+    if output_path is None:
+        output_dir = os.path.join(ROOT_DIR, ".mp")
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"video_with_audio_{uuid4()}.mp4")
+
+    video.write_videofile(
+        output_path,
+        codec="libx264",
+        audio_codec="aac",
+        logger=None
+    )
+
+    video.close()
+    audio.close()
+
+    videogen_logger.info(f"Video with audio saved: {output_path}")
+    return output_path
+
+
+def generate_scene_video(
+    generator: VideoGenerator,
+    scenes: list,
+    progress_callback: Callable = None,
+    concatenate: bool = True
+) -> str:
+    """
+    Generate a longer video by creating multiple scenes and optionally concatenating them.
+
+    Args:
+        generator: VideoGenerator instance
+        scenes: List of scene descriptions (strings) or dicts with 'prompt' and optional 'image'
+        progress_callback: Optional callback for progress updates
+        concatenate: If True, concatenate all scenes into one video
+
+    Returns:
+        Path to final video (concatenated) or list of video paths
+
+    Example:
+        scenes = [
+            "A sunrise over mountains, golden light",
+            "Birds flying across the sky",
+            {"prompt": "A waterfall in forest", "image": "waterfall.jpg"},  # I2V for this scene
+        ]
+        video = generate_scene_video(gen, scenes)
+    """
+    if not scenes:
+        raise ValueError("No scenes provided")
+
+    videogen_logger.info(f"Generating {len(scenes)} scenes...")
+
+    video_paths = []
+    total_scenes = len(scenes)
+
+    for i, scene in enumerate(scenes):
+        if progress_callback:
+            progress_callback(i, total_scenes, f"Generating scene {i+1}/{total_scenes}...")
+
+        # Parse scene - can be string or dict
+        if isinstance(scene, str):
+            prompt = scene
+            image_path = None
+        else:
+            prompt = scene.get("prompt", "")
+            image_path = scene.get("image")
+
+        try:
+            if image_path and os.path.exists(image_path):
+                # Image-to-video for this scene
+                video_path = generator.generate_image2video(
+                    image_path,
+                    prompt,
+                    progress_callback=None  # Don't pass callback to avoid conflicts
+                )
+            else:
+                # Text-to-video
+                video_path = generator.generate_text2video(
+                    prompt,
+                    progress_callback=None
+                )
+
+            video_paths.append(video_path)
+            videogen_logger.info(f"Scene {i+1} generated: {video_path}")
+
+        except Exception as e:
+            videogen_logger.error(f"Failed to generate scene {i+1}: {e}")
+            raise
+
+    if progress_callback:
+        progress_callback(total_scenes, total_scenes, "Scenes generated!")
+
+    # Concatenate if requested
+    if concatenate and len(video_paths) > 1:
+        if progress_callback:
+            progress_callback(total_scenes, total_scenes + 1, "Concatenating scenes...")
+
+        final_video = concatenate_videos(video_paths, fps=generator.config.fps)
+
+        if progress_callback:
+            progress_callback(total_scenes + 1, total_scenes + 1, "Complete!")
+
+        return final_video
+    elif len(video_paths) == 1:
+        return video_paths[0]
+    else:
+        return video_paths  # Return list if not concatenating

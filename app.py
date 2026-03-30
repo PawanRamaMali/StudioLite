@@ -1290,16 +1290,28 @@ elif tool == "Video Generator":
         vram = vram_info["free_vram"]
         engines = get_available_engines()
 
-        # Recommend Wan for most cases, LTX for high VRAM
+        # Recommend Wan for most cases, HunyuanVideo for high VRAM
         default_engine_idx = 0  # Wan is recommended for most VRAM levels
+        engine_options = ["Wan 2.1 (Recommended)", "LTX-Video (Fast)", "CogVideoX"]
+        # Add HunyuanVideo for high VRAM GPUs (24GB+)
+        if vram >= 24:
+            engine_options.insert(1, "HunyuanVideo (High VRAM)")
         vg_engine = st.radio(
             "Video Engine",
-            ["Wan 2.1 (Recommended)", "LTX-Video (Fast)", "CogVideoX"],
+            engine_options,
             index=default_engine_idx,
             horizontal=True,
-            help="Wan 2.1: Best quality, works on 8GB+. LTX-Video: Fast, 30 FPS. CogVideoX: Good quality, 8GB+"
+            help="Wan 2.1: Best quality, 8GB+. HunyuanVideo: Best for 24GB+. LTX-Video: Fast. CogVideoX: 8GB+"
         )
-        engine_key = "wan" if "Wan" in vg_engine else ("ltx" if "LTX" in vg_engine else "cogvideox")
+        # Parse engine key
+        if "Wan" in vg_engine:
+            engine_key = "wan"
+        elif "Hunyuan" in vg_engine:
+            engine_key = "hunyuan"
+        elif "LTX" in vg_engine:
+            engine_key = "ltx"
+        else:
+            engine_key = "cogvideox"
 
         # Mode selection
         vg_mode = st.radio(
@@ -1479,6 +1491,73 @@ elif tool == "Video Generator":
 
                 vg_model_variant = None
                 vg_use_quant = False
+                vg_hunyuan_model = None
+                vg_hunyuan_resolution = None
+
+            elif engine_key == "hunyuan":
+                # HunyuanVideo settings
+                hunyuan_model_options = ["1.0 (24GB VRAM)", "1.5 (28GB VRAM)"]
+                hunyuan_model_keys = ["1.0", "1.5"]
+                default_hunyuan_idx = 1 if vram >= 28 else 0
+
+                vg_hunyuan_model_choice = st.selectbox(
+                    "HunyuanVideo Model",
+                    hunyuan_model_options,
+                    index=default_hunyuan_idx,
+                    help="1.5 is newer with better quality but needs more VRAM"
+                )
+                vg_hunyuan_model = hunyuan_model_keys[hunyuan_model_options.index(vg_hunyuan_model_choice)]
+
+                # Resolution for HunyuanVideo
+                hunyuan_res_options = ["540p (Fast)", "720p (Balanced)", "1080p (Best Quality)"]
+                hunyuan_res_keys = ["540p", "720p", "1080p"]
+                if vram >= 48:
+                    default_hunyuan_res_idx = 2
+                elif vram >= 32:
+                    default_hunyuan_res_idx = 1
+                else:
+                    default_hunyuan_res_idx = 0
+
+                vg_hunyuan_resolution_choice = st.selectbox(
+                    "Resolution",
+                    hunyuan_res_options,
+                    index=default_hunyuan_res_idx,
+                    help="Higher resolution needs more VRAM"
+                )
+                vg_hunyuan_resolution = hunyuan_res_keys[hunyuan_res_options.index(vg_hunyuan_resolution_choice)]
+
+                # Frame count for HunyuanVideo
+                vg_num_frames = st.select_slider(
+                    "Video Length",
+                    options=[49, 81, 129],
+                    value=81,
+                    format_func=lambda x: f"{x} frames (~{x/24:.1f}s at 24fps)",
+                    help="HunyuanVideo supports up to 129 frames"
+                )
+
+                # Guidance scale
+                vg_guidance = st.slider(
+                    "Prompt Strength",
+                    min_value=1.0,
+                    max_value=10.0,
+                    value=6.0,
+                    step=0.5,
+                    help="Higher values follow the prompt more closely"
+                )
+
+                vg_steps = st.slider(
+                    "Inference Steps",
+                    min_value=20,
+                    max_value=50,
+                    value=30,
+                    help="More steps = better quality but slower"
+                )
+
+                vg_model_variant = None
+                vg_use_quant = False
+                vg_ltx_model = None
+                vg_wan_model = None
+                vg_wan_resolution = None
 
             else:
                 # CogVideoX settings
@@ -1522,6 +1601,33 @@ elif tool == "Video Generator":
 
                 vg_ltx_model = None
 
+            # Common advanced settings
+            st.markdown("---")
+            st.markdown("**Common Settings**")
+
+            # Negative prompt
+            vg_negative_prompt = st.text_input(
+                "Negative Prompt (what to avoid)",
+                value="low quality, blurry, distorted, disfigured, watermark",
+                help="Things to avoid in the video"
+            )
+
+            # FPS slider
+            vg_fps = st.slider(
+                "Output FPS",
+                min_value=8,
+                max_value=30,
+                value=24 if engine_key != "cogvideox" else 8,
+                help="Frames per second for the output video"
+            )
+
+            # CPU offload toggle
+            vg_cpu_offload = st.checkbox(
+                "Enable CPU Offload",
+                value=vram < 24,
+                help="Offload model parts to CPU to save VRAM (slower but uses less GPU memory)"
+            )
+
             # Seed (common)
             vg_use_seed = st.checkbox("Use fixed seed (reproducible results)")
             vg_seed = None
@@ -1542,7 +1648,8 @@ elif tool == "Video Generator":
             st.session_state.vg_result = None
 
             # Show what's being generated
-            engine_name = "Wan 2.1" if engine_key == "wan" else ("LTX-Video" if engine_key == "ltx" else "CogVideoX")
+            engine_names = {"wan": "Wan 2.1", "hunyuan": "HunyuanVideo", "ltx": "LTX-Video", "cogvideox": "CogVideoX"}
+            engine_name = engine_names.get(engine_key, "Video Model")
             st.info(f"Generating {vg_num_frames} frames using **{engine_name}**...")
 
             # Progress indicators
@@ -1562,8 +1669,9 @@ elif tool == "Video Generator":
                     num_frames=vg_num_frames,
                     num_inference_steps=vg_steps,
                     guidance_scale=vg_guidance,
-                    fps=24,
+                    fps=vg_fps,
                     seed=vg_seed,
+                    enable_cpu_offload=vg_cpu_offload,
                 )
             elif engine_key == "ltx":
                 config = VideoGenConfig(
@@ -1574,8 +1682,21 @@ elif tool == "Video Generator":
                     guidance_scale=vg_guidance,
                     width=768 if vram >= 16 else 704,
                     height=512,
-                    fps=24,
+                    fps=vg_fps,
                     seed=vg_seed,
+                    enable_cpu_offload=vg_cpu_offload,
+                )
+            elif engine_key == "hunyuan":
+                config = VideoGenConfig(
+                    engine="hunyuan",
+                    hunyuan_model=vg_hunyuan_model,
+                    hunyuan_resolution=vg_hunyuan_resolution,
+                    num_frames=vg_num_frames,
+                    num_inference_steps=vg_steps,
+                    guidance_scale=vg_guidance,
+                    fps=vg_fps,
+                    seed=vg_seed,
+                    enable_cpu_offload=vg_cpu_offload,
                 )
             else:
                 config = VideoGenConfig(
@@ -1585,8 +1706,9 @@ elif tool == "Video Generator":
                     num_inference_steps=vg_steps,
                     guidance_scale=vg_guidance,
                     quantization="int8" if vg_use_quant else "none",
-                    fps=8,
+                    fps=vg_fps,
                     seed=vg_seed,
+                    enable_cpu_offload=vg_cpu_offload,
                 )
 
             generator = VideoGenerator(config)
@@ -1597,6 +1719,7 @@ elif tool == "Video Generator":
                     on_progress(0, 5, "Loading text-to-video pipeline...")
                     result = generator.generate_text2video(
                         vg_prompt,
+                        negative_prompt=vg_negative_prompt,
                         progress_callback=on_progress
                     )
 

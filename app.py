@@ -43,7 +43,8 @@ st.sidebar.title("StudioLite")
 tool = st.sidebar.radio(
     "Select Tool",
     ["Remove Watermark", "Trim / Cut", "Add Image Overlay", "Change Speed",
-     "Merge Videos", "Extract Frame", "Export Video", "Transcribe", "View & Publish",
+     "Merge Videos", "Extract Frame", "Export Video", "Upscale Video",
+     "Video Editor", "Audio Studio", "Transcribe", "View & Publish",
      "ReelForge", "Video Generator", "Story Mode", "Logs", "Settings"]
 )
 
@@ -624,6 +625,242 @@ elif tool == "Export Video":
                 )
 
         os.unlink(input_path)
+
+
+# =====================
+# UPSCALE VIDEO
+# =====================
+elif tool == "Upscale Video":
+    st.title("Upscale Video")
+    st.markdown("Enhance video resolution up to 4K using AI super-resolution")
+
+    from upscaler import UPSCALE_PRESETS, upscale_video, get_video_info, check_upscaler_available
+
+    avail, backends = check_upscaler_available()
+    if "realesrgan" in backends:
+        st.success("Real-ESRGAN available (best quality)")
+    else:
+        st.info("Using Lanczos interpolation. Install `realesrgan` + `basicsr` for better quality.")
+
+    up_col1, up_col2 = st.columns([1, 1.5])
+    with up_col1:
+        up_file = st.file_uploader("Upload Video", type=["mp4", "mov", "avi", "mkv"], key="up_file")
+        up_preset = st.selectbox(
+            "Upscale Preset",
+            list(UPSCALE_PRESETS.keys()),
+            format_func=lambda x: f"{UPSCALE_PRESETS[x]['name']} - {UPSCALE_PRESETS[x]['description']}",
+        )
+        preset_info = UPSCALE_PRESETS[up_preset]
+        st.caption(f"Scale: {preset_info['scale']}x | Method: {preset_info['method']}")
+
+        up_go = st.button("Upscale", type="primary", use_container_width=True)
+
+    with up_col2:
+        if up_file and up_go:
+            # Save uploaded file
+            up_dir = os.path.join(os.path.dirname(__file__), ".mp")
+            os.makedirs(up_dir, exist_ok=True)
+            up_path = os.path.join(up_dir, f"upload_{up_file.name}")
+            with open(up_path, "wb") as f:
+                f.write(up_file.read())
+
+            info = get_video_info(up_path)
+            st.caption(f"Input: {info['width']}x{info['height']} | {info['frame_count']} frames | {info['duration']:.1f}s")
+
+            progress = st.progress(0, text="Starting upscale...")
+            def up_cb(cur, total, msg):
+                progress.progress(min(cur / max(total, 1), 0.99), text=msg)
+
+            try:
+                result_path = upscale_video(
+                    up_path, scale=preset_info["scale"],
+                    method=preset_info["method"], progress_callback=up_cb,
+                )
+                progress.progress(1.0, text="Complete!")
+                st.video(result_path)
+                new_info = get_video_info(result_path)
+                st.success(f"Upscaled: {info['width']}x{info['height']} → {new_info['width']}x{new_info['height']}")
+                with open(result_path, "rb") as rf:
+                    st.download_button("Download Upscaled Video", rf.read(),
+                                       file_name=f"upscaled_{up_file.name}", mime="video/mp4",
+                                       use_container_width=True)
+            except Exception as e:
+                st.error(f"Upscale failed: {e}")
+        elif up_file:
+            up_dir = os.path.join(os.path.dirname(__file__), ".mp")
+            os.makedirs(up_dir, exist_ok=True)
+            up_path = os.path.join(up_dir, f"upload_{up_file.name}")
+            with open(up_path, "wb") as f:
+                f.write(up_file.read())
+            st.video(up_path)
+            info = get_video_info(up_path)
+            st.caption(f"{info['width']}x{info['height']} | {info['frame_count']} frames | {info['duration']:.1f}s")
+
+
+# =====================
+# VIDEO EDITOR
+# =====================
+elif tool == "Video Editor":
+    st.title("Video Editor")
+    st.markdown("Edit videos with AI-powered tools: remove objects, apply filters, and more")
+
+    from video_editor import EDIT_OPERATIONS, STYLE_FILTERS, edit_video_region, apply_style_transfer
+
+    ve_col1, ve_col2 = st.columns([1, 1.5])
+    with ve_col1:
+        ve_file = st.file_uploader("Upload Video", type=["mp4", "mov", "avi"], key="ve_file")
+        ve_tab_mode = st.radio("Mode", ["Style Filters", "Region Edit"], horizontal=True, key="ve_mode")
+
+        if ve_tab_mode == "Style Filters":
+            ve_style = st.selectbox("Filter", STYLE_FILTERS,
+                                     format_func=lambda x: x.replace("_", " ").title())
+            ve_apply_style = st.button("Apply Filter", type="primary", use_container_width=True)
+        else:
+            ve_op = st.selectbox("Operation", list(EDIT_OPERATIONS.keys()),
+                                  format_func=lambda x: EDIT_OPERATIONS[x])
+            st.markdown("**Region (pixels)**")
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                ve_x = st.number_input("X", 0, 2000, 50, key="ve_x")
+                ve_w = st.number_input("Width", 10, 2000, 200, key="ve_w")
+            with rc2:
+                ve_y = st.number_input("Y", 0, 2000, 50, key="ve_y")
+                ve_h = st.number_input("Height", 10, 2000, 200, key="ve_h")
+            ve_apply_region = st.button("Apply Edit", type="primary", use_container_width=True)
+
+    with ve_col2:
+        if ve_file:
+            ve_dir = os.path.join(os.path.dirname(__file__), ".mp")
+            os.makedirs(ve_dir, exist_ok=True)
+            ve_path = os.path.join(ve_dir, f"edit_{ve_file.name}")
+            with open(ve_path, "wb") as f:
+                f.write(ve_file.read())
+
+            if ve_tab_mode == "Style Filters" and 've_apply_style' in dir() and ve_apply_style:
+                prog = st.progress(0, text="Applying filter...")
+                def ve_cb(c, t, m):
+                    prog.progress(min(c/max(t,1), 0.99), text=m)
+                try:
+                    result = apply_style_transfer(ve_path, ve_style, ve_cb)
+                    prog.progress(1.0, text="Done!")
+                    st.video(result)
+                    with open(result, "rb") as rf:
+                        st.download_button("Download", rf.read(), file_name=f"edited_{ve_file.name}",
+                                           mime="video/mp4", use_container_width=True)
+                except Exception as e:
+                    st.error(f"Failed: {e}")
+
+            elif ve_tab_mode == "Region Edit" and 've_apply_region' in dir() and ve_apply_region:
+                prog = st.progress(0, text="Editing region...")
+                def ve_cb2(c, t, m):
+                    prog.progress(min(c/max(t,1), 0.99), text=m)
+                try:
+                    result = edit_video_region(ve_path, ve_op, ve_x, ve_y, ve_w, ve_h,
+                                               progress_callback=ve_cb2)
+                    prog.progress(1.0, text="Done!")
+                    st.video(result)
+                    with open(result, "rb") as rf:
+                        st.download_button("Download", rf.read(), file_name=f"edited_{ve_file.name}",
+                                           mime="video/mp4", use_container_width=True)
+                except Exception as e:
+                    st.error(f"Failed: {e}")
+            else:
+                st.video(ve_path)
+
+
+# =====================
+# AUDIO STUDIO
+# =====================
+elif tool == "Audio Studio":
+    st.title("Audio Studio")
+    st.markdown("Sound effects, voice isolation, audio mixing, and more")
+
+    from audio_studio import (
+        SFX_LIBRARY, generate_sfx_procedural, isolate_voice,
+        normalize_audio, mix_audio_tracks, add_fade, extract_audio,
+    )
+
+    as_mode = st.radio("Tool", ["Sound Effects", "Voice Isolation", "Extract Audio", "Normalize"], horizontal=True)
+
+    if as_mode == "Sound Effects":
+        st.markdown("### Generate Sound Effects")
+        sfx_col1, sfx_col2 = st.columns([1, 1.5])
+        with sfx_col1:
+            sfx_type = st.selectbox("Effect", list(SFX_LIBRARY.keys()),
+                                     format_func=lambda x: f"{x.replace('_',' ').title()} - {SFX_LIBRARY[x]}")
+            sfx_dur = st.slider("Duration (seconds)", 0.5, 10.0, 2.0, 0.5)
+            sfx_go = st.button("Generate SFX", type="primary", use_container_width=True)
+        with sfx_col2:
+            if sfx_go:
+                with st.spinner("Generating..."):
+                    path = generate_sfx_procedural(sfx_type, sfx_dur)
+                    st.audio(path)
+                    with open(path, "rb") as f:
+                        st.download_button("Download SFX", f.read(),
+                                           file_name=f"sfx_{sfx_type}.wav", mime="audio/wav",
+                                           use_container_width=True)
+
+    elif as_mode == "Voice Isolation":
+        st.markdown("### Separate Vocals from Background")
+        iso_file = st.file_uploader("Upload Audio/Video", type=["mp3", "wav", "mp4", "mov"], key="iso_file")
+        if iso_file and st.button("Isolate Voice", type="primary"):
+            iso_dir = os.path.join(os.path.dirname(__file__), ".mp")
+            os.makedirs(iso_dir, exist_ok=True)
+            iso_path = os.path.join(iso_dir, f"iso_{iso_file.name}")
+            with open(iso_path, "wb") as f:
+                f.write(iso_file.read())
+            with st.spinner("Separating vocals..."):
+                result = isolate_voice(iso_path)
+            if "error" not in result:
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("**Vocals**")
+                    if os.path.exists(result.get("vocals", "")):
+                        st.audio(result["vocals"])
+                with c2:
+                    st.markdown("**Background**")
+                    if os.path.exists(result.get("background", "")):
+                        st.audio(result["background"])
+                st.caption(f"Method: {result.get('method', 'unknown')}")
+            else:
+                st.error(result["error"])
+
+    elif as_mode == "Extract Audio":
+        st.markdown("### Extract Audio from Video")
+        ext_file = st.file_uploader("Upload Video", type=["mp4", "mov", "avi", "mkv"], key="ext_file")
+        if ext_file and st.button("Extract", type="primary"):
+            ext_dir = os.path.join(os.path.dirname(__file__), ".mp")
+            os.makedirs(ext_dir, exist_ok=True)
+            ext_path = os.path.join(ext_dir, f"ext_{ext_file.name}")
+            with open(ext_path, "wb") as f:
+                f.write(ext_file.read())
+            with st.spinner("Extracting audio..."):
+                result = extract_audio(ext_path)
+            if result:
+                st.audio(result)
+                with open(result, "rb") as f:
+                    st.download_button("Download Audio", f.read(),
+                                       file_name="extracted_audio.wav", mime="audio/wav",
+                                       use_container_width=True)
+            else:
+                st.warning("No audio track found in this video.")
+
+    elif as_mode == "Normalize":
+        st.markdown("### Normalize Audio Volume")
+        norm_file = st.file_uploader("Upload Audio", type=["mp3", "wav"], key="norm_file")
+        norm_db = st.slider("Target dB", -10.0, 0.0, -3.0, 0.5)
+        if norm_file and st.button("Normalize", type="primary"):
+            norm_dir = os.path.join(os.path.dirname(__file__), ".mp")
+            os.makedirs(norm_dir, exist_ok=True)
+            norm_path = os.path.join(norm_dir, f"norm_{norm_file.name}")
+            with open(norm_path, "wb") as f:
+                f.write(norm_file.read())
+            result = normalize_audio(norm_path, target_db=norm_db)
+            st.audio(result)
+            with open(result, "rb") as f:
+                st.download_button("Download", f.read(),
+                                   file_name=f"normalized_{norm_file.name}", mime="audio/wav",
+                                   use_container_width=True)
 
 
 # =====================
@@ -1263,6 +1500,10 @@ elif tool == "Video Generator":
     st.markdown("Generate real videos using Wan 2.1, LTX-Video, or CogVideoX diffusion models")
 
     from videogen import VideoGenerator, check_system_requirements, VideoGenConfig, get_available_engines
+    from presets import (
+        STYLE_PRESETS, SHOT_TEMPLATES, LIGHTING_TEMPLATES, CAMERA_MOVEMENTS,
+        apply_preset, apply_shot, apply_lighting, apply_camera_movement, build_full_prompt,
+    )
     from uuid import uuid4
 
     # System requirements check
@@ -1354,6 +1595,38 @@ elif tool == "Video Generator":
             height=120,
             help="Describe what should happen in the video. Be specific about motion, camera movement, and style."
         )
+
+        # Style & Camera presets
+        with st.expander("Style, Shot & Camera Presets", expanded=False):
+            preset_col1, preset_col2 = st.columns(2)
+            with preset_col1:
+                vg_style = st.selectbox(
+                    "Visual Style",
+                    ["None"] + list(STYLE_PRESETS.keys()),
+                    format_func=lambda x: STYLE_PRESETS[x]["name"] if x in STYLE_PRESETS else "None",
+                    key="vg_style_preset",
+                )
+                vg_shot = st.selectbox(
+                    "Shot Type",
+                    ["None"] + list(SHOT_TEMPLATES.keys()),
+                    format_func=lambda x: SHOT_TEMPLATES[x]["name"] if x in SHOT_TEMPLATES else "None",
+                    key="vg_shot_preset",
+                )
+            with preset_col2:
+                vg_lighting = st.selectbox(
+                    "Lighting",
+                    ["None"] + list(LIGHTING_TEMPLATES.keys()),
+                    format_func=lambda x: LIGHTING_TEMPLATES[x]["name"] if x in LIGHTING_TEMPLATES else "None",
+                    key="vg_lighting_preset",
+                )
+                vg_camera = st.selectbox(
+                    "Camera Movement",
+                    list(CAMERA_MOVEMENTS.keys()),
+                    format_func=lambda x: CAMERA_MOVEMENTS[x]["name"],
+                    key="vg_camera_preset",
+                )
+            # Preview toggle
+            vg_preview_mode = st.checkbox("Draft Preview (fast, low-res)", value=False, key="vg_preview")
 
         # Mode-specific inputs
         vg_image_file = None
@@ -1711,6 +1984,28 @@ elif tool == "Video Generator":
                     enable_cpu_offload=vg_cpu_offload,
                 )
 
+            # Apply presets to prompt
+            _final_prompt = vg_prompt
+            _final_neg = vg_negative_prompt
+            _style_key = vg_style if vg_style != "None" else None
+            _shot_key = vg_shot if vg_shot != "None" else None
+            _light_key = vg_lighting if vg_lighting != "None" else None
+            _cam_key = vg_camera if vg_camera != "static" else None
+
+            if any([_style_key, _shot_key, _light_key, _cam_key]):
+                _final_prompt, _neg_add, _g_override = build_full_prompt(
+                    vg_prompt, style=_style_key, shot=_shot_key,
+                    lighting=_light_key, camera=_cam_key,
+                )
+                if _neg_add:
+                    _final_neg = f"{vg_negative_prompt}, {_neg_add}" if vg_negative_prompt else _neg_add
+
+            # Apply preview mode (reduced settings)
+            if vg_preview_mode:
+                config.num_frames = 17
+                config.num_inference_steps = max(6, config.num_inference_steps // 4)
+                config.guidance_scale = min(config.guidance_scale, 4.0)
+
             generator = VideoGenerator(config)
             result = None
 
@@ -1718,8 +2013,8 @@ elif tool == "Video Generator":
                 if vg_mode == "Text to Video":
                     on_progress(0, 5, "Loading text-to-video pipeline...")
                     result = generator.generate_text2video(
-                        vg_prompt,
-                        negative_prompt=vg_negative_prompt,
+                        _final_prompt,
+                        negative_prompt=_final_neg,
                         progress_callback=on_progress
                     )
 
@@ -2329,6 +2624,20 @@ Rules:
                     story_seed_val = st.number_input("Seed", 0, 2**31, value=42, key="story_seed_val")
 
             # Output Settings
+            # Scene Transitions
+            with st.expander("Scene Transitions", expanded=False):
+                from transitions import TRANSITION_TYPES, TRANSITION_DESCRIPTIONS
+                story_transition = st.selectbox(
+                    "Transition Type",
+                    TRANSITION_TYPES,
+                    format_func=lambda x: f"{x.replace('_',' ').title()} - {TRANSITION_DESCRIPTIONS.get(x, '')}",
+                    key="story_transition",
+                )
+                if story_transition != "cut":
+                    story_transition_dur = st.slider("Transition Duration", 0.25, 2.0, 0.75, 0.25, key="story_trans_dur")
+                else:
+                    story_transition_dur = 0
+
             with st.expander("Output Settings", expanded=False):
                 story_aspect = st.radio(
                     "Aspect Ratio",
@@ -2437,6 +2746,8 @@ Rules:
                     "enable_music": story_enable_music,
                     "music_track": story_music_track if story_enable_music and 'story_music_track' in dir() else None,
                     "music_vol": story_music_vol if story_enable_music and 'story_music_vol' in dir() else 0.12,
+                    "transition_type": story_transition if 'story_transition' in dir() else "cut",
+                    "transition_duration": story_transition_dur if 'story_transition_dur' in dir() else 0.5,
                 }
 
                 progress_q = queue.Queue()
@@ -2620,8 +2931,18 @@ Rules:
                         # Phase: Assembly
                         _log("Assembling final movie...", 0.85, phase="assembly")
                         if len(video_paths) > 1:
-                            _log(f"Concatenating {len(video_paths)} scene videos...", 0.86, phase="assembly")
-                            final_video = concatenate_videos(video_paths, fps=params["fps"])
+                            transition_type = params.get("transition_type", "cut")
+                            transition_dur = params.get("transition_duration", 0.5)
+                            if transition_type and transition_type != "cut":
+                                from transitions import concatenate_with_transitions
+                                _log(f"Joining {len(video_paths)} scenes with '{transition_type}' transition...", 0.86, phase="assembly")
+                                final_video = concatenate_with_transitions(
+                                    video_paths, transition_type=transition_type,
+                                    duration=transition_dur, fps=params["fps"],
+                                )
+                            else:
+                                _log(f"Concatenating {len(video_paths)} scene videos...", 0.86, phase="assembly")
+                                final_video = concatenate_videos(video_paths, fps=params["fps"])
                         else:
                             final_video = video_paths[0]
 
@@ -3201,3 +3522,43 @@ elif tool == "Settings":
         save_config(cfg)
         st.success("Settings saved successfully!")
         st.rerun()
+
+    # ---- Model Hub ----
+    st.markdown("---")
+    st.subheader("Model Hub")
+    st.caption("Video generation models: installed status, VRAM requirements, and recommendations")
+
+    from model_hub import get_model_status, get_recommended_model
+
+    model_status = get_model_status()
+    built_in = [m for m in model_status if m["built_in"]]
+    third_party = [m for m in model_status if not m["built_in"]]
+
+    st.markdown("**Built-in Engines**")
+    for m in built_in:
+        status_icon = "installed" if m["installed"] else "not downloaded"
+        modes = ", ".join(m["modes"])
+        st.markdown(
+            f"- **{m['name']}** | VRAM: {m['vram_min']}GB+ | "
+            f"Quality: {m['quality']} | Speed: {m['speed']} | "
+            f"Modes: {modes} | Status: {status_icon}"
+        )
+
+    if third_party:
+        st.markdown("**Community Models (installable)**")
+        for m in third_party:
+            st.markdown(
+                f"- **{m['name']}** | VRAM: {m['vram_min']}GB+ | "
+                f"Quality: {m['quality']} | Speed: {m['speed']}"
+            )
+
+    # Recommendation
+    try:
+        import torch
+        if torch.cuda.is_available():
+            vram = torch.cuda.get_device_properties(0).total_memory / 1e9
+            rec = get_recommended_model(vram)
+            if rec:
+                st.info(f"Recommended for your GPU ({vram:.0f}GB): **{rec}**")
+    except Exception:
+        pass

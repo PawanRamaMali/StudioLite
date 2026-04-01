@@ -2306,6 +2306,14 @@ Rules:
                     )
                     st.caption("Scene 1 uses Text-to-Video. Scenes 2+ use last frame of previous scene as Image-to-Video input.")
 
+                    # Warn about Wan 1.3B I2V limitation
+                    if "Wan" in story_engine and story_wan_model == "1.3b":
+                        st.warning(
+                            "Wan 1.3B has no I2V model (all Wan I2V models are 14B). "
+                            "Scene chaining will use **prompt-based continuity** instead of I2V, "
+                            "keeping your 1.3B model. For true I2V chaining, use the 14B model (needs 16GB+ VRAM)."
+                        )
+
                 if story_continuity_mode == "None":
                     st.info("Each scene will be generated independently with no visual linking.")
 
@@ -2464,9 +2472,19 @@ Rules:
                         cfg = params["gen_config"]
                         if params["shared_seed"] and params["seed"] is not None:
                             cfg.seed = params["seed"]
+
+                        _log(f"Engine: {cfg.engine} | Model: {getattr(cfg, 'wan_model', getattr(cfg, 'ltx_model', getattr(cfg, 'model_variant', '')))} | "
+                             f"Frames: {cfg.num_frames} | Steps: {cfg.num_inference_steps} | CPU offload: {cfg.enable_cpu_offload}",
+                             0.03, phase="model_load")
+                        _log("Downloading/loading model weights (this can take minutes on first run)...", 0.03, phase="model_load")
+
                         gen = VideoGenerator(cfg)
 
                         _log("Model loaded successfully", 0.05, phase="model_load")
+                        if torch.cuda.is_available():
+                            free = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_reserved(0)
+                            _log(f"Post-load VRAM: {free / 1e9:.1f}GB free", 0.05, phase="model_load",
+                                 vram=round(free / 1e9, 1))
 
                         video_paths = []
                         prev_video_path = None
@@ -2502,25 +2520,49 @@ Rules:
                             # Determine I2V chain vs T2V
                             chain_image = None
                             gen_mode = "Text-to-Video"
+                            use_i2v = False
+
+                            # Check if I2V is viable (Wan I2V requires 14B model - needs 16GB+ VRAM)
+                            engine = params["gen_config"].engine
+                            wan_model = getattr(params["gen_config"], "wan_model", "1.3b")
+                            i2v_viable = True
+                            if engine == "wan" and "1.3b" in wan_model.lower():
+                                # Wan has NO 1.3B I2V model - all I2V models are 14B (~28GB)
+                                # Only use I2V if user explicitly uploaded a reference image
+                                i2v_viable = False
 
                             if scene.get("image") and os.path.exists(scene["image"]):
                                 chain_image = scene["image"]
+                                use_i2v = True
                                 gen_mode = "Image-to-Video (reference image)"
-                            elif params["use_chain"] and prev_video_path and i > 0:
-                                try:
-                                    _log(f"Extracting last frame from scene {i} for chaining...",
+                                if not i2v_viable:
+                                    _log(f"Warning: Wan 1.3B has no I2V model. Using 14B I2V (large download, needs 16GB+ VRAM).",
                                          phase="scene_gen", scene_idx=i, scene_total=total)
-                                    chain_image = gen._extract_last_frame(prev_video_path)
-                                    gen_mode = "Image-to-Video (chained from previous scene)"
-                                except Exception as ce:
-                                    _log(f"Chaining failed, using T2V: {ce}", phase="scene_gen",
-                                         scene_idx=i, scene_total=total)
+                                    use_i2v = True  # User explicitly wants I2V
+                            elif params["use_chain"] and prev_video_path and i > 0:
+                                if i2v_viable:
+                                    try:
+                                        _log(f"Extracting last frame from scene {i} for chaining...",
+                                             phase="scene_gen", scene_idx=i, scene_total=total)
+                                        chain_image = gen._extract_last_frame(prev_video_path)
+                                        use_i2v = True
+                                        gen_mode = "Image-to-Video (chained from previous scene)"
+                                    except Exception as ce:
+                                        _log(f"Chaining failed, using T2V: {ce}", phase="scene_gen",
+                                             scene_idx=i, scene_total=total)
+                                else:
+                                    # Fallback: extract last frame description into the prompt for T2V continuity
+                                    _log(f"Scene chaining via prompt (Wan 1.3B has no I2V model, avoiding 14B download)",
+                                         phase="scene_gen", scene_idx=i, scene_total=total)
+                                    # Add continuity hint: reference previous scene visually in the prompt
+                                    enhanced = f"continuation of previous scene, {enhanced}, smooth transition, same visual style and subjects"
+                                    gen_mode = "Text-to-Video (prompt-chained)"
 
                             _log(f"Scene {i+1}/{total}: \"{title}\" | Mode: {gen_mode}",
                                  phase="scene_gen", scene_idx=i, scene_total=total)
 
                             try:
-                                if chain_image:
+                                if use_i2v and chain_image:
                                     vid = gen.generate_image2video(chain_image, enhanced, progress_callback=scene_cb)
                                 else:
                                     vid = gen.generate_text2video(enhanced, negative_prompt=params["neg_prompt"],

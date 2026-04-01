@@ -448,6 +448,8 @@ class VideoGenerator:
             # - Wan2.2-I2V-A14B-Diffusers (best quality, 14B)
             # - Wan2.1-I2V-14B-480P-Diffusers
             # - Wan2.1-I2V-14B-720P-Diffusers
+            # NOTE: There is NO 1.3B I2V model. All I2V models are 14B.
+            # Check VRAM before committing to a 14B download.
             if "2.2" in model:
                 return "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
             elif resolution == "720p":

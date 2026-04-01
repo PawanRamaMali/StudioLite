@@ -44,7 +44,7 @@ tool = st.sidebar.radio(
     "Select Tool",
     ["Remove Watermark", "Trim / Cut", "Add Image Overlay", "Change Speed",
      "Merge Videos", "Extract Frame", "Export Video", "Transcribe", "View & Publish",
-     "ReelForge", "Video Generator", "Logs", "Settings"]
+     "ReelForge", "Video Generator", "Story Mode", "Logs", "Settings"]
 )
 
 # Clear cache when switching tools
@@ -1822,6 +1822,1022 @@ elif tool == "Video Generator":
                         "quantization": "INT8" if vg_use_quant else "None",
                         "seed": vg_seed,
                     })
+
+
+# ============================================================
+# STORY MODE PAGE
+# ============================================================
+elif tool == "Story Mode":
+    st.title("Story Mode")
+    st.markdown("Create multi-scene AI movies with narration, music, and transitions")
+
+    from videogen import (
+        VideoGenerator, check_system_requirements, VideoGenConfig,
+        get_available_engines, concatenate_videos, add_audio_to_video,
+        videogen_logger
+    )
+    from reelforge import (
+        load_config, save_config, select_backend, check_backend_status,
+        rf_generate_explainer_script, rf_clean_text_for_tts,
+        rf_concatenate_audio_files, list_background_music, get_music_dir,
+        ASPECT_RATIOS,
+    )
+    from mpv2.llm_provider import select_model, generate_text
+    from mpv2.classes.TtsFactory import get_tts_instance, get_voices_for_engine
+    from uuid import uuid4
+    import json, time, traceback
+
+    cfg = load_config()
+    backend = cfg.get("llm_backend", "llamacpp")
+    select_backend(backend)
+    if backend == "ollama":
+        select_model(cfg.get("ollama_model") or "llama3.2:3b")
+    else:
+        gguf_model = cfg.get("gguf_model", "")
+        if gguf_model:
+            select_model(gguf_model)
+
+    # LLM readiness check
+    _llm_ok, _llm_msg = check_backend_status()
+    if not _llm_ok:
+        st.warning(f"LLM not ready: {_llm_msg}. AI script generation will be unavailable. Configure in Settings.")
+
+    # ---- Session State ----
+    if "story_scenes" not in st.session_state:
+        st.session_state.story_scenes = []
+    if "story_result" not in st.session_state:
+        st.session_state.story_result = None
+    if "story_generated_videos" not in st.session_state:
+        st.session_state.story_generated_videos = {}
+    if "story_generation_running" not in st.session_state:
+        st.session_state.story_generation_running = False
+    if "story_visual_identity" not in st.session_state:
+        st.session_state.story_visual_identity = ""
+
+    # ---- System Check ----
+    ok, msg, vram_info = check_system_requirements()
+    if not ok:
+        st.error(f"GPU not available: {msg}")
+        st.info("Story Mode requires a CUDA GPU. You can still plan your story and generate narration.")
+
+    # ---- Helper: AI Script Generator ----
+    def generate_story_script(concept, num_scenes, genre, mood):
+        """Use LLM to generate a structured story with scenes + visual identity anchor."""
+        backend = cfg.get("llm_backend", "llamacpp")
+        select_backend(backend)
+
+        prompt = f"""Create a {num_scenes}-scene cinematic story for a short film.
+
+Concept: {concept}
+Genre: {genre}
+Mood: {mood}
+
+You MUST return a JSON object with two keys:
+
+1. "visual_identity": A single paragraph describing the CONSISTENT visual elements across ALL scenes. Include:
+   - Main subject/character appearance (specific colors, shapes, features that stay the same)
+   - Art style and color palette (e.g., "warm golden tones, soft lighting")
+   - Camera style (e.g., "wide cinematic shots, shallow depth of field")
+   This paragraph will be appended to EVERY scene's prompt to maintain visual consistency.
+
+2. "scenes": A JSON array where each scene has:
+   - "title": Short scene title (3-5 words)
+   - "visual": Detailed cinematic description for AI video generation. ALWAYS reference the same subjects/characters consistently using the SAME descriptive words.
+   - "narration": Voiceover text (1-3 sentences)
+   - "duration": Seconds (3-8)
+
+Return ONLY this JSON:
+{{
+  "visual_identity": "Consistent visual description...",
+  "scenes": [
+    {{"title": "...", "visual": "...", "narration": "...", "duration": 5}},
+    ...
+  ]
+}}
+
+Rules:
+- The visual_identity MUST describe the main subject so it looks the SAME in every scene
+- Each scene's visual description should reference the subject with IDENTICAL wording
+- Visuals must be CINEMATIC (camera angles, lighting, motion)
+- Narration tells a cohesive story across scenes
+- No meta-commentary, just the JSON"""
+
+        response = generate_text(prompt)
+        response = response.replace("```json", "").replace("```", "").strip()
+
+        import re
+
+        # Parse response - try as object with visual_identity first
+        parsed = None
+        try:
+            parsed = json.loads(response)
+        except json.JSONDecodeError:
+            # Try extracting JSON object
+            match = re.search(r'\{{.*\}}', response, re.DOTALL)
+            if match:
+                try:
+                    parsed = json.loads(match.group())
+                except json.JSONDecodeError:
+                    pass
+
+        # Extract visual_identity and scenes
+        visual_identity = ""
+        scene_list = []
+
+        if isinstance(parsed, dict):
+            visual_identity = parsed.get("visual_identity", "")
+            scene_list = parsed.get("scenes", [])
+        elif isinstance(parsed, list):
+            # Fallback: old format without visual_identity
+            scene_list = parsed
+
+        if not scene_list:
+            # Try extracting just the array
+            match = re.search(r'\[.*\]', response, re.DOTALL)
+            if match:
+                try:
+                    scene_list = json.loads(match.group())
+                except json.JSONDecodeError:
+                    pass
+
+        if not scene_list:
+            scene_list = [{"title": f"Scene {i+1}", "visual": concept, "narration": f"Scene {i+1} of the story.", "duration": 5} for i in range(num_scenes)]
+
+        # Attach visual_identity to result
+        result_scenes = scene_list[:num_scenes]
+        return result_scenes, visual_identity
+
+    # ================================================================
+    # LAYOUT: Three phases - Plan | Customize | Generate
+    # ================================================================
+
+    # ---- Phase 1: Story Planning ----
+    st.markdown("---")
+    plan_col, preview_col = st.columns([1, 1.5])
+
+    with plan_col:
+        st.markdown("### 1. Plan Your Story")
+
+        story_concept = st.text_area(
+            "Story Concept",
+            placeholder="Describe your movie idea... e.g., 'A lone astronaut discovers alien life on Mars during a sandstorm'",
+            height=80,
+        )
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            story_num_scenes = st.slider("Number of Scenes", 2, 8, 4)
+            story_genre = st.selectbox("Genre", [
+                "Cinematic", "Documentary", "Fantasy", "Sci-Fi",
+                "Horror", "Romance", "Action", "Nature",
+                "Abstract Art", "Noir", "Comedy", "Mystery"
+            ])
+        with col_b:
+            story_mood = st.selectbox("Mood", [
+                "Epic", "Calm", "Tense", "Mysterious",
+                "Joyful", "Melancholic", "Energetic", "Dreamy",
+                "Dark", "Hopeful", "Nostalgic", "Surreal"
+            ])
+            story_language = st.text_input("Language", value="English")
+
+        # AI Generate button
+        col_gen, col_clear = st.columns([2, 1])
+        with col_gen:
+            ai_generate = st.button("AI Generate Script", type="primary", use_container_width=True)
+        with col_clear:
+            clear_scenes = st.button("Clear All", use_container_width=True)
+
+        if clear_scenes:
+            st.session_state.story_scenes = []
+            st.session_state.story_result = None
+            st.session_state.story_generated_videos = {}
+            st.session_state.story_visual_identity = ""
+            st.rerun()
+
+        if ai_generate and story_concept:
+            backend_ok, backend_msg = check_backend_status()
+            if not backend_ok:
+                st.error(f"LLM not ready: {backend_msg}. Configure in Settings.")
+            else:
+                with st.spinner("AI is writing your story..."):
+                    try:
+                        scenes, visual_identity = generate_story_script(story_concept, story_num_scenes, story_genre, story_mood)
+                        st.session_state.story_scenes = []
+                        for s in scenes:
+                            st.session_state.story_scenes.append({
+                                "title": s.get("title", "Untitled"),
+                                "visual": s.get("visual", ""),
+                                "narration": s.get("narration", ""),
+                                "duration": s.get("duration", 5),
+                                "image": None,
+                            })
+                        st.session_state.story_visual_identity = visual_identity
+                        st.session_state.story_result = None
+                        st.session_state.story_generated_videos = {}
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Script generation failed: {e}")
+        elif ai_generate:
+            st.warning("Enter a story concept first.")
+
+        # Manual add scene
+        st.markdown("---")
+        if st.button("+ Add Blank Scene", use_container_width=True):
+            st.session_state.story_scenes.append({
+                "title": f"Scene {len(st.session_state.story_scenes) + 1}",
+                "visual": "",
+                "narration": "",
+                "duration": 5,
+                "image": None,
+            })
+            st.rerun()
+
+    # ---- Scene Preview / Editor (right column) ----
+    with preview_col:
+        scenes = st.session_state.story_scenes
+
+        if not scenes:
+            st.markdown("### Your Storyboard")
+            st.info("Use **AI Generate Script** to create scenes from your concept, or **+ Add Blank Scene** to build manually.")
+        else:
+            st.markdown(f"### Storyboard ({len(scenes)} scenes)")
+
+            # Scene timeline overview bar
+            total_dur = sum(s.get("duration", 5) for s in scenes)
+            timeline_parts = []
+            colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#DDA0DD", "#98D8C8", "#F7DC6F"]
+            for i, s in enumerate(scenes):
+                pct = (s.get("duration", 5) / max(total_dur, 1)) * 100
+                c = colors[i % len(colors)]
+                timeline_parts.append(
+                    f'<div style="width:{pct}%;background:{c};height:8px;display:inline-block;border-radius:2px;" '
+                    f'title="Scene {i+1}: {s["title"]} ({s.get("duration",5)}s)"></div>'
+                )
+            st.markdown(
+                f'<div style="display:flex;gap:2px;margin-bottom:4px;">{"".join(timeline_parts)}</div>'
+                f'<p style="text-align:right;font-size:12px;color:#888;">Total: {total_dur:.0f}s</p>',
+                unsafe_allow_html=True
+            )
+
+    # ---- Visual Identity display ----
+    if scenes and st.session_state.get("story_visual_identity"):
+        with st.expander("Visual Identity Anchor (auto-generated)", expanded=False):
+            st.markdown(f"*{st.session_state.story_visual_identity}*")
+            st.caption("This description is injected into every scene prompt when Prompt Anchoring is enabled. Edit it in the Scene Continuity settings below.")
+
+    # ---- Phase 2: Scene Editor ----
+    if scenes:
+        st.markdown("---")
+        st.markdown("### 2. Edit Scenes")
+
+        scenes_to_remove = []
+        for i, scene in enumerate(scenes):
+            color = colors[i % len(colors)]
+            with st.expander(f"Scene {i+1}: {scene['title']}", expanded=(i == 0)):
+                col1, col2 = st.columns([2, 1])
+
+                with col1:
+                    new_title = st.text_input("Title", scene["title"], key=f"story_title_{i}")
+                    new_visual = st.text_area(
+                        "Visual Prompt (for video generation)",
+                        scene["visual"],
+                        height=80,
+                        key=f"story_visual_{i}",
+                        help="Describe exactly what the AI should generate as video"
+                    )
+                    new_narration = st.text_area(
+                        "Narration (voiceover text)",
+                        scene["narration"],
+                        height=60,
+                        key=f"story_narration_{i}",
+                        help="This text will be spoken by the TTS voice"
+                    )
+
+                with col2:
+                    new_duration = st.slider(
+                        "Duration (seconds)", 2, 12, int(scene.get("duration", 5)),
+                        key=f"story_dur_{i}"
+                    )
+
+                    # Reference image upload
+                    uploaded_img = st.file_uploader(
+                        "Reference Image (optional)",
+                        type=["png", "jpg", "jpeg"],
+                        key=f"story_img_{i}",
+                        help="Upload an image for Image-to-Video generation"
+                    )
+                    if uploaded_img:
+                        img_path = os.path.join(tempfile.gettempdir(), f"story_ref_{i}_{uploaded_img.name}")
+                        with open(img_path, "wb") as f:
+                            f.write(uploaded_img.read())
+                        scene["image"] = img_path
+                        st.image(img_path, width=150)
+                    elif scene.get("image") and os.path.exists(scene["image"]):
+                        st.image(scene["image"], width=150)
+
+                    # Show generated video preview if exists
+                    if i in st.session_state.story_generated_videos:
+                        vid_path = st.session_state.story_generated_videos[i]
+                        if os.path.exists(vid_path):
+                            st.video(vid_path)
+                            st.caption("Generated")
+
+                # Action buttons row
+                btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
+                with btn_col1:
+                    if i > 0 and st.button("Move Up", key=f"story_up_{i}", use_container_width=True):
+                        scenes[i], scenes[i-1] = scenes[i-1], scenes[i]
+                        st.rerun()
+                with btn_col2:
+                    if i < len(scenes) - 1 and st.button("Move Down", key=f"story_down_{i}", use_container_width=True):
+                        scenes[i], scenes[i+1] = scenes[i+1], scenes[i]
+                        st.rerun()
+                with btn_col3:
+                    if st.button("Duplicate", key=f"story_dup_{i}", use_container_width=True):
+                        new_scene = dict(scene)
+                        new_scene["title"] = scene["title"] + " (copy)"
+                        scenes.insert(i + 1, new_scene)
+                        st.rerun()
+                with btn_col4:
+                    if st.button("Remove", key=f"story_rm_{i}", type="secondary", use_container_width=True):
+                        scenes_to_remove.append(i)
+
+                # Update scene data from inputs
+                scene["title"] = new_title
+                scene["visual"] = new_visual
+                scene["narration"] = new_narration
+                scene["duration"] = new_duration
+
+        # Process removals
+        if scenes_to_remove:
+            for idx in sorted(scenes_to_remove, reverse=True):
+                scenes.pop(idx)
+            st.rerun()
+
+        # ---- Phase 3: Generation Settings & Output ----
+        st.markdown("---")
+        st.markdown("### 3. Generate Movie")
+
+        settings_col, output_col = st.columns([1, 1.5])
+
+        with settings_col:
+            # Video Engine
+            with st.expander("Video Engine", expanded=True):
+                available_engines = []
+                engine_help = {}
+                if ok:
+                    free_vram = vram_info.get("free_vram", 0)
+                    available_engines = ["Wan 2.1 (Recommended)", "LTX-Video (Fast)", "CogVideoX"]
+                    engine_help = {
+                        "Wan 2.1 (Recommended)": f"Best quality | {free_vram:.0f}GB available",
+                        "LTX-Video (Fast)": "Fastest generation",
+                        "CogVideoX": "Good quality, versatile",
+                    }
+                    if free_vram >= 24:
+                        available_engines.append("HunyuanVideo (HD)")
+
+                if not available_engines:
+                    st.warning("No GPU detected. Video generation unavailable.")
+                    available_engines = ["Wan 2.1 (Recommended)"]
+
+                story_engine = st.radio(
+                    "Engine",
+                    available_engines,
+                    horizontal=True,
+                    label_visibility="collapsed",
+                )
+
+                # Engine-specific settings
+                if "Wan" in story_engine:
+                    sc1, sc2 = st.columns(2)
+                    with sc1:
+                        story_wan_model = st.selectbox("Model", ["1.3b", "14b"], index=0, key="story_wan_model")
+                    with sc2:
+                        story_wan_res = st.selectbox("Resolution", ["480p", "720p"], index=0, key="story_wan_res")
+                elif "LTX" in story_engine:
+                    story_ltx_model = st.selectbox("Model", ["base", "distilled"], index=0, key="story_ltx_model")
+                elif "CogVideoX" in story_engine:
+                    story_cog_model = st.selectbox("Model", ["2b", "5b"], index=0, key="story_cog_model")
+
+                story_frames = st.select_slider(
+                    "Frames per Scene",
+                    options=[33, 49, 81],
+                    value=49,
+                    format_func=lambda x: f"{x} frames (~{x/24:.1f}s at 24fps)",
+                    key="story_frames",
+                )
+                story_guidance = st.slider("Prompt Strength", 1.0, 10.0, 5.0, 0.5, key="story_guidance")
+                story_steps = st.slider("Inference Steps", 10, 50, 30, key="story_steps")
+
+            # Audio Settings
+            with st.expander("Narration & Audio", expanded=True):
+                story_enable_narration = st.checkbox("Enable Voiceover Narration", value=True, key="story_narration_on")
+                if story_enable_narration:
+                    tts_engine = cfg.get("tts_engine", "kitten")
+                    available_voices = get_voices_for_engine(tts_engine)
+                    if available_voices:
+                        story_voice = st.selectbox("Voice", available_voices, key="story_voice")
+                    else:
+                        story_voice = cfg.get("tts_voice", "Jasper")
+                        st.caption(f"Using default voice: {story_voice}")
+
+                story_enable_music = st.checkbox("Background Music", value=False, key="story_music_on")
+                if story_enable_music:
+                    story_music_vol = st.slider("Music Volume", 0.05, 0.5, 0.12, 0.05, key="story_music_vol")
+                    available_music = list_background_music()
+                    if available_music:
+                        music_options = ["Random"] + available_music
+                        story_music_track = st.selectbox("Track", music_options, key="story_music_track")
+                    else:
+                        st.caption("Add .mp3/.wav files to the `music/` folder")
+                        story_music_track = None
+
+            # Scene Continuity
+            with st.expander("Scene Continuity", expanded=True):
+                st.caption("Keep subjects, characters, and style consistent across scenes")
+
+                story_continuity_mode = st.radio(
+                    "Continuity Method",
+                    ["None", "Prompt Anchoring", "Scene Chaining", "Both"],
+                    horizontal=True,
+                    key="story_continuity",
+                    help=(
+                        "**None**: Each scene generated independently.\n\n"
+                        "**Prompt Anchoring**: A visual identity description (subject appearance, style, palette) "
+                        "is injected into every scene's prompt so the AI generates consistent-looking subjects.\n\n"
+                        "**Scene Chaining**: The last frame of each scene is used as the input image for the "
+                        "next scene (Image-to-Video), creating visual flow between scenes.\n\n"
+                        "**Both**: Combines prompt anchoring + scene chaining for maximum consistency."
+                    ),
+                )
+
+                use_prompt_anchor = story_continuity_mode in ("Prompt Anchoring", "Both")
+                use_scene_chain = story_continuity_mode in ("Scene Chaining", "Both")
+
+                # Visual identity anchor (editable)
+                if use_prompt_anchor:
+                    default_anchor = st.session_state.get("story_visual_identity", "")
+                    story_visual_anchor = st.text_area(
+                        "Visual Identity Anchor",
+                        value=default_anchor,
+                        height=80,
+                        key="story_anchor_text",
+                        help=(
+                            "This description is appended to EVERY scene's prompt to maintain "
+                            "visual consistency. Describe your main subject's exact appearance, "
+                            "the color palette, art style, and camera style. "
+                            "AI Generate Script fills this automatically, but you can edit it."
+                        ),
+                        placeholder="e.g., A golden retriever with a red collar, warm sunset lighting, shallow depth of field, cinematic 35mm film look"
+                    )
+                    if not story_visual_anchor.strip():
+                        st.info("Tip: Use **AI Generate Script** to auto-generate this, or write your own description of the consistent visual elements.")
+
+                if use_scene_chain:
+                    story_chain_strength = st.slider(
+                        "Chaining Strength",
+                        0.3, 0.9, 0.6, 0.1,
+                        key="story_chain_str",
+                        help=(
+                            "How much the previous scene's last frame influences the next scene. "
+                            "Lower = more creative freedom, Higher = stronger visual continuity. "
+                            "0.5-0.7 is usually a good balance."
+                        ),
+                    )
+                    st.caption("Scene 1 uses Text-to-Video. Scenes 2+ use last frame of previous scene as Image-to-Video input.")
+
+                if story_continuity_mode == "None":
+                    st.info("Each scene will be generated independently with no visual linking.")
+
+                # Shared seed option
+                story_use_shared_seed = st.checkbox(
+                    "Shared Seed (same random seed for all scenes)",
+                    value=False,
+                    key="story_shared_seed",
+                    help="Using the same seed across scenes produces similar visual patterns and textures.",
+                )
+                if story_use_shared_seed:
+                    import random as _rng
+                    story_seed_val = st.number_input("Seed", 0, 2**31, value=42, key="story_seed_val")
+
+            # Output Settings
+            with st.expander("Output Settings", expanded=False):
+                story_aspect = st.radio(
+                    "Aspect Ratio",
+                    ["16:9", "9:16", "1:1", "4:5"],
+                    horizontal=True,
+                    key="story_aspect",
+                    format_func=lambda x: {"16:9": "Landscape", "9:16": "Portrait", "1:1": "Square", "4:5": "Instagram"}.get(x, x)
+                )
+                story_fps = st.slider("Output FPS", 8, 30, 16, key="story_fps")
+                story_neg_prompt = st.text_input(
+                    "Global Negative Prompt",
+                    value="low quality, blurry, distorted, watermark, text overlay",
+                    key="story_neg",
+                )
+
+            # ---- GENERATE BUTTON ----
+            st.markdown("---")
+            generate_movie = st.button(
+                "Generate Movie",
+                type="primary",
+                use_container_width=True,
+                disabled=not ok,
+            )
+
+        # ---- Output Column ----
+        with output_col:
+            if generate_movie and scenes:
+                st.session_state.story_result = None
+                st.session_state.story_generated_videos = {}
+
+                # Build config
+                if "Wan" in story_engine:
+                    engine_id = "wan"
+                    gen_config = VideoGenConfig(
+                        engine="wan",
+                        wan_model=story_wan_model,
+                        wan_resolution=story_wan_res,
+                        num_frames=story_frames,
+                        num_inference_steps=story_steps,
+                        guidance_scale=story_guidance,
+                        fps=story_fps,
+                        enable_cpu_offload=True,
+                    )
+                elif "LTX" in story_engine:
+                    engine_id = "ltx"
+                    gen_config = VideoGenConfig(
+                        engine="ltx",
+                        ltx_model=story_ltx_model,
+                        num_frames=story_frames,
+                        num_inference_steps=story_steps,
+                        guidance_scale=story_guidance,
+                        fps=story_fps,
+                        enable_cpu_offload=True,
+                    )
+                elif "CogVideoX" in story_engine:
+                    engine_id = "cogvideox"
+                    gen_config = VideoGenConfig(
+                        engine="cogvideox",
+                        model_variant=story_cog_model,
+                        num_frames=story_frames,
+                        num_inference_steps=story_steps,
+                        guidance_scale=story_guidance,
+                        fps=story_fps,
+                        enable_cpu_offload=True,
+                    )
+                elif "Hunyuan" in story_engine:
+                    engine_id = "hunyuan"
+                    gen_config = VideoGenConfig(
+                        engine="hunyuan",
+                        num_frames=story_frames,
+                        num_inference_steps=story_steps,
+                        guidance_scale=story_guidance,
+                        fps=story_fps,
+                        enable_cpu_offload=True,
+                    )
+                else:
+                    engine_id = "wan"
+                    gen_config = VideoGenConfig(engine="wan", fps=story_fps, enable_cpu_offload=True)
+
+                # ---- Background generation with thread ----
+                import threading, queue
+
+                # Resolve continuity settings before launching thread
+                _use_anchor = story_continuity_mode in ("Prompt Anchoring", "Both")
+                _use_chain = story_continuity_mode in ("Scene Chaining", "Both")
+                _anchor_text = story_visual_anchor.strip() if _use_anchor and 'story_visual_anchor' in dir() else ""
+                _chain_str = story_chain_strength if _use_chain and 'story_chain_strength' in dir() else 0.6
+                _shared_seed = story_use_shared_seed if 'story_use_shared_seed' in dir() else False
+                _seed = story_seed_val if _shared_seed and 'story_seed_val' in dir() else None
+
+                # Pack all params for the background thread
+                job_params = {
+                    "scenes": [dict(s) for s in scenes],
+                    "gen_config": gen_config,
+                    "engine_id": engine_id,
+                    "genre": story_genre,
+                    "mood": story_mood,
+                    "neg_prompt": story_neg_prompt,
+                    "fps": story_fps,
+                    "use_anchor": _use_anchor,
+                    "anchor_text": _anchor_text,
+                    "use_chain": _use_chain,
+                    "shared_seed": _shared_seed,
+                    "seed": _seed,
+                    "enable_narration": story_enable_narration,
+                    "enable_music": story_enable_music,
+                    "music_track": story_music_track if story_enable_music and 'story_music_track' in dir() else None,
+                    "music_vol": story_music_vol if story_enable_music and 'story_music_vol' in dir() else 0.12,
+                }
+
+                progress_q = queue.Queue()
+                st.session_state.story_progress_queue = progress_q
+                st.session_state.story_job_start_time = time.time()
+                st.session_state.story_job_running = True
+                st.session_state.story_job_log = []
+
+                def _run_story_generation(params, pq):
+                    """Background thread: generates all scenes, audio, final movie."""
+                    import torch
+                    gen = None
+                    try:
+                        scenes_data = params["scenes"]
+                        total = len(scenes_data)
+
+                        def _log(msg, pct=None, phase="", scene_idx=None, scene_total=None,
+                                 step=None, step_total=None, eta=None, vram=None):
+                            entry = {
+                                "msg": msg, "pct": pct, "phase": phase, "time": time.time(),
+                                "scene_idx": scene_idx, "scene_total": scene_total,
+                                "step": step, "step_total": step_total, "eta": eta, "vram": vram,
+                            }
+                            pq.put(entry)
+
+                        # Phase: Load model
+                        _log(f"Loading {params['engine_id'].upper()} model...", 0.02, phase="model_load")
+                        if torch.cuda.is_available():
+                            free = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_reserved(0)
+                            _log(f"GPU VRAM: {free / 1e9:.1f}GB free", 0.02, phase="model_load",
+                                 vram=round(free / 1e9, 1))
+
+                        cfg = params["gen_config"]
+                        if params["shared_seed"] and params["seed"] is not None:
+                            cfg.seed = params["seed"]
+                        gen = VideoGenerator(cfg)
+
+                        _log("Model loaded successfully", 0.05, phase="model_load")
+
+                        video_paths = []
+                        prev_video_path = None
+
+                        # Phase: Generate scenes
+                        for i, scene in enumerate(scenes_data):
+                            scene_start = time.time()
+                            title = scene.get("title", f"Scene {i+1}")
+
+                            prompt = scene.get("visual", "") or scene.get("title", "A cinematic scene")
+                            enhanced = f"{prompt}, cinematic, {params['genre'].lower()} style, {params['mood'].lower()} atmosphere, high quality"
+                            if params["use_anchor"] and params["anchor_text"]:
+                                enhanced = f"{enhanced}, {params['anchor_text']}"
+
+                            # Progress callback from diffusion pipeline
+                            def make_scene_cb(si, st_total):
+                                def cb(step, total, msg):
+                                    elapsed = time.time() - scene_start
+                                    eta_s = (elapsed / max(step, 1)) * (total - step) if step > 0 else None
+                                    vram_now = None
+                                    if torch.cuda.is_available():
+                                        vram_now = round((torch.cuda.get_device_properties(0).total_memory
+                                                          - torch.cuda.memory_reserved(0)) / 1e9, 1)
+                                    overall_pct = 0.05 + ((si + step / max(total, 1)) / (st_total + 2)) * 0.65
+                                    _log(msg, min(overall_pct, 0.95), phase="scene_gen",
+                                         scene_idx=si, scene_total=st_total,
+                                         step=step, step_total=total,
+                                         eta=round(eta_s) if eta_s else None, vram=vram_now)
+                                return cb
+
+                            scene_cb = make_scene_cb(i, total)
+
+                            # Determine I2V chain vs T2V
+                            chain_image = None
+                            gen_mode = "Text-to-Video"
+
+                            if scene.get("image") and os.path.exists(scene["image"]):
+                                chain_image = scene["image"]
+                                gen_mode = "Image-to-Video (reference image)"
+                            elif params["use_chain"] and prev_video_path and i > 0:
+                                try:
+                                    _log(f"Extracting last frame from scene {i} for chaining...",
+                                         phase="scene_gen", scene_idx=i, scene_total=total)
+                                    chain_image = gen._extract_last_frame(prev_video_path)
+                                    gen_mode = "Image-to-Video (chained from previous scene)"
+                                except Exception as ce:
+                                    _log(f"Chaining failed, using T2V: {ce}", phase="scene_gen",
+                                         scene_idx=i, scene_total=total)
+
+                            _log(f"Scene {i+1}/{total}: \"{title}\" | Mode: {gen_mode}",
+                                 phase="scene_gen", scene_idx=i, scene_total=total)
+
+                            try:
+                                if chain_image:
+                                    vid = gen.generate_image2video(chain_image, enhanced, progress_callback=scene_cb)
+                                else:
+                                    vid = gen.generate_text2video(enhanced, negative_prompt=params["neg_prompt"],
+                                                                  progress_callback=scene_cb)
+
+                                video_paths.append(vid)
+                                prev_video_path = vid
+                                elapsed = time.time() - scene_start
+                                _log(f"Scene {i+1} complete ({elapsed:.0f}s)",
+                                     phase="scene_done", scene_idx=i, scene_total=total)
+
+                            except Exception as e:
+                                _log(f"Scene {i+1} FAILED: {e}", phase="scene_error",
+                                     scene_idx=i, scene_total=total)
+                                continue
+
+                        if not video_paths:
+                            _log("All scenes failed. No video generated.", 1.0, phase="error")
+                            return
+
+                        # Phase: TTS Narration
+                        audio_path = None
+                        if params["enable_narration"]:
+                            _log("Generating voiceover narration...", 0.75, phase="tts")
+                            try:
+                                tts = get_tts_instance()
+                                output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".mp")
+                                os.makedirs(output_dir, exist_ok=True)
+                                aud_paths = []
+                                for j, sc in enumerate(scenes_data):
+                                    if j >= len(video_paths):
+                                        break
+                                    narr = sc.get("narration", "")
+                                    if narr.strip():
+                                        _log(f"TTS scene {j+1}/{total}: \"{narr[:50]}...\"", phase="tts")
+                                        clean = rf_clean_text_for_tts(narr)
+                                        af = os.path.join(output_dir, f"story_tts_{uuid4()}.wav")
+                                        tts.synthesize(clean, af)
+                                        if os.path.exists(af) and os.path.getsize(af) > 100:
+                                            aud_paths.append(af)
+                                        else:
+                                            aud_paths.append(None)
+                                    else:
+                                        aud_paths.append(None)
+
+                                valid = [p for p in aud_paths if p]
+                                if valid:
+                                    combined = os.path.join(output_dir, f"story_narration_{uuid4()}.wav")
+                                    rf_concatenate_audio_files(valid, combined)
+                                    audio_path = combined
+                                    _log(f"Narration complete ({len(valid)} clips)", 0.80, phase="tts")
+                            except Exception as e:
+                                _log(f"TTS failed: {e}", phase="tts")
+
+                        # Phase: Assembly
+                        _log("Assembling final movie...", 0.85, phase="assembly")
+                        if len(video_paths) > 1:
+                            _log(f"Concatenating {len(video_paths)} scene videos...", 0.86, phase="assembly")
+                            final_video = concatenate_videos(video_paths, fps=params["fps"])
+                        else:
+                            final_video = video_paths[0]
+
+                        if audio_path and os.path.exists(audio_path):
+                            _log("Adding narration audio track...", 0.90, phase="assembly")
+                            final_video = add_audio_to_video(final_video, audio_path, volume=1.0)
+
+                        if params["enable_music"]:
+                            _log("Mixing background music...", 0.93, phase="assembly")
+                            try:
+                                mpath = None
+                                if params["music_track"] and params["music_track"] != "Random":
+                                    mpath = str(get_music_dir() / params["music_track"])
+                                else:
+                                    ml = list_background_music()
+                                    if ml:
+                                        import random as _r
+                                        mpath = str(get_music_dir() / _r.choice(ml))
+                                if mpath and os.path.exists(mpath):
+                                    final_video = add_audio_to_video(final_video, mpath, volume=params["music_vol"])
+                                    _log("Background music added", 0.95, phase="assembly")
+                            except Exception as e:
+                                _log(f"Music mixing failed: {e}", phase="assembly")
+
+                        # Done!
+                        _log("DONE", 1.0, phase="complete")
+                        pq.put({
+                            "phase": "result",
+                            "video_path": final_video,
+                            "scene_videos": video_paths,
+                            "engine": params["engine_id"],
+                            "total_scenes": len(video_paths),
+                        })
+
+                    except Exception as e:
+                        pq.put({"phase": "fatal_error", "msg": str(e), "traceback": traceback.format_exc()})
+                    finally:
+                        if gen:
+                            gen.unload()
+
+                # Launch thread
+                thread = threading.Thread(target=_run_story_generation, args=(job_params, progress_q), daemon=True)
+                thread.start()
+                st.session_state.story_bg_thread = thread
+                st.rerun()
+
+            elif generate_movie and not scenes:
+                st.warning("Add scenes to your storyboard first.")
+
+        # ============================================================
+        # LIVE PROGRESS MONITOR (survives tab switches)
+        # ============================================================
+        _bg_thread = st.session_state.get("story_bg_thread")
+        _job_running = st.session_state.get("story_job_running", False)
+        _progress_q = st.session_state.get("story_progress_queue")
+
+        if _job_running and _progress_q is not None:
+            import queue as _q_mod
+
+            st.markdown("---")
+            st.markdown("### Generating Movie...")
+
+            # Drain queue into log
+            if "story_job_log" not in st.session_state:
+                st.session_state.story_job_log = []
+
+            result_data = None
+            fatal_error = None
+            while True:
+                try:
+                    entry = _progress_q.get_nowait()
+                    if entry.get("phase") == "result":
+                        result_data = entry
+                    elif entry.get("phase") == "fatal_error":
+                        fatal_error = entry
+                    else:
+                        st.session_state.story_job_log.append(entry)
+                except _q_mod.Empty:
+                    break
+
+            log = st.session_state.story_job_log
+            job_start = st.session_state.get("story_job_start_time", time.time())
+            elapsed_total = time.time() - job_start
+
+            # Handle completion
+            if result_data:
+                st.session_state.story_job_running = False
+                st.session_state.story_result = {
+                    "video_path": result_data["video_path"],
+                    "scenes": [dict(s) for s in scenes],
+                    "scene_videos": result_data.get("scene_videos", []),
+                    "engine": result_data.get("engine", ""),
+                    "total_scenes": result_data.get("total_scenes", 0),
+                    "frames_per_scene": story_frames if 'story_frames' in dir() else 49,
+                    "fps": story_fps if 'story_fps' in dir() else 16,
+                }
+                st.session_state.story_job_log = []
+                st.balloons()
+                st.rerun()
+            elif fatal_error:
+                st.session_state.story_job_running = False
+                st.error(f"Generation failed: {fatal_error.get('msg', 'Unknown error')}")
+                with st.expander("Error Details"):
+                    st.code(fatal_error.get("traceback", ""))
+                st.session_state.story_job_log = []
+            else:
+                # Still running - show rich progress dashboard
+                latest = log[-1] if log else {}
+                pct = latest.get("pct", 0) or 0
+
+                # Progress bar
+                st.progress(min(pct, 0.99), text=latest.get("msg", "Working..."))
+
+                # Elapsed time + ETA
+                time_col, vram_col, phase_col = st.columns(3)
+                with time_col:
+                    mins, secs = divmod(int(elapsed_total), 60)
+                    st.metric("Elapsed", f"{mins}m {secs}s")
+                with vram_col:
+                    vram_entries = [e for e in log if e.get("vram") is not None]
+                    if vram_entries:
+                        st.metric("GPU VRAM Free", f"{vram_entries[-1]['vram']}GB")
+                    else:
+                        st.metric("GPU VRAM Free", "...")
+                with phase_col:
+                    phase = latest.get("phase", "")
+                    phase_labels = {
+                        "model_load": "Loading Model",
+                        "scene_gen": "Generating Scenes",
+                        "scene_done": "Scene Complete",
+                        "scene_error": "Scene Error",
+                        "tts": "Generating Narration",
+                        "assembly": "Assembling Movie",
+                    }
+                    st.metric("Phase", phase_labels.get(phase, phase.replace("_", " ").title() or "Starting"))
+
+                # Scene progress tracker
+                total_scenes = latest.get("scene_total") or len(scenes)
+                current_scene = latest.get("scene_idx")
+                if current_scene is not None:
+                    st.markdown("**Scene Progress:**")
+                    scene_cols = st.columns(min(total_scenes, 8))
+                    completed_scenes = [e.get("scene_idx") for e in log if e.get("phase") == "scene_done"]
+                    error_scenes = [e.get("scene_idx") for e in log if e.get("phase") == "scene_error"]
+                    for si in range(total_scenes):
+                        with scene_cols[si % len(scene_cols)]:
+                            if si in completed_scenes:
+                                st.success(f"Scene {si+1}")
+                            elif si in error_scenes:
+                                st.error(f"Scene {si+1}")
+                            elif si == current_scene and phase == "scene_gen":
+                                st.warning(f"Scene {si+1}...")
+                            else:
+                                st.caption(f"Scene {si+1}")
+
+                # Inference step detail
+                step = latest.get("step")
+                step_total = latest.get("step_total")
+                eta = latest.get("eta")
+                if step is not None and step_total is not None and phase == "scene_gen":
+                    step_pct = step / max(step_total, 1)
+                    eta_str = f" | ETA: {eta}s" if eta else ""
+                    st.caption(f"Inference: step {step}/{step_total} ({step_pct*100:.0f}%){eta_str}")
+
+                # Live log feed (last 8 messages)
+                with st.expander("Live Log", expanded=True):
+                    recent = log[-12:] if len(log) > 12 else log
+                    log_lines = []
+                    for e in recent:
+                        t = e.get("time", 0) - job_start
+                        msg = e.get("msg", "")
+                        log_lines.append(f"[{t:6.1f}s] {msg}")
+                    st.code("\n".join(log_lines) if log_lines else "Starting...", language="log")
+
+                # Auto-refresh every 2 seconds
+                time.sleep(2)
+                st.rerun()
+
+        # ============================================================
+        # RESULTS SECTION (shown when generation is complete)
+        # ============================================================
+        result = st.session_state.story_result
+        if result and not _job_running:
+            st.markdown("---")
+            st.markdown("### Your Movie")
+
+            output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".mp")
+            vid_path = result["video_path"]
+
+            if os.path.exists(vid_path):
+                st.video(vid_path)
+
+                dl_col, info_col = st.columns([2, 1])
+                with dl_col:
+                    with open(vid_path, "rb") as vf:
+                        video_bytes = vf.read()
+                        fname = f"story_{story_concept[:20].replace(' ', '_') if story_concept else 'movie'}.mp4"
+                        st.download_button(
+                            "Download Movie",
+                            video_bytes,
+                            file_name=fname,
+                            mime="video/mp4",
+                            use_container_width=True,
+                            type="primary",
+                        )
+                with info_col:
+                    file_size_mb = os.path.getsize(vid_path) / (1024 * 1024)
+                    st.metric("File Size", f"{file_size_mb:.1f} MB")
+
+                st.caption(f"Saved to: `{vid_path}`")
+            else:
+                st.error(f"Movie file not found at: {vid_path}")
+
+            with st.expander("Scene Breakdown", expanded=True):
+                scene_vids = result.get("scene_videos", [])
+                result_scenes = result.get("scenes", [])
+                if scene_vids:
+                    cols_per_row = min(3, len(scene_vids))
+                    for row_start in range(0, len(scene_vids), cols_per_row):
+                        cols = st.columns(cols_per_row)
+                        for col_idx in range(cols_per_row):
+                            scene_idx = row_start + col_idx
+                            if scene_idx < len(scene_vids):
+                                with cols[col_idx]:
+                                    vp = scene_vids[scene_idx]
+                                    if os.path.exists(vp):
+                                        st.video(vp)
+                                        if scene_idx < len(result_scenes):
+                                            s = result_scenes[scene_idx]
+                                            st.markdown(f"**Scene {scene_idx+1}: {s.get('title', '')}**")
+                                            narr = s.get('narration', '')
+                                            if narr:
+                                                st.caption(f"_{narr[:100]}_")
+                                        with open(vp, "rb") as sf:
+                                            st.download_button(
+                                                f"Download Scene {scene_idx+1}",
+                                                sf.read(),
+                                                file_name=f"scene_{scene_idx+1}.mp4",
+                                                mime="video/mp4",
+                                                key=f"dl_scene_{scene_idx}",
+                                                use_container_width=True,
+                                            )
+                else:
+                    st.info("No individual scene videos available.")
+
+            with st.expander("Generation Details & File Locations"):
+                st.markdown("**Output Files:**")
+                st.code(f"Final movie: {vid_path}", language=None)
+                for i, vp in enumerate(result.get("scene_videos", [])):
+                    st.code(f"Scene {i+1}:    {vp}", language=None)
+                st.markdown(f"**Output directory:** `{output_dir}`")
+                st.markdown("---")
+                st.json({
+                    "engine": result.get("engine", ""),
+                    "total_scenes": result.get("total_scenes", 0),
+                    "frames_per_scene": result.get("frames_per_scene", ""),
+                    "fps": result.get("fps", ""),
+                })
 
 
 # ============================================================

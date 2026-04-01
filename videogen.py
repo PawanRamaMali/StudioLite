@@ -247,6 +247,13 @@ class VideoGenerator:
         # VAE decoding spike (temporary but can cause OOM)
         vae_overhead = 4.0
 
+        # CPU offloading dramatically reduces VRAM - only one layer on GPU at a time
+        if self.config.enable_cpu_offload:
+            # With CPU offloading, peak VRAM is much lower
+            offload_factor = 0.4  # ~40% of full VRAM needed
+            model_vram = model_vram * offload_factor
+            vae_overhead = 2.0  # VAE still needs some VRAM
+
         # Total with 10% safety margin
         total = (model_vram + frame_overhead * resolution_factor + vae_overhead) * 1.1
 

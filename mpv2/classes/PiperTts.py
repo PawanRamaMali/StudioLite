@@ -93,10 +93,15 @@ def download_piper_model(voice_name):
     # Piper models are on rhasspy/piper-voices repo
     repo_id = "rhasspy/piper-voices"
 
-    # Model files follow pattern: voices/{lang}/{model_name}.onnx
-    lang_code = model_name.split("-")[0] + "_" + model_name.split("-")[1]  # e.g., en_US
+    # Model files follow pattern: {lang_short}/{lang_code}/{voice}/{quality}/{model_name}.onnx
+    # e.g., en/en_US/amy/medium/en_US-amy-medium.onnx
+    parts = model_name.split("-")  # e.g., ["en_US", "amy", "medium"] from "en_US-amy-medium"
+    lang_code = parts[0]  # e.g., en_US
+    lang_short = lang_code.split("_")[0]  # e.g., en
+    voice_id = parts[1]  # e.g., amy
     model_file = f"{model_name}.onnx"
     config_file = f"{model_name}.onnx.json"
+    hf_subdir = f"{lang_short}/{lang_code}/{voice_id}/{quality}"
 
     # Download model and config
     model_path = models_dir / model_file
@@ -108,7 +113,7 @@ def download_piper_model(voice_name):
             # Download from HuggingFace
             downloaded = hf_hub_download(
                 repo_id=repo_id,
-                filename=f"{lang_code}/{quality}/{model_file}",
+                filename=f"{hf_subdir}/{model_file}",
                 local_dir=str(models_dir),
                 local_dir_use_symlinks=False,
             )
@@ -124,7 +129,7 @@ def download_piper_model(voice_name):
         try:
             downloaded = hf_hub_download(
                 repo_id=repo_id,
-                filename=f"{lang_code}/{quality}/{config_file}",
+                filename=f"{hf_subdir}/{config_file}",
                 local_dir=str(models_dir),
                 local_dir_use_symlinks=False,
             )
@@ -232,8 +237,8 @@ class PiperTTS:
 
         # Generate audio
         audio_data = []
-        for audio_bytes in self._piper_voice.synthesize_stream_raw(text):
-            audio_data.append(np.frombuffer(audio_bytes, dtype=np.int16))
+        for chunk in self._piper_voice.synthesize(text):
+            audio_data.append(np.frombuffer(chunk.audio_int16_bytes, dtype=np.int16))
 
         if not audio_data:
             raise RuntimeError("No audio generated")

@@ -45,7 +45,9 @@ tool = st.sidebar.radio(
     ["Remove Watermark", "Trim / Cut", "Add Image Overlay", "Change Speed",
      "Merge Videos", "Extract Frame", "Export Video", "Upscale Video",
      "Video Editor", "Audio Studio", "Transcribe", "View & Publish",
-     "ReelForge", "Video Generator", "Story Mode", "Logs", "Settings"]
+     "ReelForge", "Video Generator", "Story Mode",
+     "Characters", "Keyframes", "Motion Brush",
+     "Logs", "Settings"]
 )
 
 # Clear cache when switching tools
@@ -2126,6 +2128,7 @@ elif tool == "Story Mode":
     st.title("Story Mode")
     st.markdown("Create multi-scene AI movies with narration, music, and transitions")
 
+    from character_ref import list_characters as _list_chars, inject_character_prompt
     from videogen import (
         VideoGenerator, check_system_requirements, VideoGenConfig,
         get_available_engines, concatenate_videos, add_audio_to_video,
@@ -2413,6 +2416,20 @@ Rules:
                         "Duration (seconds)", 2, 12, int(scene.get("duration", 5)),
                         key=f"story_dur_{i}"
                     )
+
+                    # Character assignment
+                    _avail_chars = _list_chars()
+                    if _avail_chars:
+                        _char_options = ["None"] + [c["name"] for c in _avail_chars]
+                        _cur_char = scene.get("character", "None")
+                        _sel_char = st.selectbox(
+                            "Character",
+                            _char_options,
+                            index=_char_options.index(_cur_char) if _cur_char in _char_options else 0,
+                            key=f"story_char_{i}",
+                            help="Assign a character from your library for consistent appearance",
+                        )
+                        scene["character"] = _sel_char
 
                     # Reference image upload
                     uploaded_img = st.file_uploader(
@@ -2810,6 +2827,15 @@ Rules:
                             if params["use_anchor"] and params["anchor_text"]:
                                 enhanced = f"{enhanced}, {params['anchor_text']}"
 
+                            # Inject character visual prompt if assigned
+                            char_name = scene.get("character", "None")
+                            if char_name and char_name != "None":
+                                from character_ref import list_characters as _lc
+                                for _ch in _lc():
+                                    if _ch["name"] == char_name and _ch.get("visual_prompt"):
+                                        enhanced = f"{enhanced}, {_ch['visual_prompt']}"
+                                        break
+
                             # Progress callback from diffusion pipeline
                             def make_scene_cb(si, st_total):
                                 def cb(step, total, msg):
@@ -3204,6 +3230,422 @@ Rules:
 
 
 # ============================================================
+# CHARACTERS PAGE
+# ============================================================
+elif tool == "Characters":
+    st.title("Character Library")
+    st.markdown("Create and manage persistent characters for consistent appearance across scenes")
+
+    from character_ref import (
+        list_characters, create_character, load_character,
+        delete_character, update_character, generate_character_description,
+        get_character_reference_image,
+    )
+
+    # Init
+    if "char_editing" not in st.session_state:
+        st.session_state.char_editing = None
+
+    characters = list_characters()
+
+    # ---- Create New Character ----
+    with st.expander("Create New Character", expanded=not bool(characters)):
+        cc1, cc2 = st.columns([2, 1])
+        with cc1:
+            char_name = st.text_input("Character Name", placeholder="e.g., Detective Sarah", key="char_name")
+            char_desc = st.text_input("Brief Description", placeholder="e.g., 30s woman, red hair, trench coat", key="char_desc")
+            char_visual = st.text_area(
+                "Visual Prompt (detailed appearance for AI generation)",
+                height=100,
+                key="char_visual",
+                placeholder="A woman in her 30s with fiery red curly hair, green eyes, wearing a long beige trench coat over a dark turtleneck, confident posture, sharp features, freckles across her nose",
+                help="Be very specific: hair color/style, eye color, clothing, build, distinguishing features. This gets injected into every scene prompt."
+            )
+        with cc2:
+            char_refs = st.file_uploader(
+                "Reference Images",
+                type=["png", "jpg", "jpeg"],
+                accept_multiple_files=True,
+                key="char_refs",
+                help="Upload 1-5 reference images of the character"
+            )
+            if char_refs:
+                for ref in char_refs[:3]:
+                    st.image(ref, width=120)
+
+        # AI Generate description button
+        ai_col, save_col = st.columns([1, 1])
+        with ai_col:
+            if st.button("AI Generate Description", use_container_width=True, key="char_ai_gen"):
+                if char_name and char_desc:
+                    try:
+                        from mpv2.llm_provider import generate_text as _gen_text, select_backend as _sb, select_model as _sm
+                        cfg = load_config()
+                        _sb(cfg.get("llm_backend", "ollama"))
+                        if cfg.get("llm_backend") == "ollama":
+                            _sm(cfg.get("ollama_model", "llama3.2:3b"))
+                        with st.spinner("Generating detailed visual description..."):
+                            result = generate_character_description(char_name, char_desc, _gen_text)
+                        st.session_state.char_ai_result = result
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"AI generation failed: {e}")
+
+        with save_col:
+            if st.button("Save Character", type="primary", use_container_width=True, key="char_save"):
+                if char_name and (char_visual or st.session_state.get("char_ai_result")):
+                    visual = char_visual or st.session_state.get("char_ai_result", "")
+                    # Save ref images
+                    ref_paths = []
+                    if char_refs:
+                        import tempfile as _tf
+                        for ref in char_refs:
+                            p = os.path.join(_tf.gettempdir(), f"charref_{ref.name}")
+                            with open(p, "wb") as f:
+                                f.write(ref.read())
+                            ref_paths.append(p)
+                    char = create_character(char_name, char_desc, visual, ref_paths)
+                    st.success(f"Character **{char_name}** saved! (ID: {char['id']})")
+                    st.session_state.char_ai_result = None
+                    st.rerun()
+                else:
+                    st.warning("Enter a name and visual description (or use AI Generate).")
+
+        # Show AI result if generated
+        if st.session_state.get("char_ai_result"):
+            st.info(f"**AI Generated Description:**\n\n{st.session_state.char_ai_result}")
+            st.caption("This will be used as the visual prompt when you click Save Character.")
+
+    # ---- Character Gallery ----
+    if characters:
+        st.markdown("---")
+        st.markdown(f"### Your Characters ({len(characters)})")
+
+        cols_per_row = 3
+        for row_start in range(0, len(characters), cols_per_row):
+            cols = st.columns(cols_per_row)
+            for ci in range(cols_per_row):
+                idx = row_start + ci
+                if idx < len(characters):
+                    char = characters[idx]
+                    with cols[ci]:
+                        # Character card
+                        st.markdown(f"**{char['name']}**")
+                        if char.get("description"):
+                            st.caption(char["description"])
+
+                        # Show reference image if exists
+                        ref_img = get_character_reference_image(char)
+                        if ref_img:
+                            st.image(ref_img, width=180)
+
+                        # Visual prompt preview
+                        visual = char.get("visual_prompt", "")
+                        if visual:
+                            st.markdown(f"*{visual[:120]}{'...' if len(visual) > 120 else ''}*")
+
+                        # Actions
+                        bc1, bc2 = st.columns(2)
+                        with bc1:
+                            if st.button("Copy Prompt", key=f"char_copy_{char['id']}", use_container_width=True):
+                                st.code(char.get("visual_prompt", ""), language=None)
+                        with bc2:
+                            if st.button("Delete", key=f"char_del_{char['id']}", use_container_width=True):
+                                delete_character(char["id"])
+                                st.rerun()
+    else:
+        st.info("No characters yet. Create one above to maintain consistent subjects across your Story Mode scenes.")
+
+    # Usage instructions
+    st.markdown("---")
+    st.markdown("### How to Use Characters")
+    st.markdown("""
+1. **Create** a character with a detailed visual description
+2. **Copy** the visual prompt from the character card
+3. In **Story Mode**, paste it into the **Visual Identity Anchor** field (Scene Continuity settings)
+4. Or paste it directly into each scene's **Visual Prompt** to reference the character
+
+**Tip:** Use AI Generate Description with just a brief description like "young detective, red hair" to get a detailed, consistent visual prompt.
+""")
+
+
+# ============================================================
+# KEYFRAMES PAGE
+# ============================================================
+elif tool == "Keyframes":
+    st.title("Keyframe Animation")
+    st.markdown("Create smooth transitions between keyframe images with easing curves")
+
+    from keyframes import (
+        EASING_FUNCTIONS, interpolate_images, frames_to_video,
+        generate_keyframe_video, create_keyframe_sequence,
+    )
+
+    st.markdown("### Define Keyframes")
+    st.caption("Upload start and end images. The AI will generate a smooth video transition between them.")
+
+    kf_col1, kf_col2 = st.columns(2)
+
+    with kf_col1:
+        st.markdown("**Start Keyframe**")
+        kf_start = st.file_uploader("Start Image", type=["png", "jpg", "jpeg"], key="kf_start")
+        if kf_start:
+            st.image(kf_start, use_container_width=True)
+
+    with kf_col2:
+        st.markdown("**End Keyframe**")
+        kf_end = st.file_uploader("End Image", type=["png", "jpg", "jpeg"], key="kf_end")
+        if kf_end:
+            st.image(kf_end, use_container_width=True)
+
+    st.markdown("---")
+
+    # Settings
+    kf_s1, kf_s2, kf_s3 = st.columns(3)
+    with kf_s1:
+        kf_method = st.selectbox(
+            "Method",
+            ["blend", "i2v", "interpolate"],
+            format_func=lambda x: {
+                "blend": "Alpha Blend (fast, no AI)",
+                "i2v": "AI Image-to-Video (uses GPU)",
+                "interpolate": "Frame Interpolation (RIFE)",
+            }[x],
+            key="kf_method",
+        )
+    with kf_s2:
+        kf_easing = st.selectbox(
+            "Easing Curve",
+            list(EASING_FUNCTIONS.keys()),
+            format_func=lambda x: x.replace("_", " ").title(),
+            key="kf_easing",
+        )
+    with kf_s3:
+        kf_frames = st.slider("Number of Frames", 10, 120, 30, key="kf_frames")
+        kf_fps = st.slider("FPS", 8, 30, 24, key="kf_fps")
+
+    if kf_method == "i2v":
+        kf_prompt = st.text_input(
+            "Motion Description",
+            placeholder="Smooth transition, camera moves forward, objects morphing...",
+            key="kf_prompt",
+        )
+    else:
+        kf_prompt = ""
+
+    # Easing curve preview
+    import numpy as np
+    ease_fn = EASING_FUNCTIONS[kf_easing]
+    x_vals = np.linspace(0, 1, 50)
+    y_vals = [ease_fn(x) for x in x_vals]
+    st.line_chart({"Progress": y_vals}, height=100)
+    st.caption(f"Easing: {kf_easing} | Duration: {kf_frames/kf_fps:.1f}s at {kf_fps}fps")
+
+    # Generate
+    st.markdown("---")
+    kf_generate = st.button("Generate Keyframe Video", type="primary", use_container_width=True,
+                             disabled=not (kf_start and kf_end))
+
+    if kf_generate and kf_start and kf_end:
+        # Save uploaded images
+        kf_dir = os.path.join(os.path.dirname(__file__), ".mp")
+        os.makedirs(kf_dir, exist_ok=True)
+
+        kf_start_path = os.path.join(kf_dir, f"kf_start_{kf_start.name}")
+        with open(kf_start_path, "wb") as f:
+            f.write(kf_start.read())
+
+        kf_end_path = os.path.join(kf_dir, f"kf_end_{kf_end.name}")
+        with open(kf_end_path, "wb") as f:
+            f.write(kf_end.read())
+
+        progress = st.progress(0, text="Generating keyframe animation...")
+
+        def kf_cb(step, total, msg):
+            progress.progress(min(step / max(total, 1), 0.99), text=msg)
+
+        try:
+            if kf_method == "i2v":
+                from videogen import VideoGenerator, VideoGenConfig
+                gen_config = VideoGenConfig(
+                    engine="wan", wan_model="1.3b", num_frames=kf_frames,
+                    fps=kf_fps, enable_cpu_offload=True,
+                )
+                generator = VideoGenerator(gen_config)
+                try:
+                    result = generate_keyframe_video(
+                        kf_start_path, kf_end_path, generator=generator,
+                        prompt=kf_prompt, num_frames=kf_frames, fps=kf_fps,
+                        easing=kf_easing, method="i2v", progress_callback=kf_cb,
+                    )
+                finally:
+                    generator.unload()
+            else:
+                result = generate_keyframe_video(
+                    kf_start_path, kf_end_path, num_frames=kf_frames,
+                    fps=kf_fps, easing=kf_easing, method=kf_method,
+                    progress_callback=kf_cb,
+                )
+
+            progress.progress(1.0, text="Complete!")
+            st.video(result)
+
+            with open(result, "rb") as f:
+                st.download_button("Download Video", f.read(),
+                                   file_name="keyframe_animation.mp4", mime="video/mp4",
+                                   use_container_width=True)
+            st.caption(f"Saved to: `{result}`")
+        except Exception as e:
+            st.error(f"Failed: {e}")
+            import traceback
+            with st.expander("Error Details"):
+                st.code(traceback.format_exc())
+
+
+# ============================================================
+# MOTION BRUSH PAGE
+# ============================================================
+elif tool == "Motion Brush":
+    st.title("Motion Brush")
+    st.markdown("Define motion regions on an image for controlled video generation")
+
+    from motion_brush import (
+        MOTION_TYPES, REGION_COLORS, create_motion_region,
+        regions_to_prompt, create_motion_mask, create_region_overlay,
+    )
+
+    # Init session state
+    if "mb_regions" not in st.session_state:
+        st.session_state.mb_regions = []
+
+    mb_col1, mb_col2 = st.columns([1, 1.5])
+
+    with mb_col1:
+        st.markdown("### Upload Image")
+        mb_image = st.file_uploader("Base Image", type=["png", "jpg", "jpeg"], key="mb_image")
+
+        if mb_image:
+            from PIL import Image as _PILImage
+            mb_dir = os.path.join(os.path.dirname(__file__), ".mp")
+            os.makedirs(mb_dir, exist_ok=True)
+            mb_img_path = os.path.join(mb_dir, f"mb_{mb_image.name}")
+            with open(mb_img_path, "wb") as f:
+                f.write(mb_image.read())
+            img = _PILImage.open(mb_img_path)
+            img_w, img_h = img.size
+            st.caption(f"Image: {img_w}x{img_h}")
+
+            st.markdown("---")
+            st.markdown("### Add Motion Region")
+            st.caption("Define rectangular regions with independent motion settings")
+
+            mr_c1, mr_c2 = st.columns(2)
+            with mr_c1:
+                mr_x = st.number_input("X Position", 0, img_w, 0, key="mr_x")
+                mr_w = st.number_input("Width", 10, img_w, min(200, img_w), key="mr_w")
+            with mr_c2:
+                mr_y = st.number_input("Y Position", 0, img_h, 0, key="mr_y")
+                mr_h = st.number_input("Height", 10, img_h, min(200, img_h), key="mr_h")
+
+            mr_motion = st.selectbox(
+                "Motion Type",
+                list(MOTION_TYPES.keys()),
+                format_func=lambda x: f"{x.replace('_',' ').title()} - {MOTION_TYPES[x]['prompt'][:50]}",
+                key="mr_motion",
+            )
+            mr_dir = st.selectbox(
+                "Direction",
+                ["none", "left", "right", "up", "down"],
+                key="mr_dir",
+            )
+            mr_strength = st.slider("Strength", 0.0, 1.0, MOTION_TYPES[mr_motion]["strength"], key="mr_str")
+
+            if st.button("Add Region", type="primary", use_container_width=True):
+                if len(st.session_state.mb_regions) < 5:
+                    st.session_state.mb_regions.append(
+                        create_motion_region(mr_x, mr_y, mr_w, mr_h, mr_motion, mr_dir, mr_strength)
+                    )
+                    st.rerun()
+                else:
+                    st.warning("Maximum 5 regions allowed.")
+
+            if st.button("Clear All Regions", use_container_width=True):
+                st.session_state.mb_regions = []
+                st.rerun()
+
+    with mb_col2:
+        if mb_image:
+            regions = st.session_state.mb_regions
+
+            if regions:
+                # Show overlay visualization
+                overlay_path = create_region_overlay(mb_img_path, regions)
+                st.image(overlay_path, caption=f"{len(regions)} motion region(s) defined", use_container_width=True)
+
+                # Region list
+                st.markdown("**Active Regions:**")
+                for ri, reg in enumerate(regions):
+                    color_hex = "#{:02x}{:02x}{:02x}".format(*REGION_COLORS[ri % len(REGION_COLORS)][:3])
+                    st.markdown(
+                        f'<span style="color:{color_hex}">Region {ri+1}</span>: '
+                        f'{reg["motion_type"]} | Pos: ({reg["x"]},{reg["y"]}) | '
+                        f'Size: {reg["width"]}x{reg["height"]} | Strength: {reg["strength"]:.1f}',
+                        unsafe_allow_html=True,
+                    )
+
+                # Preview enhanced prompt
+                mb_base_prompt = st.text_input("Base Prompt", "A serene landscape with a flowing river", key="mb_prompt")
+                enhanced = regions_to_prompt(mb_base_prompt, regions, img_w, img_h)
+                st.markdown("**Enhanced Prompt (auto-generated):**")
+                st.code(enhanced, language=None)
+
+                # Generate
+                st.markdown("---")
+                if st.button("Generate Video with Motion Regions", type="primary", use_container_width=True):
+                    try:
+                        from videogen import VideoGenerator, VideoGenConfig, check_system_requirements
+                        ok, msg, _ = check_system_requirements()
+                        if not ok:
+                            st.error(f"GPU required: {msg}")
+                        else:
+                            config = VideoGenConfig(
+                                engine="wan", wan_model="1.3b", num_frames=49,
+                                fps=16, enable_cpu_offload=True,
+                            )
+                            prog = st.progress(0, text="Loading model...")
+                            def mb_cb(s, t, m):
+                                prog.progress(min(s/max(t,1), 0.99), text=m)
+
+                            gen = VideoGenerator(config)
+                            try:
+                                # Create motion mask
+                                mask_path = create_motion_mask(regions, img_w, img_h)
+                                result = gen.generate_image2video(
+                                    mb_img_path, enhanced, progress_callback=mb_cb,
+                                )
+                                prog.progress(1.0, text="Complete!")
+                                st.video(result)
+                                with open(result, "rb") as f:
+                                    st.download_button("Download", f.read(),
+                                                       file_name="motion_brush.mp4", mime="video/mp4",
+                                                       use_container_width=True)
+                            finally:
+                                gen.unload()
+                    except Exception as e:
+                        st.error(f"Generation failed: {e}")
+            else:
+                st.image(mb_img_path, caption="Add motion regions using the controls on the left", use_container_width=True)
+                st.info("Define regions on the left, then each region will have independent motion in the generated video.")
+        else:
+            st.info("Upload an image to get started. Then define regions with different motion types.")
+
+            # Motion type reference
+            st.markdown("### Available Motion Types")
+            for mt_key, mt_val in MOTION_TYPES.items():
+                st.markdown(f"- **{mt_key.replace('_',' ').title()}**: {mt_val['prompt']} (strength: {mt_val['strength']})")
+
+
+# ============================================================
 # LOGS PAGE
 # ============================================================
 elif tool == "Logs":
@@ -3562,3 +4004,24 @@ elif tool == "Settings":
                 st.info(f"Recommended for your GPU ({vram:.0f}GB): **{rec}**")
     except Exception:
         pass
+
+    # ---- REST API Server ----
+    st.markdown("---")
+    st.subheader("REST API Server")
+    st.caption("Launch the StudioLite API for programmatic access")
+    st.markdown("""
+The API server exposes all generation and editing capabilities as REST endpoints.
+
+**Endpoints include:**
+- `POST /api/v1/generate/text2video` - Generate video from text
+- `POST /api/v1/generate/image2video` - Image-to-video
+- `POST /api/v1/generate/story` - Multi-scene story generation
+- `POST /api/v1/audio/tts` - Text-to-speech
+- `POST /api/v1/edit/trim` - Trim video
+- `POST /api/v1/edit/merge` - Merge videos
+- `POST /api/v1/edit/upscale` - Upscale video
+- `GET /api/v1/jobs/{id}` - Check job status
+- `GET /api/v1/system/status` - System info
+    """)
+    st.code("uvicorn api_server:app --host 0.0.0.0 --port 8000", language="bash")
+    st.caption("Swagger docs available at http://localhost:8000/docs after launch")

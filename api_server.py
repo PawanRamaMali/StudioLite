@@ -121,6 +121,11 @@ class StoryRequest(BaseModel):
     model: str = "1.3b"
     enable_narration: bool = True
     continuity_mode: str = "Prompt Anchoring"
+    visual_anchor: str = ""
+    transition_type: str = "cut"
+    num_frames: int = 49
+    fps: int = 16
+    resolution: str = "480p"
 
 
 class TTSRequest(BaseModel):
@@ -304,27 +309,26 @@ def _run_story(job_id: str, req: StoryRequest):
         # Step 1 -- Generate story script via LLM
         _update_job(job_id, progress=5, message="Generating story script with AI...")
 
-        prompt = f"""Create a {req.num_scenes}-scene cinematic story for a short film.
+        prompt = f"""You are a professional cinematographer. Write a {req.num_scenes}-scene shot list for this film:
 
-Concept: {req.concept}
-Genre: {req.genre}
-Mood: {req.mood}
+STORY: {req.concept}
+GENRE: {req.genre} | MOOD: {req.mood}
 
-You MUST return a JSON object with two keys:
+CRITICAL: Return a JSON object with TWO keys.
 
-1. "visual_identity": A single paragraph describing the CONSISTENT visual elements across ALL scenes.
-2. "scenes": A JSON array where each scene has:
-   - "title": Short scene title (3-5 words)
-   - "visual": Detailed cinematic description for AI video generation.
-   - "narration": Voiceover text (1-3 sentences)
-   - "duration": Seconds (3-8)
+1. "visual_identity": Describe the MAIN SUBJECT in extreme detail so it looks IDENTICAL in every scene. Include: exact physical description (breed, color, size, distinguishing marks), exact clothing/accessories, exact setting details that repeat. This paragraph is appended to EVERY scene prompt.
 
-Return ONLY this JSON:
+2. "scenes": JSON array where each scene has:
+   - "title": 3-5 word title
+   - "visual": MUST start with the exact same subject description from visual_identity, then add: specific camera angle (close-up/medium/wide/tracking), specific continuous motion (what the subject is doing), specific lighting, specific background. Describe ONE continuous smooth action per scene.
+   - "narration": 2-3 sentence engaging voiceover that connects to previous scene
+   - "duration": 4-6 seconds
+
+Return ONLY valid JSON (close all brackets):
 {{
-  "visual_identity": "Consistent visual description...",
+  "visual_identity": "...",
   "scenes": [
-    {{"title": "...", "visual": "...", "narration": "...", "duration": 5}},
-    ...
+    {{"title": "...", "visual": "...", "narration": "...", "duration": 5}}
   ]
 }}"""
 
@@ -367,12 +371,45 @@ Return ONLY this JSON:
             scene_list = parsed
 
         if not scene_list:
+            # Try array with closing bracket
             match = re.search(r'\[.*\]', response, re.DOTALL)
             if match:
                 try:
                     scene_list = json.loads(match.group())
                 except json.JSONDecodeError:
                     pass
+
+        if not scene_list:
+            # Fix incomplete JSON (missing closing bracket)
+            match = re.search(r'\[', response)
+            if match:
+                arr_text = response[match.start():]
+                if not arr_text.rstrip().endswith(']'):
+                    last_brace = arr_text.rfind('}')
+                    if last_brace > 0:
+                        arr_text = arr_text[:last_brace + 1] + ']'
+                try:
+                    scene_list = json.loads(arr_text)
+                except json.JSONDecodeError:
+                    pass
+
+        if not scene_list:
+            # Extract individual objects
+            obj_matches = re.findall(r'\{[^{}]*\}', response)
+            for obj_str in obj_matches:
+                try:
+                    obj = json.loads(obj_str)
+                    if "title" in obj or "visual" in obj:
+                        scene_list.append(obj)
+                except json.JSONDecodeError:
+                    pass
+
+        # Normalize fields (visual might be array)
+        for s in scene_list:
+            if isinstance(s.get("visual"), list):
+                s["visual"] = ", ".join(str(v) for v in s["visual"])
+            if isinstance(s.get("narration"), list):
+                s["narration"] = " ".join(str(n) for n in s["narration"])
 
         if not scene_list:
             scene_list = [
@@ -402,23 +439,50 @@ Return ONLY this JSON:
                 _update_job(job_id, progress=pct, message=f"Narration {idx + 1}/{len(scene_list)} done")
 
         # Step 3 -- Generate video for each scene
+        # Use shared seed for visual consistency across scenes
+        import random as _rng
+        shared_seed = _rng.randint(0, 2**31)
+
+        # Use request params or sensible defaults
+        req_frames = getattr(req, "num_frames", 49) or 49
+        req_fps = getattr(req, "fps", 16) or 16
+        req_resolution = getattr(req, "resolution", "480p") or "480p"
+
         config = _build_config(
             engine=req.engine,
             model=req.model,
-            resolution="480p",
-            num_frames=49,
+            resolution=req_resolution,
+            num_frames=req_frames,
             num_inference_steps=30,
-            guidance_scale=5.0,
-            fps=16,
-            seed=None,
+            guidance_scale=6.0,  # Slightly higher for better prompt adherence
+            fps=req_fps,
+            seed=shared_seed if req.continuity_mode in ("Prompt Anchoring", "Both") else None,
         )
         gen = VideoGenerator(config)
         video_paths = []
 
+        # Strong negative prompt to reduce AI artifacts
+        neg_prompt = (
+            "low quality, blurry, distorted, disfigured, bad anatomy, "
+            "objects appearing from nowhere, teleporting, sudden scene change, "
+            "inconsistent subject, morphing, glitch, watermark, text overlay, "
+            "extra limbs, missing limbs, floating objects, unnatural movement"
+        )
+
         for idx, scene in enumerate(scene_list):
             scene_prompt = scene.get("visual", req.concept)
-            if visual_identity and req.continuity_mode == "Prompt Anchoring":
-                scene_prompt = f"{scene_prompt}. {visual_identity}"
+
+            # Always inject visual identity for character consistency
+            if visual_identity:
+                scene_prompt = f"{visual_identity}. {scene_prompt}"
+
+            # Also inject any user-provided visual anchor
+            user_anchor = getattr(req, "visual_anchor", "")
+            if user_anchor:
+                scene_prompt = f"{scene_prompt}. {user_anchor}"
+
+            # Add quality boosters
+            scene_prompt = f"{scene_prompt}, smooth continuous motion, cinematic quality, consistent subject appearance, photorealistic"
 
             pct_base = 30 + int(idx / len(scene_list) * 55)
             _update_job(
@@ -429,6 +493,7 @@ Return ONLY this JSON:
 
             video_path = gen.generate_text2video(
                 prompt=scene_prompt,
+                negative_prompt=neg_prompt,
                 progress_callback=None,
             )
             video_paths.append(video_path)
@@ -437,19 +502,35 @@ Return ONLY this JSON:
         if narration_paths:
             from videogen import add_audio_to_video
 
-            _update_job(job_id, progress=88, message="Adding narration to scenes...")
+            _update_job(job_id, progress=88, message="Syncing narration with scenes...")
             narrated_paths = []
             for vp, ap in zip(video_paths, narration_paths):
                 try:
-                    narrated = add_audio_to_video(vp, ap)
-                    narrated_paths.append(narrated)
+                    if os.path.exists(ap) and os.path.getsize(ap) > 100:
+                        narrated = add_audio_to_video(vp, ap, volume=1.0)
+                        narrated_paths.append(narrated)
+                    else:
+                        narrated_paths.append(vp)
                 except Exception:
                     narrated_paths.append(vp)
             video_paths = narrated_paths
 
         # Step 5 -- Concatenate all scenes
-        _update_job(job_id, progress=93, message="Concatenating scenes...")
-        final_video = concatenate_videos(video_paths, fps=config.fps)
+        _update_job(job_id, progress=93, message="Assembling final movie...")
+
+        # Use transitions if configured
+        transition_type = getattr(req, "transition_type", "cut") or "cut"
+        if transition_type != "cut" and len(video_paths) > 1:
+            try:
+                from transitions import concatenate_with_transitions
+                final_video = concatenate_with_transitions(
+                    video_paths, transition_type=transition_type,
+                    duration=0.75, fps=config.fps,
+                )
+            except Exception:
+                final_video = concatenate_videos(video_paths, fps=config.fps)
+        else:
+            final_video = concatenate_videos(video_paths, fps=config.fps)
 
         _update_job(
             job_id,
@@ -811,28 +892,27 @@ async def generate_script(req: ScriptRequest):
             if gguf:
                 select_model(gguf)
 
-        prompt = f"""Create a {req.num_scenes}-scene cinematic story for a short film.
+        prompt = f"""You are a professional cinematographer writing a shot list for a {req.num_scenes}-scene short film.
 
-Concept: {req.concept}
-Genre: {req.genre}
-Mood: {req.mood}
+STORY: {req.concept}
+GENRE: {req.genre}
+MOOD: {req.mood}
 
-For each scene provide:
-1. TITLE: A short scene title (3-5 words)
-2. VISUAL: Detailed cinematic description for AI video generation (camera angle, lighting, motion, setting, subjects)
-3. NARRATION: Voiceover text for this scene (1-3 sentences)
-4. DURATION: Duration in seconds (3-8)
+CRITICAL RULES FOR VISUAL DESCRIPTIONS:
+- The MAIN SUBJECT must be described with IDENTICAL words in EVERY scene (same breed, same color, same clothing, same features)
+- Example: if scene 1 says "a fluffy white and gray husky with bright blue eyes", then ALL scenes must use those EXACT same words for the dog
+- NEVER introduce new characters or subjects that weren't established in scene 1
+- Each visual description must specify: exact camera angle (close-up, medium, wide, aerial), camera movement (static, slow pan left, tracking), lighting (warm, cool, natural, dramatic), what the subject is DOING (specific action, not vague)
+- Describe CONTINUOUS motion that the AI can generate as video - subjects moving smoothly, not teleporting
+- Avoid describing rapid scene changes within one shot - each scene is ONE continuous camera shot
 
-Return ONLY a JSON array:
+Return ONLY a JSON array (make sure to close the array with ]):
 [
-  {{"title": "Scene Title", "visual": "Detailed visual description...", "narration": "Voiceover text...", "duration": 5}},
+  {{"title": "Scene Title", "visual": "DETAILED shot description with EXACT same subject description, specific camera angle, specific motion, specific lighting", "narration": "Engaging voiceover 2-3 sentences", "duration": 5}},
   ...
 ]
 
-Rules:
-- Visuals must be CINEMATIC and detailed
-- Narration tells a cohesive story
-- No meta-commentary, just the JSON array"""
+The narration should tell a cohesive, engaging story that flows naturally scene to scene. Each scene's narration should connect to the previous one."""
 
         response = generate_text(prompt)
         response = response.replace("```json", "").replace("```", "").strip()

@@ -511,77 +511,85 @@ Return ONLY valid JSON (close all brackets):
                 message=f"Generating scene {idx + 1}/{len(scene_list)}: {scene.get('title', '')}",
             )
 
-            video_path = gen.generate_text2video(
-                prompt=scene_prompt,
-                negative_prompt=neg_prompt,
-                progress_callback=None,
-            )
-            video_paths.append(video_path)
+            # Calculate how many generation passes needed to fill scene duration
+            scene_dur = scene.get("duration", 5)
+            if not isinstance(scene_dur, (int, float)):
+                scene_dur = 5
+            scene_dur = max(3, min(30, float(scene_dur)))
+            clip_duration = req_frames / max(req_fps, 1)  # e.g., 49/16 = 3.06s
 
-        # Step 4 -- Stretch each video to match scene duration + add narration
-        from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips, vfx
-        import soundfile as sf
-        import numpy as np
+            # Generate enough clips to fill the scene duration
+            clips_needed = max(1, int(scene_dur / clip_duration) + (1 if scene_dur % clip_duration > 0.5 else 0))
 
-        _update_job(job_id, progress=86, message="Syncing video duration and narration...")
+            scene_clips = []
+            for ci in range(clips_needed):
+                _update_job(
+                    job_id,
+                    progress=pct_base + int((ci / clips_needed) * (55 / len(scene_list))),
+                    message=f"Scene {idx+1}/{len(scene_list)}: generating clip {ci+1}/{clips_needed} ({scene.get('title','')})",
+                )
+                vp = gen.generate_text2video(
+                    prompt=scene_prompt,
+                    negative_prompt=neg_prompt,
+                    progress_callback=None,
+                )
+                scene_clips.append(vp)
+
+            video_paths.append(scene_clips)  # list of clips per scene
+
+        # Step 4 -- Assemble each scene: concatenate clips + trim to duration + add narration
+        from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
+
+        _update_job(job_id, progress=86, message="Assembling scenes with narration...")
         final_scene_paths = []
 
-        for idx, vp in enumerate(video_paths):
+        for idx, scene_clips in enumerate(video_paths):
             scene = scene_list[idx] if idx < len(scene_list) else {}
-            target_duration = scene.get("duration", 5)
-            if not isinstance(target_duration, (int, float)):
-                target_duration = 5
-            target_duration = max(3, min(15, float(target_duration)))
+            target_dur = scene.get("duration", 5)
+            if not isinstance(target_dur, (int, float)):
+                target_dur = 5
+            target_dur = max(3, min(30, float(target_dur)))
 
             try:
-                clip = VideoFileClip(vp)
-                clip_dur = clip.duration
-
-                # Stretch or loop video to match target scene duration
-                if clip_dur < target_duration:
-                    # Slow down the clip to fill target duration
-                    speed_factor = clip_dur / target_duration
-                    if speed_factor > 0.3:  # Don't slow down more than 3x
-                        stretched = clip.fx(vfx.speedx, speed_factor)
-                    else:
-                        # Loop the clip to fill duration
-                        loops_needed = int(target_duration / clip_dur) + 1
-                        stretched = concatenate_videoclips([clip] * loops_needed)
-                        stretched = stretched.subclip(0, target_duration)
+                # Load and concatenate all clips for this scene
+                clips = [VideoFileClip(cp) for cp in scene_clips]
+                if len(clips) > 1:
+                    combined = concatenate_videoclips(clips, method="compose")
                 else:
-                    # Trim to target duration
-                    stretched = clip.subclip(0, target_duration)
+                    combined = clips[0]
 
-                # Add narration audio to this scene if available
+                # Trim to exact target duration
+                if combined.duration > target_dur:
+                    combined = combined.subclip(0, target_dur)
+
+                # Add narration audio
                 if idx < len(narration_paths):
                     ap = narration_paths[idx]
                     if ap and os.path.exists(ap) and os.path.getsize(ap) > 100:
                         narr_audio = AudioFileClip(ap)
-                        # If narration is shorter than video, pad with silence
-                        if narr_audio.duration < stretched.duration:
-                            stretched = stretched.set_audio(narr_audio)
-                        else:
-                            # Trim narration to video length
-                            narr_audio = narr_audio.subclip(0, stretched.duration)
-                            stretched = stretched.set_audio(narr_audio)
+                        if narr_audio.duration > combined.duration:
+                            narr_audio = narr_audio.subclip(0, combined.duration)
+                        combined = combined.set_audio(narr_audio)
 
-                # Write final scene
+                # Write assembled scene
                 scene_out = os.path.join(OUTPUT_DIR, f"story_scene_{job_id}_{idx}.mp4")
-                stretched.write_videofile(
+                combined.write_videofile(
                     scene_out, fps=req_fps, codec="libx264",
-                    audio_codec="aac" if stretched.audio else None,
+                    audio_codec="aac" if combined.audio else None,
                     logger=None,
                 )
                 final_scene_paths.append(scene_out)
 
-                clip.close()
-                stretched.close()
-            except Exception as e:
-                # Fallback: use original video as-is
-                final_scene_paths.append(vp)
+                for c in clips:
+                    c.close()
+                combined.close()
+            except Exception:
+                # Fallback: use first clip as-is
+                if scene_clips:
+                    final_scene_paths.append(scene_clips[0])
 
-            pct = 86 + int((idx + 1) / len(video_paths) * 6)
-            _update_job(job_id, progress=pct, message=f"Scene {idx+1} synced ({target_duration:.0f}s)")
+            pct = 86 + int((idx + 1) / len(video_paths) * 7)
+            _update_job(job_id, progress=pct, message=f"Scene {idx+1} assembled ({target_dur:.0f}s)")
 
         video_paths = final_scene_paths
 

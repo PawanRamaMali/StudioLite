@@ -297,7 +297,7 @@ def _run_story(job_id: str, req: StoryRequest):
         from videogen import VideoGenerator, VideoGenConfig, concatenate_videos
         from mpv2.classes.TtsFactory import get_tts_instance
         from reelforge import rf_clean_text_for_tts
-        from mpv2.llm_provider import generate_text, select_backend
+        from mpv2.llm_provider import generate_text, select_backend, select_model
         import json
         import re
 
@@ -329,9 +329,18 @@ Return ONLY this JSON:
 }}"""
 
         try:
-            select_backend("llamacpp")
+            from reelforge import load_config
+            cfg = load_config()
+            backend = cfg.get("llm_backend", "ollama")
+            select_backend(backend)
+            if backend == "ollama":
+                select_model(cfg.get("ollama_model") or "llama3.2:3b")
+            else:
+                gguf = cfg.get("gguf_model", "")
+                if gguf:
+                    select_model(gguf)
         except Exception:
-            pass  # Might not be configured
+            pass
 
         response = generate_text(prompt)
         response = response.replace("```json", "").replace("```", "").strip()

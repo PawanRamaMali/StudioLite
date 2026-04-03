@@ -71,74 +71,43 @@ export default function StoryPanel() {
     setError(null);
 
     try {
-      // Call the story endpoint with generate_script_only flag
-      // Since the API doesn't have a separate script endpoint, we'll generate scenes client-side
-      setScriptStatus("Generating story with AI... This may take 15-30 seconds");
+      setScriptStatus("Sending to LLM... This may take 15-30 seconds");
 
-      // Use the story API but we can also construct scenes from a simple approach
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/generate/story`, {
+      const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const response = await fetch(`${API}/api/v1/generate/script`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          concept,
-          num_scenes: numScenes,
-          genre,
-          mood,
-          engine: "wan",
-          model: "1.3b",
-          enable_narration: false,
-          // This starts a full job - we'll use it for script generation
-          script_only: true,
-        }),
+        body: JSON.stringify({ concept, num_scenes: numScenes, genre, mood }),
       });
 
-      if (!response.ok) {
-        // If story endpoint doesn't support script_only, generate scenes locally
-        setScriptStatus("Generating scenes from concept...");
-        await new Promise((r) => setTimeout(r, 500));
+      if (response.ok) {
+        const data = await response.json();
+        const apiScenes = data.scenes || [];
 
-        const generatedScenes: Scene[] = [];
-        const sceneTitles = [
-          "Opening", "Rising Action", "Climax", "Resolution",
-          "Introduction", "Discovery", "Confrontation", "Finale",
-        ];
-
-        for (let i = 0; i < numScenes; i++) {
-          generatedScenes.push({
+        if (apiScenes.length > 0) {
+          const newScenes: Scene[] = apiScenes.map((s: Record<string, unknown>, i: number) => ({
             id: crypto.randomUUID(),
-            title: sceneTitles[i] || `Scene ${i + 1}`,
-            visual: `Scene ${i + 1} of: ${concept}. ${genre} style, ${mood.toLowerCase()} mood, cinematic camera angles, dramatic lighting.`,
-            narration: `Scene ${i + 1} narration for the story about ${concept.slice(0, 50)}.`,
-            duration: 5,
-          });
+            title: (s.title as string) || `Scene ${i + 1}`,
+            visual: (s.visual as string) || "",
+            narration: (s.narration as string) || "",
+            duration: (s.duration as number) || 5,
+          }));
+          setScenes(newScenes);
+          setExpandedScene(0);
+          setScriptStatus("");
+        } else {
+          throw new Error("LLM returned empty scenes");
         }
-        setScenes(generatedScenes);
-        setExpandedScene(0);
-        setScriptStatus("");
       } else {
-        const job = await response.json();
-        setScriptStatus(`Job started: ${job.job_id} - Generating script...`);
-
-        // Poll for the script/scenes
-        const pollId = setInterval(async () => {
-          try {
-            const status = await getJob(job.job_id);
-            setScriptStatus(status.message || "Generating...");
-            if (status.status === "completed" || status.status === "failed") {
-              clearInterval(pollId);
-              setScriptLoading(false);
-              if (status.status === "failed") {
-                setError(status.error || "Script generation failed");
-              }
-            }
-          } catch {
-            // keep polling
-          }
-        }, 2000);
+        const errData = await response.json().catch(() => ({ detail: "API error" }));
+        throw new Error(errData.detail || `API returned ${response.status}`);
       }
     } catch (e) {
-      // Fallback: generate simple scenes
-      setScriptStatus("Using local scene generation...");
+      const errMsg = e instanceof Error ? e.message : "Unknown error";
+      setError(`Script generation failed: ${errMsg}`);
+
+      // Fallback: generate simple scenes locally
+      setScriptStatus("Falling back to local scene generation...");
       await new Promise((r) => setTimeout(r, 300));
 
       const generatedScenes: Scene[] = [];

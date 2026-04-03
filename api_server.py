@@ -782,6 +782,139 @@ async def generate_image2video(req: ImageToVideoRequest, background_tasks: Backg
     return _job_response(job_id)
 
 
+class ScriptRequest(BaseModel):
+    concept: str
+    num_scenes: int = 4
+    genre: str = "Cinematic"
+    mood: str = "Epic"
+
+
+@app.post("/api/v1/generate/script")
+async def generate_script(req: ScriptRequest):
+    """Generate a story script (scenes with titles, visuals, narration) WITHOUT video generation.
+    This is synchronous and returns scenes directly."""
+    if not req.concept.strip():
+        raise HTTPException(status_code=422, detail="concept must not be empty")
+
+    try:
+        from mpv2.llm_provider import generate_text, select_backend, select_model
+        from reelforge import load_config
+        import json as _json, re as _re
+
+        cfg = load_config()
+        backend = cfg.get("llm_backend", "ollama")
+        select_backend(backend)
+        if backend == "ollama":
+            select_model(cfg.get("ollama_model") or "llama3.2:3b")
+        else:
+            gguf = cfg.get("gguf_model", "")
+            if gguf:
+                select_model(gguf)
+
+        prompt = f"""Create a {req.num_scenes}-scene cinematic story for a short film.
+
+Concept: {req.concept}
+Genre: {req.genre}
+Mood: {req.mood}
+
+For each scene provide:
+1. TITLE: A short scene title (3-5 words)
+2. VISUAL: Detailed cinematic description for AI video generation (camera angle, lighting, motion, setting, subjects)
+3. NARRATION: Voiceover text for this scene (1-3 sentences)
+4. DURATION: Duration in seconds (3-8)
+
+Return ONLY a JSON array:
+[
+  {{"title": "Scene Title", "visual": "Detailed visual description...", "narration": "Voiceover text...", "duration": 5}},
+  ...
+]
+
+Rules:
+- Visuals must be CINEMATIC and detailed
+- Narration tells a cohesive story
+- No meta-commentary, just the JSON array"""
+
+        response = generate_text(prompt)
+        response = response.replace("```json", "").replace("```", "").strip()
+
+        # Parse - handle incomplete JSON from LLM
+        scenes = []
+        try:
+            scenes = _json.loads(response)
+        except _json.JSONDecodeError:
+            # Try finding array with closing bracket
+            match = _re.search(r'\[.*\]', response, _re.DOTALL)
+            if match:
+                try:
+                    scenes = _json.loads(match.group())
+                except _json.JSONDecodeError:
+                    pass
+
+            # LLM often returns array without closing bracket - fix it
+            if not scenes:
+                match = _re.search(r'\[', response)
+                if match:
+                    arr_text = response[match.start():]
+                    # Try adding missing closing bracket
+                    if not arr_text.rstrip().endswith(']'):
+                        # Find the last complete object (ends with })
+                        last_brace = arr_text.rfind('}')
+                        if last_brace > 0:
+                            arr_text = arr_text[:last_brace + 1] + ']'
+                    try:
+                        scenes = _json.loads(arr_text)
+                    except _json.JSONDecodeError:
+                        pass
+
+            # Last resort: extract individual JSON objects
+            if not scenes:
+                obj_matches = _re.findall(r'\{[^{}]*\}', response)
+                for obj_str in obj_matches:
+                    try:
+                        obj = _json.loads(obj_str)
+                        if "title" in obj or "visual" in obj:
+                            scenes.append(obj)
+                    except _json.JSONDecodeError:
+                        pass
+
+        if not isinstance(scenes, list) or not scenes:
+            # Fallback
+            scenes = [
+                {"title": f"Scene {i+1}", "visual": f"{req.concept}, scene {i+1}, {req.genre.lower()}, {req.mood.lower()}", "narration": "", "duration": 5}
+                for i in range(req.num_scenes)
+            ]
+
+        # Normalize scene data - LLM sometimes returns arrays for fields
+        clean_scenes = []
+        for s in scenes[:req.num_scenes]:
+            if not isinstance(s, dict):
+                continue
+            visual = s.get("visual", "")
+            if isinstance(visual, list):
+                visual = ", ".join(str(v) for v in visual)
+            narration = s.get("narration", "")
+            if isinstance(narration, list):
+                narration = " ".join(str(n) for n in narration)
+            duration = s.get("duration", 5)
+            if not isinstance(duration, (int, float)):
+                try:
+                    duration = float(duration)
+                except (ValueError, TypeError):
+                    duration = 5
+            duration = max(2, min(12, int(duration)))
+            clean_scenes.append({
+                "title": str(s.get("title", f"Scene {len(clean_scenes)+1}"))[:50],
+                "visual": str(visual),
+                "narration": str(narration),
+                "duration": duration,
+            })
+
+        return {"scenes": clean_scenes, "concept": req.concept, "genre": req.genre, "mood": req.mood}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/v1/generate/story", response_model=JobResponse)
 async def generate_story(req: StoryRequest, background_tasks: BackgroundTasks):
     """Start a multi-scene story generation job."""

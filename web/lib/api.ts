@@ -12,11 +12,16 @@ export interface Job {
 }
 
 export interface SystemStatus {
-  gpu_available: boolean;
-  gpu_name: string;
-  vram_total_gb: number;
-  vram_free_gb: number;
+  status: string;
+  gpu: {
+    available: boolean;
+    gpu_name: string;
+    total_vram_gb: number;
+    free_vram_gb: number;
+    cuda_version: string;
+  };
   active_jobs: number;
+  total_jobs: number;
 }
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
@@ -40,11 +45,17 @@ export const getJob = (id: string) => apiFetch<Job>(`/api/v1/jobs/${id}`);
 export const listJobs = (limit = 20) => apiFetch<Job[]>(`/api/v1/jobs?limit=${limit}`);
 
 // Generation
-export const generateText2Video = (params: Record<string, unknown>) =>
-  apiFetch<Job>("/api/v1/generate/text2video", { method: "POST", body: JSON.stringify(params) });
-
-export const generateImage2Video = (params: Record<string, unknown>) =>
-  apiFetch<Job>("/api/v1/generate/image2video", { method: "POST", body: JSON.stringify(params) });
+export const generateText2Video = (params: {
+  prompt: string;
+  negative_prompt?: string;
+  engine?: string;
+  model?: string;
+  num_frames?: number;
+  num_inference_steps?: number;
+  guidance_scale?: number;
+  fps?: number;
+  seed?: number | null;
+}) => apiFetch<Job>("/api/v1/generate/text2video", { method: "POST", body: JSON.stringify(params) });
 
 export const generateStory = (params: Record<string, unknown>) =>
   apiFetch<Job>("/api/v1/generate/story", { method: "POST", body: JSON.stringify(params) });
@@ -52,16 +63,6 @@ export const generateStory = (params: Record<string, unknown>) =>
 // Audio
 export const generateTTS = (params: { text: string; voice?: string; engine?: string }) =>
   apiFetch<Job>("/api/v1/audio/tts", { method: "POST", body: JSON.stringify(params) });
-
-// Editing
-export const trimVideo = (params: { video_path: string; start_time: number; end_time: number }) =>
-  apiFetch<Job>("/api/v1/edit/trim", { method: "POST", body: JSON.stringify(params) });
-
-export const mergeVideos = (params: { video_paths: string[]; transition?: string }) =>
-  apiFetch<Job>("/api/v1/edit/merge", { method: "POST", body: JSON.stringify(params) });
-
-export const upscaleVideo = (params: { video_path: string; scale?: number }) =>
-  apiFetch<Job>("/api/v1/edit/upscale", { method: "POST", body: JSON.stringify(params) });
 
 // Download
 export const getDownloadUrl = (jobId: string) => `${API_BASE}/api/v1/jobs/${jobId}/download`;

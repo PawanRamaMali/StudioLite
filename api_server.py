@@ -498,22 +498,72 @@ Return ONLY valid JSON (close all brackets):
             )
             video_paths.append(video_path)
 
-        # Step 4 -- Add narration to individual clips if available
-        if narration_paths:
-            from videogen import add_audio_to_video
+        # Step 4 -- Stretch each video to match scene duration + add narration
+        from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips, vfx
+        import soundfile as sf
+        import numpy as np
 
-            _update_job(job_id, progress=88, message="Syncing narration with scenes...")
-            narrated_paths = []
-            for vp, ap in zip(video_paths, narration_paths):
-                try:
-                    if os.path.exists(ap) and os.path.getsize(ap) > 100:
-                        narrated = add_audio_to_video(vp, ap, volume=1.0)
-                        narrated_paths.append(narrated)
+        _update_job(job_id, progress=86, message="Syncing video duration and narration...")
+        final_scene_paths = []
+
+        for idx, vp in enumerate(video_paths):
+            scene = scene_list[idx] if idx < len(scene_list) else {}
+            target_duration = scene.get("duration", 5)
+            if not isinstance(target_duration, (int, float)):
+                target_duration = 5
+            target_duration = max(3, min(15, float(target_duration)))
+
+            try:
+                clip = VideoFileClip(vp)
+                clip_dur = clip.duration
+
+                # Stretch or loop video to match target scene duration
+                if clip_dur < target_duration:
+                    # Slow down the clip to fill target duration
+                    speed_factor = clip_dur / target_duration
+                    if speed_factor > 0.3:  # Don't slow down more than 3x
+                        stretched = clip.fx(vfx.speedx, speed_factor)
                     else:
-                        narrated_paths.append(vp)
-                except Exception:
-                    narrated_paths.append(vp)
-            video_paths = narrated_paths
+                        # Loop the clip to fill duration
+                        loops_needed = int(target_duration / clip_dur) + 1
+                        stretched = concatenate_videoclips([clip] * loops_needed)
+                        stretched = stretched.subclip(0, target_duration)
+                else:
+                    # Trim to target duration
+                    stretched = clip.subclip(0, target_duration)
+
+                # Add narration audio to this scene if available
+                if idx < len(narration_paths):
+                    ap = narration_paths[idx]
+                    if ap and os.path.exists(ap) and os.path.getsize(ap) > 100:
+                        narr_audio = AudioFileClip(ap)
+                        # If narration is shorter than video, pad with silence
+                        if narr_audio.duration < stretched.duration:
+                            stretched = stretched.set_audio(narr_audio)
+                        else:
+                            # Trim narration to video length
+                            narr_audio = narr_audio.subclip(0, stretched.duration)
+                            stretched = stretched.set_audio(narr_audio)
+
+                # Write final scene
+                scene_out = os.path.join(OUTPUT_DIR, f"story_scene_{job_id}_{idx}.mp4")
+                stretched.write_videofile(
+                    scene_out, fps=req_fps, codec="libx264",
+                    audio_codec="aac" if stretched.audio else None,
+                    logger=None,
+                )
+                final_scene_paths.append(scene_out)
+
+                clip.close()
+                stretched.close()
+            except Exception as e:
+                # Fallback: use original video as-is
+                final_scene_paths.append(vp)
+
+            pct = 86 + int((idx + 1) / len(video_paths) * 6)
+            _update_job(job_id, progress=pct, message=f"Scene {idx+1} synced ({target_duration:.0f}s)")
+
+        video_paths = final_scene_paths
 
         # Step 5 -- Concatenate all scenes
         _update_job(job_id, progress=93, message="Assembling final movie...")

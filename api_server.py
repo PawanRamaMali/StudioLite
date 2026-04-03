@@ -112,6 +112,12 @@ class ImageToVideoRequest(BaseModel):
     seed: Optional[int] = None
 
 
+class StoryScene(BaseModel):
+    title: str = ""
+    visual: str = ""
+    narration: str = ""
+    duration: int = 10
+
 class StoryRequest(BaseModel):
     concept: str
     num_scenes: int = Field(default=4, ge=1, le=8)
@@ -126,6 +132,7 @@ class StoryRequest(BaseModel):
     num_frames: int = 49
     fps: int = 16
     resolution: str = "480p"
+    scenes: list[StoryScene] = []  # If provided, use these instead of LLM generation
 
 
 class TTSRequest(BaseModel):
@@ -298,7 +305,7 @@ def _run_image2video(job_id: str, req: ImageToVideoRequest):
 
 def _run_story(job_id: str, req: StoryRequest):
     try:
-        _update_job(job_id, status="running", message="Generating story script...")
+        _update_job(job_id, status="running", message="Starting story generation...")
         from videogen import VideoGenerator, VideoGenConfig, concatenate_videos
         from mpv2.classes.TtsFactory import get_tts_instance
         from reelforge import rf_clean_text_for_tts
@@ -306,8 +313,14 @@ def _run_story(job_id: str, req: StoryRequest):
         import json
         import re
 
-        # Step 1 -- Generate story script via LLM
-        _update_job(job_id, progress=5, message="Generating story script with AI...")
+        # Step 1 -- Use user-provided scenes or generate via LLM
+        # If frontend sent scenes (from the storyboard editor), use those directly
+        _use_user_scenes = req.scenes and len(req.scenes) > 0
+
+        if _use_user_scenes:
+            _update_job(job_id, progress=10, message=f"Using {len(req.scenes)} user-defined scenes")
+        else:
+            _update_job(job_id, progress=5, message="Generating story script with AI...")
 
         prompt = f"""You are a professional cinematographer. Write a {req.num_scenes}-scene shot list for this film:
 
@@ -423,6 +436,13 @@ Return ONLY valid JSON (close all brackets):
             ]
 
         scene_list = scene_list[: req.num_scenes]
+
+        # Override with user-provided scenes (from the storyboard editor)
+        # These have user-edited titles, prompts, narrations, and DURATIONS
+        if _use_user_scenes:
+            scene_list = [s.model_dump() for s in req.scenes]
+            visual_identity = req.visual_anchor or visual_identity or ""
+
         _update_job(job_id, progress=15, message=f"Script ready: {len(scene_list)} scenes")
 
         # Step 2 -- Generate narration audio per scene (if enabled)
@@ -568,19 +588,9 @@ Return ONLY valid JSON (close all brackets):
         # Step 5 -- Concatenate all scenes
         _update_job(job_id, progress=93, message="Assembling final movie...")
 
-        # Use transitions if configured
-        transition_type = getattr(req, "transition_type", "cut") or "cut"
-        if transition_type != "cut" and len(video_paths) > 1:
-            try:
-                from transitions import concatenate_with_transitions
-                final_video = concatenate_with_transitions(
-                    video_paths, transition_type=transition_type,
-                    duration=0.75, fps=config.fps,
-                )
-            except Exception:
-                final_video = concatenate_videos(video_paths, fps=config.fps)
-        else:
-            final_video = concatenate_videos(video_paths, fps=config.fps)
+        # Simple concatenation preserves per-scene audio sync
+        # Transitions with audio cause overlapping narrations, so use cut
+        final_video = concatenate_videos(video_paths, fps=req_fps)
 
         _update_job(
             job_id,

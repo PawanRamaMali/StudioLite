@@ -146,6 +146,14 @@ export default function StoryPanel() {
     const selectedEngine = ENGINES.find((e) => e.id === engine) || ENGINES[0];
 
     try {
+      // Send the user-edited scenes with their durations to the API
+      const scenesPayload = scenes.map((s) => ({
+        title: s.title,
+        visual: s.visual,
+        narration: s.narration,
+        duration: s.duration,
+      }));
+
       const job = await generateStory({
         concept,
         num_scenes: scenes.length,
@@ -160,6 +168,7 @@ export default function StoryPanel() {
         num_frames: frames,
         fps,
         resolution,
+        scenes: scenesPayload,
       });
 
       setGenStatus(`Job ${job.job_id.slice(0, 8)}... started`);

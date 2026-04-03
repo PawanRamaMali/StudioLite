@@ -517,27 +517,57 @@ Return ONLY valid JSON (close all brackets):
                 scene_dur = 5
             scene_dur = max(3, min(30, float(scene_dur)))
             clip_duration = req_frames / max(req_fps, 1)  # e.g., 49/16 = 3.06s
-
-            # Generate enough clips to fill the scene duration
             clips_needed = max(1, int(scene_dur / clip_duration) + (1 if scene_dur % clip_duration > 0.5 else 0))
 
             scene_clips = []
+            prev_clip_path = None
+
+            # Progression phrases so continuation clips aren't identical
+            continuations = [
+                "continuing the motion smoothly",
+                "the action progresses further",
+                "moments later in the same scene",
+                "the movement continues naturally",
+                "the scene unfolds further",
+            ]
+
             for ci in range(clips_needed):
                 _update_job(
                     job_id,
                     progress=pct_base + int((ci / clips_needed) * (55 / len(scene_list))),
-                    message=f"Scene {idx+1}/{len(scene_list)}: generating clip {ci+1}/{clips_needed} ({scene.get('title','')})",
+                    message=f"Scene {idx+1}/{len(scene_list)}: clip {ci+1}/{clips_needed} ({scene.get('title','')})",
                 )
-                vp = gen.generate_text2video(
-                    prompt=scene_prompt,
-                    negative_prompt=neg_prompt,
-                    progress_callback=None,
-                )
+
+                if ci == 0:
+                    # First clip: normal T2V
+                    vp = gen.generate_text2video(
+                        prompt=scene_prompt,
+                        negative_prompt=neg_prompt,
+                        progress_callback=None,
+                    )
+                else:
+                    # Continuation clips: extract last frame and use I2V if possible
+                    try:
+                        last_frame = gen._extract_last_frame(prev_clip_path)
+                        cont_prompt = f"{scene_prompt}, {continuations[ci % len(continuations)]}"
+                        vp = gen.generate_image2video(
+                            last_frame, cont_prompt, progress_callback=None,
+                        )
+                    except Exception:
+                        # Fallback: T2V with varied prompt
+                        cont_prompt = f"{scene_prompt}, {continuations[ci % len(continuations)]}"
+                        vp = gen.generate_text2video(
+                            prompt=cont_prompt,
+                            negative_prompt=neg_prompt,
+                            progress_callback=None,
+                        )
+
                 scene_clips.append(vp)
+                prev_clip_path = vp
 
-            video_paths.append(scene_clips)  # list of clips per scene
+            video_paths.append(scene_clips)
 
-        # Step 4 -- Assemble each scene: concatenate clips + trim to duration + add narration
+        # Step 4 -- Assemble each scene: concatenate clips, trim to duration, add narration ONCE
         from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
 
         _update_job(job_id, progress=86, message="Assembling scenes with narration...")
@@ -551,27 +581,28 @@ Return ONLY valid JSON (close all brackets):
             target_dur = max(3, min(30, float(target_dur)))
 
             try:
-                # Load and concatenate all clips for this scene
                 clips = [VideoFileClip(cp) for cp in scene_clips]
                 if len(clips) > 1:
-                    combined = concatenate_videoclips(clips, method="compose")
+                    # Remove audio from individual clips to prevent repetition
+                    silent_clips = [c.without_audio() for c in clips]
+                    combined = concatenate_videoclips(silent_clips, method="compose")
                 else:
-                    combined = clips[0]
+                    combined = clips[0].without_audio()
 
                 # Trim to exact target duration
                 if combined.duration > target_dur:
                     combined = combined.subclip(0, target_dur)
 
-                # Add narration audio
+                # Add narration audio ONCE (not repeated)
                 if idx < len(narration_paths):
                     ap = narration_paths[idx]
                     if ap and os.path.exists(ap) and os.path.getsize(ap) > 100:
                         narr_audio = AudioFileClip(ap)
+                        # Narration plays once then silence for rest of scene
                         if narr_audio.duration > combined.duration:
                             narr_audio = narr_audio.subclip(0, combined.duration)
                         combined = combined.set_audio(narr_audio)
 
-                # Write assembled scene
                 scene_out = os.path.join(OUTPUT_DIR, f"story_scene_{job_id}_{idx}.mp4")
                 combined.write_videofile(
                     scene_out, fps=req_fps, codec="libx264",
@@ -584,12 +615,11 @@ Return ONLY valid JSON (close all brackets):
                     c.close()
                 combined.close()
             except Exception:
-                # Fallback: use first clip as-is
                 if scene_clips:
                     final_scene_paths.append(scene_clips[0])
 
             pct = 86 + int((idx + 1) / len(video_paths) * 7)
-            _update_job(job_id, progress=pct, message=f"Scene {idx+1} assembled ({target_dur:.0f}s)")
+            _update_job(job_id, progress=pct, message=f"Scene {idx+1} done ({target_dur:.0f}s)")
 
         video_paths = final_scene_paths
 

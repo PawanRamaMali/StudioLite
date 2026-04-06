@@ -1,11 +1,11 @@
 "use client";
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { Card, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
-import { Users, Plus, Sparkles, Trash2, Copy, UserCircle, Loader2, Check } from "lucide-react";
+import { Users, Plus, Sparkles, Trash2, Copy, UserCircle, Loader2, Check, Upload, ImageIcon, Shield } from "lucide-react";
 
-interface Character { id: string; name: string; description: string; visual: string; }
+interface Character { id: string; name: string; description: string; visual: string; refImage?: string; ipAdapterStatus?: string; }
 
 const TEMPLATE_CHARACTERS = [
   { name: "Detective Sarah", desc: "30s woman, red hair, trench coat", visual: "A woman in her 30s with fiery red curly hair, sharp green eyes, freckles across her nose, wearing a long beige trench coat over a dark turtleneck, confident posture, holding a magnifying glass, film noir lighting" },
@@ -22,11 +22,41 @@ export default function CharactersPanel() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiStatus, setAiStatus] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
+  const [refUploading, setRefUploading] = useState(false);
+  const [ipAdapterInfo, setIpAdapterInfo] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const addCharacter = () => {
     if (!name.trim() || !visual.trim()) return;
     setCharacters([...characters, { id: crypto.randomUUID(), name, description: desc, visual }]);
     setName(""); setDesc(""); setVisual("");
+  };
+
+  const uploadReferenceImage = async (charId: string, file: File) => {
+    setRefUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/ip-adapter/upload-reference?char_id=${charId}`,
+        { method: "POST", body: formData }
+      );
+      const data = await res.json();
+      if (data.status === "ok") {
+        setCharacters((prev) =>
+          prev.map((c) =>
+            c.id === charId ? { ...c, refImage: file.name, ipAdapterStatus: "Reference uploaded" } : c
+          )
+        );
+        setIpAdapterInfo(`Reference image uploaded for IP-Adapter character consistency`);
+        setTimeout(() => setIpAdapterInfo(null), 3000);
+      }
+    } catch {
+      setIpAdapterInfo("Failed to upload - make sure API server is running");
+      setTimeout(() => setIpAdapterInfo(null), 3000);
+    } finally {
+      setRefUploading(false);
+    }
   };
 
   const handleAiGenerate = async () => {
@@ -73,6 +103,21 @@ export default function CharactersPanel() {
       <div className="mb-8">
         <h1 className="text-3xl font-bold gradient-text">Character Library</h1>
         <p className="text-zinc-400 mt-1">Create persistent characters for consistent appearance across scenes</p>
+      </div>
+
+      {/* IP-Adapter status banner */}
+      {ipAdapterInfo && (
+        <div className="mb-4 px-4 py-2.5 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center gap-2">
+          <Shield className="w-4 h-4 text-purple-400 flex-shrink-0" />
+          <p className="text-xs text-purple-300">{ipAdapterInfo}</p>
+        </div>
+      )}
+
+      <div className="mb-4 px-4 py-2.5 rounded-lg bg-zinc-800/50 border border-zinc-700">
+        <p className="text-xs text-zinc-400 flex items-center gap-2">
+          <ImageIcon className="w-3.5 h-3.5 text-purple-400 flex-shrink-0" />
+          <span><strong className="text-purple-300">IP-Adapter:</strong> Upload reference images for each character to maintain face and appearance consistency across Story Mode scenes. Works best with clear, front-facing photos.</span>
+        </p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -142,15 +187,43 @@ export default function CharactersPanel() {
                 <Card key={char.id} className="group">
                   <div className="flex items-start gap-3">
                     <div className="w-12 h-12 rounded-full bg-indigo-600/20 flex items-center justify-center flex-shrink-0">
-                      <UserCircle className="w-6 h-6 text-indigo-400" />
+                      {char.refImage ? (
+                        <Shield className="w-6 h-6 text-purple-400" />
+                      ) : (
+                        <UserCircle className="w-6 h-6 text-indigo-400" />
+                      )}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <h3 className="font-medium text-sm">{char.name}</h3>
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-medium text-sm">{char.name}</h3>
+                        {char.refImage && (
+                          <Badge className="text-[9px] bg-purple-600/20 text-purple-300 border-purple-500/20">IP-Adapter</Badge>
+                        )}
+                      </div>
                       {char.description && <p className="text-xs text-zinc-500 mt-0.5">{char.description}</p>}
                       <p className="text-xs text-zinc-400 mt-2 line-clamp-3 italic">&ldquo;{char.visual}&rdquo;</p>
+                      {char.ipAdapterStatus && (
+                        <p className="text-[10px] text-purple-400 mt-1 flex items-center gap-1">
+                          <Check className="w-3 h-3" /> {char.ipAdapterStatus}
+                        </p>
+                      )}
                     </div>
                   </div>
-                  <div className="flex gap-2 mt-3 pt-3 border-t border-zinc-800">
+                  <div className="flex gap-2 mt-3 pt-3 border-t border-zinc-800 flex-wrap">
+                    <Button size="sm" variant="ghost" onClick={() => {
+                      const input = document.createElement("input");
+                      input.type = "file";
+                      input.accept = "image/*";
+                      input.onchange = (e) => {
+                        const file = (e.target as HTMLInputElement).files?.[0];
+                        if (file) uploadReferenceImage(char.id, file);
+                      };
+                      input.click();
+                    }} disabled={refUploading}>
+                      {refUploading ? <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                        : <Upload className="w-3 h-3 mr-1" />}
+                      {char.refImage ? "Update Ref" : "Add Reference"}
+                    </Button>
                     <Button size="sm" variant="ghost" onClick={() => copyPrompt(char.id, char.visual)}>
                       {copied === char.id ? <><Check className="w-3 h-3 mr-1 text-green-400" /> Copied!</>
                         : <><Copy className="w-3 h-3 mr-1" /> Copy Prompt</>}

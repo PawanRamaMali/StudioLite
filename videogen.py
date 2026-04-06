@@ -169,6 +169,7 @@ class VideoGenerator:
         self._current_mode = None
         self._loaded_model_id = None
         self._current_engine = None
+        self._ip_adapter_loaded = False
 
     def estimate_vram_required(self) -> float:
         """
@@ -561,6 +562,52 @@ class VideoGenerator:
         if progress_callback:
             progress_callback(100, 100, "Wan model loaded!")
 
+    def _load_ip_adapter(self, strength: float = 0.6) -> None:
+        """
+        Load IP-Adapter weights into the current pipeline for character consistency.
+
+        Uses diffusers' built-in IP-Adapter support. Falls back gracefully if
+        the pipeline doesn't support it or weights aren't available.
+        """
+        if self._pipeline is None:
+            raise RuntimeError("Pipeline must be loaded before IP-Adapter")
+
+        if self._ip_adapter_loaded:
+            # Just update strength
+            try:
+                self._pipeline.set_ip_adapter_scale(strength)
+            except Exception:
+                pass
+            return
+
+        try:
+            # Try loading IP-Adapter Plus weights
+            self._pipeline.load_ip_adapter(
+                "h94/IP-Adapter",
+                subfolder="models",
+                weight_name="ip-adapter-plus_sd15.bin",
+            )
+            self._pipeline.set_ip_adapter_scale(strength)
+            self._ip_adapter_loaded = True
+            videogen_logger.info(f"IP-Adapter Plus loaded (strength={strength})")
+        except Exception as e1:
+            # Try alternative weight file
+            try:
+                self._pipeline.load_ip_adapter(
+                    "h94/IP-Adapter",
+                    subfolder="sdxl_models",
+                    weight_name="ip-adapter-plus_sdxl_vit-h.safetensors",
+                )
+                self._pipeline.set_ip_adapter_scale(strength)
+                self._ip_adapter_loaded = True
+                videogen_logger.info(f"IP-Adapter Plus SDXL loaded (strength={strength})")
+            except Exception as e2:
+                videogen_logger.warning(
+                    f"IP-Adapter not available for this pipeline: {e1}; {e2}. "
+                    "Character consistency will rely on prompt anchoring only."
+                )
+                self._ip_adapter_loaded = False
+
     def _load_ltx_pipeline(self, mode: str, progress_callback: Callable = None) -> None:
         """Load LTX-Video pipeline."""
         from diffusers import LTXPipeline, LTXImageToVideoPipeline
@@ -915,8 +962,10 @@ class VideoGenerator:
         prompt: str,
         negative_prompt: str = None,
         progress_callback: Callable = None,
+        ip_adapter_images: list = None,
+        ip_adapter_strength: float = 0.6,
     ) -> str:
-        """Generate video using Wan 2.1/2.2."""
+        """Generate video using Wan 2.1/2.2 with optional IP-Adapter conditioning."""
         from diffusers.utils import export_to_video
         from diffusers.callbacks import PipelineCallback
         import time
@@ -926,6 +975,16 @@ class VideoGenerator:
 
         # Load pipeline without passing progress_callback to avoid scale mismatch
         self._load_wan_pipeline("text2video", None)
+
+        # Load IP-Adapter if reference images provided
+        if ip_adapter_images and len(ip_adapter_images) > 0:
+            if progress_callback:
+                progress_callback(8, 100, "Loading IP-Adapter for character consistency...")
+            try:
+                self._load_ip_adapter(ip_adapter_strength)
+            except Exception as e:
+                videogen_logger.warning(f"IP-Adapter load failed, continuing without: {e}")
+                ip_adapter_images = None
 
         if progress_callback:
             progress_callback(10, 100, "Model loaded. Starting inference...")
@@ -956,7 +1015,8 @@ class VideoGenerator:
                 )
             return callback_kwargs
 
-        output = self._pipeline(
+        # Build pipeline kwargs
+        pipeline_kwargs = dict(
             prompt=prompt,
             negative_prompt=negative_prompt or "low quality, blurry, distorted, disfigured",
             width=width,
@@ -967,6 +1027,13 @@ class VideoGenerator:
             generator=generator,
             callback_on_step_end=step_callback,
         )
+
+        # Inject IP-Adapter reference images if available
+        if ip_adapter_images and self._ip_adapter_loaded:
+            pipeline_kwargs["ip_adapter_image"] = ip_adapter_images[0] if len(ip_adapter_images) == 1 else ip_adapter_images
+            videogen_logger.info(f"IP-Adapter: injecting {len(ip_adapter_images)} reference image(s) at strength {ip_adapter_strength}")
+
+        output = self._pipeline(**pipeline_kwargs)
 
         if progress_callback:
             progress_callback(92, 100, "Encoding video to MP4...")
@@ -1138,6 +1205,8 @@ class VideoGenerator:
         prompt: str,
         negative_prompt: str = None,
         progress_callback: Callable = None,
+        ip_adapter_images: list = None,
+        ip_adapter_strength: float = 0.6,
     ) -> str:
         """
         Generate video from text prompt.
@@ -1146,6 +1215,8 @@ class VideoGenerator:
             prompt: Text description of the video
             negative_prompt: What to avoid in the video
             progress_callback: Callback(step, total, message)
+            ip_adapter_images: List of PIL Images for IP-Adapter conditioning
+            ip_adapter_strength: IP-Adapter influence strength (0.0-1.0)
 
         Returns:
             Path to generated video file
@@ -1164,7 +1235,11 @@ class VideoGenerator:
         videogen_logger.info(f"VRAM info: {info.get('free_vram', 'N/A')}GB free / {info.get('total_vram', 'N/A')}GB total")
 
         if self.config.engine == "wan":
-            return self._generate_wan_text2video(prompt, negative_prompt, progress_callback)
+            return self._generate_wan_text2video(
+                prompt, negative_prompt, progress_callback,
+                ip_adapter_images=ip_adapter_images,
+                ip_adapter_strength=ip_adapter_strength,
+            )
         elif self.config.engine == "ltx":
             return self._generate_ltx_text2video(prompt, negative_prompt, progress_callback)
         elif self.config.engine == "hunyuan":

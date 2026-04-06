@@ -133,6 +133,14 @@ class StoryRequest(BaseModel):
     fps: int = 16
     resolution: str = "480p"
     scenes: list[StoryScene] = []  # If provided, use these instead of LLM generation
+    # IP-Adapter character consistency
+    ip_adapter_enabled: bool = True  # Enable IP-Adapter auto-capture from first scene
+    ip_adapter_strength: float = 0.6  # 0.0-1.0, how strongly to enforce character appearance
+    character_ref_images: list[str] = []  # Paths to character reference images (uploaded)
+    # Quality settings
+    quality_preset: str = "standard"  # draft, standard, high
+    enable_upscale: bool = False  # Post-process upscale with Real-ESRGAN
+    enable_interpolation: bool = False  # RIFE frame interpolation for smoother motion
 
 
 class TTSRequest(BaseModel):
@@ -468,13 +476,23 @@ Return ONLY valid JSON (close all brackets):
         req_fps = getattr(req, "fps", 16) or 16
         req_resolution = getattr(req, "resolution", "480p") or "480p"
 
+        # Quality presets: control inference steps and guidance scale
+        quality = getattr(req, "quality_preset", "standard") or "standard"
+        QUALITY_PRESETS = {
+            "draft":    {"steps": 20, "guidance": 5.0},
+            "standard": {"steps": 35, "guidance": 6.0},
+            "high":     {"steps": 50, "guidance": 7.0},
+        }
+        qp = QUALITY_PRESETS.get(quality, QUALITY_PRESETS["standard"])
+        _update_job(job_id, progress=29, message=f"Quality: {quality} ({qp['steps']} steps, guidance {qp['guidance']})")
+
         config = _build_config(
             engine=req.engine,
             model=req.model,
             resolution=req_resolution,
             num_frames=req_frames,
-            num_inference_steps=30,
-            guidance_scale=6.0,  # Slightly higher for better prompt adherence
+            num_inference_steps=qp["steps"],
+            guidance_scale=qp["guidance"],
             fps=req_fps,
             seed=shared_seed if req.continuity_mode in ("Prompt Anchoring", "Both") else None,
         )
@@ -486,8 +504,32 @@ Return ONLY valid JSON (close all brackets):
             "low quality, blurry, distorted, disfigured, bad anatomy, "
             "objects appearing from nowhere, teleporting, sudden scene change, "
             "inconsistent subject, morphing, glitch, watermark, text overlay, "
-            "extra limbs, missing limbs, floating objects, unnatural movement"
+            "extra limbs, missing limbs, floating objects, unnatural movement, "
+            "deformed face, ugly, duplicate, morbid, mutilated, poorly drawn, "
+            "bad proportions, cloned face, disfigured, gross proportions, "
+            "malformed limbs, missing arms, missing legs, fused fingers"
         )
+
+        # --- IP-Adapter: set up character reference images for consistency ---
+        ip_adapter_images = None  # PIL Images for injection
+        ip_adapter_strength = getattr(req, "ip_adapter_strength", 0.6)
+        ip_adapter_enabled = getattr(req, "ip_adapter_enabled", True)
+
+        # Load user-provided character reference images
+        if ip_adapter_enabled and getattr(req, "character_ref_images", []):
+            from PIL import Image as PILImage
+            _update_job(job_id, progress=28, message="Loading character reference images for IP-Adapter...")
+            loaded_refs = []
+            for ref_path in req.character_ref_images:
+                if os.path.exists(ref_path):
+                    try:
+                        img = PILImage.open(ref_path).convert("RGB").resize((224, 224))
+                        loaded_refs.append(img)
+                    except Exception:
+                        pass
+            if loaded_refs:
+                ip_adapter_images = loaded_refs
+                _update_job(job_id, progress=29, message=f"Loaded {len(loaded_refs)} reference image(s) for character consistency")
 
         for idx, scene in enumerate(scene_list):
             scene_prompt = scene.get("visual", req.concept)
@@ -504,11 +546,16 @@ Return ONLY valid JSON (close all brackets):
             # Add quality boosters
             scene_prompt = f"{scene_prompt}, smooth continuous motion, cinematic quality, consistent subject appearance, photorealistic"
 
+            # If IP-Adapter has references, add consistency instruction to prompt
+            if ip_adapter_images:
+                scene_prompt = f"{scene_prompt}, exactly matching reference character appearance"
+
             pct_base = 30 + int(idx / len(scene_list) * 55)
             _update_job(
                 job_id,
                 progress=pct_base,
-                message=f"Generating scene {idx + 1}/{len(scene_list)}: {scene.get('title', '')}",
+                message=f"Generating scene {idx + 1}/{len(scene_list)}: {scene.get('title', '')}"
+                + (" [IP-Adapter active]" if ip_adapter_images else ""),
             )
 
             # Calculate how many generation passes needed to fill scene duration
@@ -518,6 +565,14 @@ Return ONLY valid JSON (close all brackets):
             scene_dur = max(3, min(30, float(scene_dur)))
             clip_duration = req_frames / max(req_fps, 1)  # e.g., 49/16 = 3.06s
             clips_needed = max(1, int(scene_dur / clip_duration) + (1 if scene_dur % clip_duration > 0.5 else 0))
+            # Cap at 2 clips per scene to keep generation time reasonable
+            # (each clip takes ~5 min on consumer GPU; 4 clips = 20 min per scene)
+            if clips_needed > 2:
+                _update_job(
+                    job_id, progress=pct_base,
+                    message=f"Scene {idx+1}: capping from {clips_needed} to 2 clips (trimming to fill {scene_dur}s)",
+                )
+                clips_needed = 2
 
             scene_clips = []
             prev_clip_path = None
@@ -539,28 +594,51 @@ Return ONLY valid JSON (close all brackets):
                 )
 
                 if ci == 0:
-                    # First clip: normal T2V
+                    # First clip: T2V with IP-Adapter references
                     vp = gen.generate_text2video(
                         prompt=scene_prompt,
                         negative_prompt=neg_prompt,
                         progress_callback=None,
+                        ip_adapter_images=ip_adapter_images,
+                        ip_adapter_strength=ip_adapter_strength,
                     )
+
+                    # --- Auto-capture: after Scene 1, extract reference for remaining scenes ---
+                    if idx == 0 and ip_adapter_enabled and ip_adapter_images is None:
+                        try:
+                            from ip_adapter import extract_last_frame_as_reference
+                            from PIL import Image as PILImage
+                            ref_frame_path = extract_last_frame_as_reference(vp)
+                            if ref_frame_path and os.path.exists(ref_frame_path):
+                                ref_img = PILImage.open(ref_frame_path).convert("RGB").resize((224, 224))
+                                ip_adapter_images = [ref_img]
+                                _update_job(
+                                    job_id, progress=pct_base + 2,
+                                    message="Auto-captured character reference from Scene 1 for IP-Adapter",
+                                )
+                        except Exception as e:
+                            _update_job(
+                                job_id, progress=pct_base + 2,
+                                message=f"IP-Adapter auto-capture skipped: {e}",
+                            )
                 else:
-                    # Continuation clips: extract last frame and use I2V if possible
-                    try:
-                        last_frame = gen._extract_last_frame(prev_clip_path)
-                        cont_prompt = f"{scene_prompt}, {continuations[ci % len(continuations)]}"
-                        vp = gen.generate_image2video(
-                            last_frame, cont_prompt, progress_callback=None,
-                        )
-                    except Exception:
-                        # Fallback: T2V with varied prompt
-                        cont_prompt = f"{scene_prompt}, {continuations[ci % len(continuations)]}"
-                        vp = gen.generate_text2video(
-                            prompt=cont_prompt,
-                            negative_prompt=neg_prompt,
-                            progress_callback=None,
-                        )
+                    # Continuation clips: use T2V with varied prompt + IP-Adapter
+                    # NOTE: Wan 1.3B has NO I2V model (all I2V models are 14B+, too large
+                    # for 12GB VRAM). Using I2V would hang trying to download 28GB.
+                    # Instead, use T2V with continuation phrases for scene extension.
+                    cont_prompt = f"{scene_prompt}, {continuations[ci % len(continuations)]}"
+                    _update_job(
+                        job_id,
+                        progress=pct_base + int((ci / clips_needed) * (55 / len(scene_list))),
+                        message=f"Scene {idx+1}: extending clip {ci+1}/{clips_needed} (T2V continuation)",
+                    )
+                    vp = gen.generate_text2video(
+                        prompt=cont_prompt,
+                        negative_prompt=neg_prompt,
+                        progress_callback=None,
+                        ip_adapter_images=ip_adapter_images,
+                        ip_adapter_strength=ip_adapter_strength,
+                    )
 
                 scene_clips.append(vp)
                 prev_clip_path = vp
@@ -624,23 +702,102 @@ Return ONLY valid JSON (close all brackets):
         video_paths = final_scene_paths
 
         # Step 5 -- Concatenate all scenes
-        _update_job(job_id, progress=93, message="Assembling final movie...")
+        _update_job(job_id, progress=90, message="Assembling final movie...")
 
         # Simple concatenation preserves per-scene audio sync
         # Transitions with audio cause overlapping narrations, so use cut
         final_video = concatenate_videos(video_paths, fps=req_fps)
 
+        # Step 6 -- Post-processing: upscale and frame interpolation
+        enable_upscale = getattr(req, "enable_upscale", False)
+        enable_interp = getattr(req, "enable_interpolation", False)
+
+        if enable_upscale:
+            _update_job(job_id, progress=93, message="Upscaling video with Real-ESRGAN (2x)...")
+            try:
+                from upscaler import upscale_video, check_upscaler_available
+                available, backends = check_upscaler_available()
+                method = "realesrgan" if "realesrgan" in backends else "lanczos"
+                upscaled_path = upscale_video(
+                    final_video, scale=2, method=method,
+                    progress_callback=lambda cur, tot, msg: _update_job(
+                        job_id, progress=93 + int((cur / max(tot, 1)) * 3),
+                        message=f"Upscaling: {msg}",
+                    ),
+                )
+                if upscaled_path and os.path.exists(upscaled_path):
+                    final_video = upscaled_path
+                    _update_job(job_id, progress=96, message=f"Upscaled with {method}")
+            except Exception as e:
+                _update_job(job_id, progress=96, message=f"Upscale skipped: {e}")
+
+        if enable_interp:
+            _update_job(job_id, progress=97, message="Interpolating frames (RIFE 2x)...")
+            try:
+                from rife_ncnn_vulkan_python import Rife
+                # Double the frame rate by interpolating between every pair of frames
+                from video_editor import extract_frames, frames_to_video
+                from PIL import Image as PILImage
+                import numpy as np
+                import tempfile
+
+                frames_dir = tempfile.mkdtemp()
+                frame_paths = extract_frames(final_video, frames_dir)
+
+                if len(frame_paths) > 1:
+                    rife = Rife(gpuid=0)
+                    interp_frames = []
+                    for fi in range(len(frame_paths)):
+                        interp_frames.append(frame_paths[fi])
+                        if fi < len(frame_paths) - 1:
+                            img0 = PILImage.open(frame_paths[fi])
+                            img1 = PILImage.open(frame_paths[fi + 1])
+                            mid = rife.process(np.array(img0), np.array(img1))
+                            mid_path = os.path.join(frames_dir, f"interp_{fi:05d}.png")
+                            PILImage.fromarray(mid).save(mid_path)
+                            interp_frames.append(mid_path)
+                        _update_job(
+                            job_id, progress=97 + int((fi / len(frame_paths)) * 2),
+                            message=f"Interpolating frame {fi+1}/{len(frame_paths)}",
+                        )
+
+                    interp_video = os.path.join(OUTPUT_DIR, f"story_interp_{job_id}.mp4")
+                    frames_to_video(interp_frames, interp_video, fps=req_fps * 2)
+
+                    # Preserve audio from original
+                    from moviepy.editor import VideoFileClip, AudioFileClip
+                    orig_clip = VideoFileClip(final_video)
+                    if orig_clip.audio:
+                        interp_clip = VideoFileClip(interp_video)
+                        interp_clip = interp_clip.set_audio(orig_clip.audio)
+                        final_interp = os.path.join(OUTPUT_DIR, f"story_smooth_{job_id}.mp4")
+                        interp_clip.write_videofile(final_interp, codec="libx264", audio_codec="aac", logger=None)
+                        interp_clip.close()
+                        final_video = final_interp
+                    else:
+                        final_video = interp_video
+                    orig_clip.close()
+
+                    _update_job(job_id, progress=99, message=f"Frame interpolation done ({req_fps}→{req_fps*2} fps)")
+            except ImportError:
+                _update_job(job_id, progress=99, message="RIFE not installed, skipping interpolation (pip install rife-ncnn-vulkan-python)")
+            except Exception as e:
+                _update_job(job_id, progress=99, message=f"Interpolation skipped: {e}")
+
         _update_job(
             job_id,
             status="completed",
             progress=100,
-            message="Story generation complete.",
+            message=f"Story generation complete! Quality: {quality}"
+            + (" + upscaled" if enable_upscale else "")
+            + (" + smoothed" if enable_interp else ""),
             result={
                 "video_path": final_video,
                 "scene_videos": video_paths,
                 "narration_audio": narration_paths,
                 "scenes": scene_list,
                 "visual_identity": visual_identity,
+                "quality_preset": quality,
             },
         )
     except Exception as exc:
@@ -961,11 +1118,17 @@ async def generate_image2video(req: ImageToVideoRequest, background_tasks: Backg
     return _job_response(job_id)
 
 
+class CharacterDef(BaseModel):
+    name: str = ""
+    role: str = "Lead"
+    appearance: str = ""
+
 class ScriptRequest(BaseModel):
     concept: str
     num_scenes: int = 4
     genre: str = "Cinematic"
     mood: str = "Epic"
+    characters: list[CharacterDef] = []  # Characters to include in the script
 
 
 @app.post("/api/v1/generate/script")
@@ -990,12 +1153,27 @@ async def generate_script(req: ScriptRequest):
             if gguf:
                 select_model(gguf)
 
+        # Build character block if characters provided
+        char_block = ""
+        if req.characters:
+            char_lines = []
+            for c in req.characters:
+                if c.name.strip() and c.appearance.strip():
+                    char_lines.append(f"- {c.name} ({c.role}): {c.appearance}")
+            if char_lines:
+                char_block = f"""
+CHARACTERS (use these EXACT descriptions in EVERY scene):
+{chr(10).join(char_lines)}
+
+CRITICAL: Every scene's visual description MUST include the character name followed by their EXACT appearance description above. Copy the appearance word-for-word. Characters must look IDENTICAL across all scenes.
+"""
+
         prompt = f"""You are a professional cinematographer writing a shot list for a {req.num_scenes}-scene short film.
 
 STORY: {req.concept}
 GENRE: {req.genre}
 MOOD: {req.mood}
-
+{char_block}
 CRITICAL RULES FOR VISUAL DESCRIPTIONS:
 - The MAIN SUBJECT must be described with IDENTICAL words in EVERY scene (same breed, same color, same clothing, same features)
 - Example: if scene 1 says "a fluffy white and gray husky with bright blue eyes", then ALL scenes must use those EXACT same words for the dog
@@ -1211,6 +1389,107 @@ async def list_jobs(limit: int = 20):
             }
         )
     return {"jobs": result, "total": len(jobs)}
+
+
+# ---------------------------------------------------------------------------
+# IP-Adapter endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/ip-adapter/status")
+async def ip_adapter_status():
+    """Get IP-Adapter status and dependency check."""
+    try:
+        from ip_adapter import get_ip_adapter_manager
+        manager = get_ip_adapter_manager()
+        return manager.get_status()
+    except ImportError:
+        return {"enabled": False, "error": "ip_adapter module not found"}
+    except Exception as e:
+        return {"enabled": False, "error": str(e)}
+
+
+@app.post("/api/v1/ip-adapter/upload-reference")
+async def upload_reference_image(
+    file: UploadFile = File(...),
+    char_id: str = "main_subject",
+):
+    """Upload a character reference image for IP-Adapter."""
+    ref_dir = os.path.join(OUTPUT_DIR, "ip_adapter_refs")
+    os.makedirs(ref_dir, exist_ok=True)
+
+    ext = os.path.splitext(file.filename or "ref.png")[1] or ".png"
+    ref_path = os.path.join(ref_dir, f"{char_id}_{int(time.time())}{ext}")
+
+    content = await file.read()
+    with open(ref_path, "wb") as f:
+        f.write(content)
+
+    # Register with IP-Adapter manager
+    try:
+        from ip_adapter import get_ip_adapter_manager
+        manager = get_ip_adapter_manager()
+        manager.register_character(char_id, reference_images=[ref_path])
+        manager.enable()
+        return {
+            "status": "ok",
+            "char_id": char_id,
+            "ref_path": ref_path,
+            "message": f"Reference image registered for character '{char_id}'",
+        }
+    except Exception as e:
+        return {"status": "ok", "ref_path": ref_path, "warning": f"Saved but registration failed: {e}"}
+
+
+@app.post("/api/v1/ip-adapter/configure")
+async def configure_ip_adapter(enabled: bool = True, strength: float = 0.6):
+    """Enable/disable IP-Adapter and set strength."""
+    try:
+        from ip_adapter import get_ip_adapter_manager
+        manager = get_ip_adapter_manager()
+        if enabled:
+            manager.enable(strength)
+        else:
+            manager.disable()
+        return {"enabled": manager.enabled, "strength": manager.strength}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/ip-adapter/dependencies")
+async def ip_adapter_dependencies():
+    """Check which IP-Adapter dependencies are installed."""
+    deps = {"insightface": False, "onnxruntime": False, "clip_vision": False, "diffusers": False, "cuda": False}
+    try:
+        import insightface
+        deps["insightface"] = True
+    except ImportError:
+        pass
+    try:
+        import onnxruntime
+        deps["onnxruntime"] = True
+    except ImportError:
+        pass
+    try:
+        from transformers import CLIPVisionModelWithProjection
+        deps["clip_vision"] = True
+    except ImportError:
+        pass
+    try:
+        from diffusers import WanPipeline
+        deps["diffusers"] = True
+    except ImportError:
+        pass
+    import torch
+    deps["cuda"] = torch.cuda.is_available()
+
+    all_ok = all(deps.values())
+    install_cmd = ""
+    if not all_ok:
+        missing = [k for k, v in deps.items() if not v and k not in ("cuda",)]
+        pkg_map = {"insightface": "insightface", "onnxruntime": "onnxruntime-gpu", "clip_vision": "transformers", "diffusers": "diffusers"}
+        install_cmd = "pip install " + " ".join(pkg_map.get(m, m) for m in missing)
+
+    return {"dependencies": deps, "all_installed": all_ok, "install_command": install_cmd}
 
 
 # ---------------------------------------------------------------------------

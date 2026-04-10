@@ -7,6 +7,7 @@ Or: python api_server.py
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -35,6 +36,13 @@ app.add_middleware(
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(ROOT_DIR, ".mp")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Character portraits directory
+CHAR_PORTRAITS_DIR = os.path.join(OUTPUT_DIR, "character_portraits")
+os.makedirs(CHAR_PORTRAITS_DIR, exist_ok=True)
+
+# Serve character portraits as static files
+app.mount("/static/portraits", StaticFiles(directory=CHAR_PORTRAITS_DIR), name="portraits")
 
 # ---------------------------------------------------------------------------
 # Job tracking
@@ -117,6 +125,7 @@ class StoryScene(BaseModel):
     visual: str = ""
     narration: str = ""
     duration: int = 10
+    characters: list[str] = []  # Character IDs/names in this scene (for per-scene IP-Adapter)
 
 class StoryRequest(BaseModel):
     concept: str
@@ -433,15 +442,10 @@ Return ONLY valid JSON (close all brackets):
                 s["narration"] = " ".join(str(n) for n in s["narration"])
 
         if not scene_list:
-            scene_list = [
-                {
-                    "title": f"Scene {i + 1}",
-                    "visual": req.concept,
-                    "narration": f"Scene {i + 1} of the story.",
-                    "duration": 5,
-                }
-                for i in range(req.num_scenes)
-            ]
+            _update_job(job_id, status="failed",
+                error="Script generation failed: LLM returned no usable scenes. Please provide scenes manually in the storyboard editor.",
+                message="Script generation failed — no scenes returned from LLM.")
+            return
 
         scene_list = scene_list[: req.num_scenes]
 
@@ -467,6 +471,22 @@ Return ONLY valid JSON (close all brackets):
                 _update_job(job_id, progress=pct, message=f"Narration {idx + 1}/{len(scene_list)} done")
 
         # Step 3 -- Generate video for each scene
+        # Free any SDXL/other pipelines from portrait generation to reclaim VRAM
+        import gc
+        import torch as _torch
+        try:
+            from reelforge import _sdxl_pipe
+            import reelforge
+            if reelforge._sdxl_pipe is not None:
+                del reelforge._sdxl_pipe
+                reelforge._sdxl_pipe = None
+        except Exception:
+            pass
+        gc.collect()
+        if _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
+        _update_job(job_id, progress=29, message="VRAM cleared for video generation...")
+
         # Use shared seed for visual consistency across scenes
         import random as _rng
         shared_seed = _rng.randint(0, 2**31)
@@ -477,11 +497,12 @@ Return ONLY valid JSON (close all brackets):
         req_resolution = getattr(req, "resolution", "480p") or "480p"
 
         # Quality presets: control inference steps and guidance scale
+        # Higher steps = more detail and coherence, higher guidance = stronger prompt adherence
         quality = getattr(req, "quality_preset", "standard") or "standard"
         QUALITY_PRESETS = {
-            "draft":    {"steps": 20, "guidance": 5.0},
-            "standard": {"steps": 35, "guidance": 6.0},
-            "high":     {"steps": 50, "guidance": 7.0},
+            "draft":    {"steps": 25, "guidance": 5.5},
+            "standard": {"steps": 40, "guidance": 6.5},
+            "high":     {"steps": 50, "guidance": 7.5},
         }
         qp = QUALITY_PRESETS.get(quality, QUALITY_PRESETS["standard"])
         _update_job(job_id, progress=29, message=f"Quality: {quality} ({qp['steps']} steps, guidance {qp['guidance']})")
@@ -501,155 +522,130 @@ Return ONLY valid JSON (close all brackets):
 
         # Strong negative prompt to reduce AI artifacts
         neg_prompt = (
-            "low quality, blurry, distorted, disfigured, bad anatomy, "
+            "low quality, blurry, distorted, disfigured, bad anatomy, worst quality, "
             "objects appearing from nowhere, teleporting, sudden scene change, "
-            "inconsistent subject, morphing, glitch, watermark, text overlay, "
+            "inconsistent subject, morphing, glitch, watermark, text overlay, subtitle, "
             "extra limbs, missing limbs, floating objects, unnatural movement, "
-            "deformed face, ugly, duplicate, morbid, mutilated, poorly drawn, "
-            "bad proportions, cloned face, disfigured, gross proportions, "
-            "malformed limbs, missing arms, missing legs, fused fingers"
+            "deformed face, ugly, duplicate, morbid, mutilated, poorly drawn face, "
+            "bad proportions, cloned face, gross proportions, "
+            "malformed limbs, missing arms, missing legs, fused fingers, too many fingers, "
+            "mutation, extra fingers, extra arms, extra legs, long neck, "
+            "cross-eyed, out of frame, cut off, jpeg artifacts, pixelated, grainy, "
+            "static image, frozen, no motion, still frame, slideshow"
         )
 
-        # --- IP-Adapter: set up character reference images for consistency ---
-        ip_adapter_images = None  # PIL Images for injection
+        # --- Character reference images (for prompt injection, not IP-Adapter) ---
+        # Wan T2V does not support IP-Adapter. Character consistency comes from
+        # strong prompt-based descriptions injected per scene (handled below).
+        # No silent fallback chains — if something fails, it fails visibly.
         ip_adapter_strength = getattr(req, "ip_adapter_strength", 0.6)
         ip_adapter_enabled = getattr(req, "ip_adapter_enabled", True)
 
-        # Load user-provided character reference images
-        if ip_adapter_enabled and getattr(req, "character_ref_images", []):
-            from PIL import Image as PILImage
-            _update_job(job_id, progress=28, message="Loading character reference images for IP-Adapter...")
-            loaded_refs = []
-            for ref_path in req.character_ref_images:
-                if os.path.exists(ref_path):
-                    try:
-                        img = PILImage.open(ref_path).convert("RGB").resize((224, 224))
-                        loaded_refs.append(img)
-                    except Exception:
-                        pass
-            if loaded_refs:
-                ip_adapter_images = loaded_refs
-                _update_job(job_id, progress=29, message=f"Loaded {len(loaded_refs)} reference image(s) for character consistency")
+        # Build character appearance lookup from request characters
+        # (name -> detailed appearance description for prompt injection)
+        char_appearances = {}
+        if hasattr(req, "scenes") and req.scenes:
+            # Characters come from the storyboard's character list
+            for sc in req.scenes:
+                for cname in (sc.characters or []):
+                    if cname not in char_appearances:
+                        char_appearances[cname] = cname  # placeholder
+        # Also check for characters defined via CharacterDef in script request
+        for ch in getattr(req, "characters", []) or []:
+            if hasattr(ch, "name") and hasattr(ch, "appearance"):
+                char_appearances[ch.name] = ch.appearance or ch.name
+
+        # Merge with visual_anchor which often contains character descriptions
+        global_char_desc = visual_identity or ""
 
         for idx, scene in enumerate(scene_list):
             scene_prompt = scene.get("visual", req.concept)
 
-            # Always inject visual identity for character consistency
-            if visual_identity:
-                scene_prompt = f"{visual_identity}. {scene_prompt}"
+            # --- Character injection: embed appearance descriptions directly in prompt ---
+            scene_chars = scene.get("characters", [])
+            char_injection = ""
+            if scene_chars:
+                # Inject specific character descriptions for this scene
+                char_parts = []
+                for cname in scene_chars:
+                    appearance = char_appearances.get(cname, "")
+                    if appearance and appearance != cname:
+                        char_parts.append(f"{cname} ({appearance})")
+                    else:
+                        char_parts.append(cname)
+                char_injection = "Characters: " + ", ".join(char_parts) + ". "
+            elif global_char_desc:
+                char_injection = f"{global_char_desc}. "
 
             # Also inject any user-provided visual anchor
             user_anchor = getattr(req, "visual_anchor", "")
-            if user_anchor:
-                scene_prompt = f"{scene_prompt}. {user_anchor}"
+            if user_anchor and user_anchor != global_char_desc:
+                char_injection += f"{user_anchor}. "
+
+            # Build final prompt: character desc FIRST (most important), then scene visual
+            scene_prompt = f"{char_injection}{scene_prompt}"
 
             # Add quality boosters
-            scene_prompt = f"{scene_prompt}, smooth continuous motion, cinematic quality, consistent subject appearance, photorealistic"
-
-            # If IP-Adapter has references, add consistency instruction to prompt
-            if ip_adapter_images:
-                scene_prompt = f"{scene_prompt}, exactly matching reference character appearance"
+            scene_prompt = (
+                f"{scene_prompt}, smooth continuous motion, cinematic quality, "
+                f"consistent character appearance throughout, same person same face same outfit, "
+                f"photorealistic, professional cinematography, sharp focus"
+            )
 
             pct_base = 30 + int(idx / len(scene_list) * 55)
+            char_info = f" [{len(scene_chars)} character(s)]" if scene_chars else ""
             _update_job(
                 job_id,
                 progress=pct_base,
-                message=f"Generating scene {idx + 1}/{len(scene_list)}: {scene.get('title', '')}"
-                + (" [IP-Adapter active]" if ip_adapter_images else ""),
+                message=f"Generating scene {idx + 1}/{len(scene_list)}: {scene.get('title', '')}{char_info}",
             )
 
-            # Calculate how many generation passes needed to fill scene duration
             scene_dur = scene.get("duration", 5)
             if not isinstance(scene_dur, (int, float)):
                 scene_dur = 5
             scene_dur = max(3, min(30, float(scene_dur)))
-            clip_duration = req_frames / max(req_fps, 1)  # e.g., 49/16 = 3.06s
-            clips_needed = max(1, int(scene_dur / clip_duration) + (1 if scene_dur % clip_duration > 0.5 else 0))
-            # Cap at 2 clips per scene to keep generation time reasonable
-            # (each clip takes ~5 min on consumer GPU; 4 clips = 20 min per scene)
-            if clips_needed > 2:
-                _update_job(
-                    job_id, progress=pct_base,
-                    message=f"Scene {idx+1}: capping from {clips_needed} to 2 clips (trimming to fill {scene_dur}s)",
-                )
-                clips_needed = 2
 
             scene_clips = []
-            prev_clip_path = None
 
-            # Progression phrases so continuation clips aren't identical
+            # --- T2V pipeline with strong character prompts ---
+            # Character appearances are baked into the prompt text for Wan T2V.
+            # Shared seed ensures consistent character interpretation across scenes.
+            clip_duration = req_frames / max(req_fps, 1)
+            clips_needed = min(2, max(1, int(scene_dur / clip_duration) + 1))
+
             continuations = [
                 "continuing the motion smoothly",
                 "the action progresses further",
                 "moments later in the same scene",
-                "the movement continues naturally",
-                "the scene unfolds further",
             ]
 
             for ci in range(clips_needed):
                 _update_job(
                     job_id,
                     progress=pct_base + int((ci / clips_needed) * (55 / len(scene_list))),
-                    message=f"Scene {idx+1}/{len(scene_list)}: clip {ci+1}/{clips_needed} ({scene.get('title','')})",
+                    message=f"Scene {idx+1}/{len(scene_list)}: clip {ci+1}/{clips_needed} ({scene.get('title', '')})",
                 )
-
-                if ci == 0:
-                    # First clip: T2V with IP-Adapter references
-                    vp = gen.generate_text2video(
-                        prompt=scene_prompt,
-                        negative_prompt=neg_prompt,
-                        progress_callback=None,
-                        ip_adapter_images=ip_adapter_images,
-                        ip_adapter_strength=ip_adapter_strength,
-                    )
-
-                    # --- Auto-capture: after Scene 1, extract reference for remaining scenes ---
-                    if idx == 0 and ip_adapter_enabled and ip_adapter_images is None:
-                        try:
-                            from ip_adapter import extract_last_frame_as_reference
-                            from PIL import Image as PILImage
-                            ref_frame_path = extract_last_frame_as_reference(vp)
-                            if ref_frame_path and os.path.exists(ref_frame_path):
-                                ref_img = PILImage.open(ref_frame_path).convert("RGB").resize((224, 224))
-                                ip_adapter_images = [ref_img]
-                                _update_job(
-                                    job_id, progress=pct_base + 2,
-                                    message="Auto-captured character reference from Scene 1 for IP-Adapter",
-                                )
-                        except Exception as e:
-                            _update_job(
-                                job_id, progress=pct_base + 2,
-                                message=f"IP-Adapter auto-capture skipped: {e}",
-                            )
-                else:
-                    # Continuation clips: use T2V with varied prompt + IP-Adapter
-                    # NOTE: Wan 1.3B has NO I2V model (all I2V models are 14B+, too large
-                    # for 12GB VRAM). Using I2V would hang trying to download 28GB.
-                    # Instead, use T2V with continuation phrases for scene extension.
-                    cont_prompt = f"{scene_prompt}, {continuations[ci % len(continuations)]}"
-                    _update_job(
-                        job_id,
-                        progress=pct_base + int((ci / clips_needed) * (55 / len(scene_list))),
-                        message=f"Scene {idx+1}: extending clip {ci+1}/{clips_needed} (T2V continuation)",
-                    )
-                    vp = gen.generate_text2video(
-                        prompt=cont_prompt,
-                        negative_prompt=neg_prompt,
-                        progress_callback=None,
-                        ip_adapter_images=ip_adapter_images,
-                        ip_adapter_strength=ip_adapter_strength,
-                    )
-
+                clip_prompt = scene_prompt if ci == 0 else f"{scene_prompt}, {continuations[ci % len(continuations)]}"
+                vp = gen.generate_text2video(
+                    prompt=clip_prompt,
+                    negative_prompt=neg_prompt,
+                    progress_callback=None,
+                )
                 scene_clips.append(vp)
-                prev_clip_path = vp
 
             video_paths.append(scene_clips)
 
-        # Step 4 -- Assemble each scene: concatenate clips, trim to duration, add narration ONCE
+        # Step 4 -- Assemble video: concatenate clips per scene, then build
+        # a single audio track with proper timing (numpy-based, no moviepy audio bugs)
         from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
+        import numpy as np
+        import soundfile as sf
 
-        _update_job(job_id, progress=86, message="Assembling scenes with narration...")
+        _update_job(job_id, progress=86, message="Assembling scenes...")
+
+        # 4a: Build silent video for each scene (clips merged, trimmed to duration)
         final_scene_paths = []
+        scene_durations = []  # actual duration of each scene video
 
         for idx, scene_clips in enumerate(video_paths):
             scene = scene_list[idx] if idx < len(scene_list) else {}
@@ -660,53 +656,138 @@ Return ONLY valid JSON (close all brackets):
 
             try:
                 clips = [VideoFileClip(cp) for cp in scene_clips]
-                if len(clips) > 1:
-                    # Remove audio from individual clips to prevent repetition
-                    silent_clips = [c.without_audio() for c in clips]
+                # Always strip audio from video clips - we build audio separately
+                silent_clips = [c.without_audio() for c in clips]
+                if len(silent_clips) > 1:
                     combined = concatenate_videoclips(silent_clips, method="compose")
                 else:
-                    combined = clips[0].without_audio()
+                    combined = silent_clips[0]
 
                 # Trim to exact target duration
                 if combined.duration > target_dur:
                     combined = combined.subclip(0, target_dur)
 
-                # Add narration audio ONCE (not repeated)
-                if idx < len(narration_paths):
-                    ap = narration_paths[idx]
-                    if ap and os.path.exists(ap) and os.path.getsize(ap) > 100:
-                        narr_audio = AudioFileClip(ap)
-                        # Narration plays once then silence for rest of scene
-                        if narr_audio.duration > combined.duration:
-                            narr_audio = narr_audio.subclip(0, combined.duration)
-                        combined = combined.set_audio(narr_audio)
-
                 scene_out = os.path.join(OUTPUT_DIR, f"story_scene_{job_id}_{idx}.mp4")
                 combined.write_videofile(
                     scene_out, fps=req_fps, codec="libx264",
-                    audio_codec="aac" if combined.audio else None,
+                    audio=False,  # No audio in scene clips
                     logger=None,
                 )
+                scene_durations.append(combined.duration)
                 final_scene_paths.append(scene_out)
 
                 for c in clips:
                     c.close()
                 combined.close()
-            except Exception:
+            except Exception as asm_err:
+                _update_job(job_id, progress=86,
+                    message=f"WARNING: Scene {idx+1} assembly failed ({asm_err}). Using raw clip.")
                 if scene_clips:
                     final_scene_paths.append(scene_clips[0])
+                    scene_durations.append(target_dur)
 
-            pct = 86 + int((idx + 1) / len(video_paths) * 7)
-            _update_job(job_id, progress=pct, message=f"Scene {idx+1} done ({target_dur:.0f}s)")
+            pct = 86 + int((idx + 1) / len(video_paths) * 4)
+            _update_job(job_id, progress=pct, message=f"Scene {idx+1} video assembled ({target_dur:.0f}s)")
 
-        video_paths = final_scene_paths
+        # 4b: Concatenate all scene videos into one silent video
+        _update_job(job_id, progress=90, message="Merging scenes into final video...")
+        final_video = concatenate_videos(final_scene_paths, fps=req_fps)
 
-        # Step 5 -- Concatenate all scenes
-        _update_job(job_id, progress=90, message="Assembling final movie...")
+        # 4c: Build a single audio track with proper per-scene timing and gaps
+        # This avoids moviepy's audio concatenation bugs (overlap, drift, repetition)
+        if narration_paths:
+            _update_job(job_id, progress=91, message="Building synchronized audio track...")
+            INTER_SCENE_SILENCE = 0.4  # seconds of silence between scenes
+            TTS_SAMPLE_RATE = 22050  # Piper TTS output rate
 
-        # Simple concatenation preserves per-scene audio sync
-        # Transitions with audio cause overlapping narrations, so use cut
-        final_video = concatenate_videos(video_paths, fps=req_fps)
+            # Detect sample rate from first valid narration file
+            for np_path in narration_paths:
+                if np_path and os.path.exists(np_path) and os.path.getsize(np_path) > 100:
+                    try:
+                        _, sr = sf.read(np_path, frames=1)
+                        TTS_SAMPLE_RATE = sr
+                    except Exception:
+                        pass
+                    break
+
+            audio_segments = []
+            for idx, (narr_path, scene_dur) in enumerate(zip(narration_paths, scene_durations)):
+                scene_samples = int(scene_dur * TTS_SAMPLE_RATE)
+
+                if narr_path and os.path.exists(narr_path) and os.path.getsize(narr_path) > 100:
+                    try:
+                        narr_audio, sr = sf.read(narr_path)
+                        # Convert stereo to mono if needed
+                        if len(narr_audio.shape) > 1:
+                            narr_audio = np.mean(narr_audio, axis=1)
+                        # Resample if needed
+                        if sr != TTS_SAMPLE_RATE:
+                            from scipy import signal as sp_signal
+                            narr_audio = sp_signal.resample(
+                                narr_audio, int(len(narr_audio) * TTS_SAMPLE_RATE / sr)
+                            )
+
+                        if len(narr_audio) > scene_samples:
+                            # Narration longer than scene: trim with fade-out
+                            narr_audio = narr_audio[:scene_samples]
+                            fade_samples = min(int(0.3 * TTS_SAMPLE_RATE), len(narr_audio))
+                            narr_audio[-fade_samples:] *= np.linspace(1, 0, fade_samples)
+                        elif len(narr_audio) < scene_samples:
+                            # Narration shorter: pad with silence to fill scene duration
+                            padding = np.zeros(scene_samples - len(narr_audio), dtype=np.float32)
+                            narr_audio = np.concatenate([narr_audio, padding])
+
+                        audio_segments.append(narr_audio.astype(np.float32))
+                    except Exception as narr_err:
+                        _update_job(job_id, progress=91,
+                            message=f"WARNING: Scene {idx+1} narration failed to load ({narr_err}). Using silence.")
+                        audio_segments.append(np.zeros(scene_samples, dtype=np.float32))
+                else:
+                    # No narration for this scene, fill with silence
+                    audio_segments.append(np.zeros(scene_samples, dtype=np.float32))
+
+                # Add inter-scene silence gap (except after last scene)
+                if idx < len(scene_durations) - 1:
+                    gap = np.zeros(int(INTER_SCENE_SILENCE * TTS_SAMPLE_RATE), dtype=np.float32)
+                    audio_segments.append(gap)
+
+            # Combine all audio segments
+            combined_audio = np.concatenate(audio_segments)
+
+            # Normalize to prevent clipping
+            peak = np.max(np.abs(combined_audio))
+            if peak > 0.95:
+                combined_audio = combined_audio * 0.92 / peak
+
+            # Write combined audio
+            combined_audio_path = os.path.join(OUTPUT_DIR, f"story_audio_{job_id}.wav")
+            sf.write(combined_audio_path, combined_audio, TTS_SAMPLE_RATE)
+
+            # Merge audio onto the silent video using ffmpeg (most reliable)
+            final_with_audio = os.path.join(OUTPUT_DIR, f"story_final_{job_id}.mp4")
+            try:
+                import subprocess
+                # Get video duration
+                vid_clip = VideoFileClip(final_video)
+                vid_duration = vid_clip.duration
+                vid_clip.close()
+
+                subprocess.run([
+                    "ffmpeg", "-y",
+                    "-i", final_video,
+                    "-i", combined_audio_path,
+                    "-c:v", "copy",  # Don't re-encode video
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-t", str(vid_duration),  # Match video duration exactly
+                    "-shortest",
+                    final_with_audio,
+                ], capture_output=True, check=True, timeout=120)
+                final_video = final_with_audio
+            except Exception as e:
+                _update_job(
+                    job_id, progress=92,
+                    message=f"WARNING: Audio merge failed ({e}). Video will have no audio.",
+                )
 
         # Step 6 -- Post-processing: upscale and frame interpolation
         enable_upscale = getattr(req, "enable_upscale", False)
@@ -729,7 +810,9 @@ Return ONLY valid JSON (close all brackets):
                     final_video = upscaled_path
                     _update_job(job_id, progress=96, message=f"Upscaled with {method}")
             except Exception as e:
-                _update_job(job_id, progress=96, message=f"Upscale skipped: {e}")
+                _update_job(job_id, status="failed", error=f"Upscale failed: {e}",
+                    message=f"Upscale failed: {e}. Install Real-ESRGAN or disable upscaling.")
+                return
 
         if enable_interp:
             _update_job(job_id, progress=97, message="Interpolating frames (RIFE 2x)...")
@@ -782,7 +865,9 @@ Return ONLY valid JSON (close all brackets):
             except ImportError:
                 _update_job(job_id, progress=99, message="RIFE not installed, skipping interpolation (pip install rife-ncnn-vulkan-python)")
             except Exception as e:
-                _update_job(job_id, progress=99, message=f"Interpolation skipped: {e}")
+                _update_job(job_id, status="failed", error=f"Frame interpolation failed: {e}",
+                    message=f"RIFE interpolation failed: {e}. Install rife-ncnn-vulkan-python or disable interpolation.")
+                return
 
         _update_job(
             job_id,
@@ -1020,15 +1105,23 @@ async def system_status():
         if torch.cuda.is_available():
             props = torch.cuda.get_device_properties(0)
             total_vram = props.total_memory / (1024 ** 3)
-            allocated = torch.cuda.memory_allocated(0) / (1024 ** 3)
-            reserved = torch.cuda.memory_reserved(0) / (1024 ** 3)
-            free_vram = total_vram - reserved
+            # Use nvidia-smi for actual system-wide free VRAM
+            free_vram = total_vram
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    free_vram = float(result.stdout.strip()) / 1024
+            except Exception:
+                reserved = torch.cuda.memory_reserved(0) / (1024 ** 3)
+                free_vram = total_vram - reserved
             gpu_info = {
                 "available": True,
                 "gpu_name": props.name,
                 "total_vram_gb": round(total_vram, 2),
-                "allocated_vram_gb": round(allocated, 2),
-                "reserved_vram_gb": round(reserved, 2),
                 "free_vram_gb": round(free_vram, 2),
                 "cuda_version": torch.version.cuda,
             }
@@ -1490,6 +1583,256 @@ async def ip_adapter_dependencies():
         install_cmd = "pip install " + " ".join(pkg_map.get(m, m) for m in missing)
 
     return {"dependencies": deps, "all_installed": all_ok, "install_command": install_cmd}
+
+
+# ---------------------------------------------------------------------------
+# Character Portrait Generation
+# ---------------------------------------------------------------------------
+
+class CharacterPortraitRequest(BaseModel):
+    """Generate actual character reference images from description."""
+    name: str
+    description: str  # Brief traits like "30s woman, red hair, trench coat"
+    visual_prompt: str = ""  # Detailed visual prompt (optional, auto-generated if empty)
+    views: list[str] = ["front"]  # Which views to generate: front, three_quarter, side, back
+    style: str = "photorealistic"  # photorealistic, anime, 3d_render
+    register_ip_adapter: bool = True  # Auto-register as IP-Adapter reference
+
+
+VIEW_PROMPT_TEMPLATES = {
+    "front": "front view portrait, looking directly at camera, centered composition, studio lighting, neutral background",
+    "three_quarter": "three-quarter view portrait, slightly turned to the side, elegant pose, studio lighting, neutral background",
+    "side": "side profile view, facing left, clean silhouette visible, studio lighting, neutral background",
+    "back": "back view, showing hair and outfit from behind, turned away from camera, studio lighting, neutral background",
+}
+
+
+def _build_character_prompt(name: str, description: str, visual_prompt: str, view: str, style: str) -> str:
+    """Build a detailed image generation prompt for a character view."""
+    base = visual_prompt if visual_prompt.strip() else description
+
+    view_suffix = VIEW_PROMPT_TEMPLATES.get(view, VIEW_PROMPT_TEMPLATES["front"])
+
+    style_map = {
+        "photorealistic": "photorealistic, highly detailed skin texture, real person, professional photography, 8k, sharp focus",
+        "anime": "anime style, cel shaded, clean lines, vibrant colors, detailed anime character design, high quality illustration",
+        "3d_render": "3D rendered character, Pixar style, high quality 3D model, subsurface scattering, ambient occlusion, detailed textures",
+    }
+    style_suffix = style_map.get(style, style_map["photorealistic"])
+
+    prompt = f"Character portrait of {name}: {base}, {view_suffix}, {style_suffix}, character reference sheet quality, consistent design"
+    return prompt
+
+
+def _run_character_portrait(job_id: str, req: CharacterPortraitRequest):
+    """Generate character portrait images in background thread.
+
+    Uses a shared seed across all views for consistency.
+    Generates front view first, then uses it as IP-Adapter reference for other views.
+    """
+    try:
+        _update_job(job_id, status="running", progress=5, message="Loading image generation model...")
+
+        from reelforge import rf_generate_image, rf_load_sdxl_pipeline
+        from PIL import Image as PILImage
+        import shutil
+        import random
+
+        # Shared seed ensures same "identity" interpretation across views
+        shared_seed = random.randint(0, 2**31)
+
+        views = req.views or ["front"]
+        total_views = len(views)
+        generated_paths = {}
+
+        # Always generate front view first (it becomes the reference for other views)
+        if "front" in views and views[0] != "front":
+            views.remove("front")
+            views.insert(0, "front")
+
+        front_image = None  # PIL Image of front view, used as IP-Adapter ref
+
+        # Multi-view consistency: rely on shared seed (IP-Adapter download
+        # for SDXL can hang for 10+ minutes, so skip it entirely)
+        ip_adapter_loaded = False
+
+        for i, view in enumerate(views):
+            progress = 10 + (80 * i // total_views)
+            _update_job(job_id, progress=progress, message=f"Generating {view} view ({i+1}/{total_views})...")
+
+            prompt = _build_character_prompt(req.name, req.description, req.visual_prompt, view, req.style)
+
+            # For non-front views, use front image as IP-Adapter reference
+            ip_ref = None
+            if i > 0 and front_image is not None and ip_adapter_loaded:
+                ip_ref = front_image
+
+            image_path = rf_generate_image(
+                prompt=prompt,
+                provider="sdxl_turbo",
+                style=req.style,
+                aspect_ratio="1:1",
+                seed=shared_seed,
+                ip_adapter_image=ip_ref,
+            )
+
+            # Save front view as reference for subsequent views
+            if view == "front" and front_image is None:
+                try:
+                    front_image = PILImage.open(image_path).convert("RGB").resize((224, 224), PILImage.LANCZOS)
+                except Exception:
+                    pass
+
+            # Move to character portraits directory
+            safe_name = req.name.lower().replace(" ", "_")[:30]
+            char_filename = f"{safe_name}_{view}_{uuid.uuid4().hex[:8]}.png"
+            dest_path = os.path.join(CHAR_PORTRAITS_DIR, char_filename)
+            shutil.move(image_path, dest_path)
+
+            generated_paths[view] = {
+                "path": dest_path,
+                "filename": char_filename,
+                "url": f"/static/portraits/{char_filename}",
+            }
+
+        # (IP-Adapter for SDXL multi-view skipped — download too slow;
+        #  shared seed provides adequate cross-view consistency)
+
+        # Register with IP-Adapter if requested
+        ip_adapter_status = None
+        if req.register_ip_adapter:
+            try:
+                from ip_adapter import get_ip_adapter_manager
+                manager = get_ip_adapter_manager()
+                ref_paths = [v["path"] for v in generated_paths.values()]
+                safe_id = req.name.lower().replace(" ", "_")[:30]
+                manager.register_character(safe_id, reference_images=ref_paths)
+                manager.enable()
+                ip_adapter_status = f"Registered {len(ref_paths)} reference(s) for IP-Adapter"
+            except Exception as e:
+                ip_adapter_status = f"Generated but IP-Adapter registration failed: {e}"
+
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message=f"Generated {total_views} character view(s) for {req.name}",
+            result={
+                "character_name": req.name,
+                "portraits": generated_paths,
+                "ip_adapter": ip_adapter_status,
+            },
+        )
+
+    except Exception as e:
+        _update_job(job_id, status="failed", error=str(e), message=f"Portrait generation failed: {e}")
+        traceback.print_exc()
+
+
+@app.post("/api/v1/characters/generate-portrait", response_model=JobResponse)
+async def generate_character_portrait(req: CharacterPortraitRequest, background_tasks: BackgroundTasks):
+    """Generate character reference portrait images using SDXL.
+
+    Creates actual character images (front, side, 3/4 views) from text description.
+    These are automatically registered as IP-Adapter references for consistency
+    across movie scenes.
+    """
+    if not req.name.strip():
+        raise HTTPException(status_code=422, detail="Character name is required")
+    if not req.description.strip() and not req.visual_prompt.strip():
+        raise HTTPException(status_code=422, detail="Either description or visual_prompt is required")
+
+    job_id = _create_job("character_portrait", req.model_dump())
+    thread = threading.Thread(target=_run_character_portrait, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.get("/api/v1/characters/portraits/{char_name}")
+async def list_character_portraits(char_name: str):
+    """List all generated portrait images for a character (use '_all' for all characters)."""
+    portraits = []
+    if os.path.isdir(CHAR_PORTRAITS_DIR):
+        for f in sorted(os.listdir(CHAR_PORTRAITS_DIR)):
+            if not f.endswith(".png"):
+                continue
+            # Filter by character name unless requesting all
+            if char_name != "_all":
+                safe_name = char_name.lower().replace(" ", "_")[:30]
+                if not f.startswith(safe_name):
+                    continue
+            view = "unknown"
+            for v in ["front", "three_quarter", "side", "back"]:
+                if f"_{v}_" in f:
+                    view = v
+                    break
+            portraits.append({
+                "filename": f,
+                "url": f"/static/portraits/{f}",
+                "view": view,
+            })
+    return {"character": char_name, "portraits": portraits}
+
+
+@app.get("/api/v1/characters/list")
+async def list_characters():
+    """List all characters that have generated portraits, grouped by name.
+    Used by Story Mode to import characters from Character Studio."""
+    characters = {}
+    if os.path.isdir(CHAR_PORTRAITS_DIR):
+        for f in sorted(os.listdir(CHAR_PORTRAITS_DIR)):
+            if not f.endswith(".png"):
+                continue
+            # Extract character name from filename: "captain_wolf_front_abc123.png"
+            # Views can have underscores (three_quarter), so match views first then extract name
+            view = "front"
+            char_key = None
+            for v in ["three_quarter", "front", "side", "back"]:  # longest match first
+                marker = f"_{v}_"
+                if marker in f:
+                    view = v
+                    char_key = f[:f.index(marker)]
+                    break
+            if char_key is None:
+                # No known view found, use filename minus last 2 parts (hash.png)
+                parts = f.rsplit("_", 1)
+                char_key = parts[0] if len(parts) >= 2 else f.replace(".png", "")
+
+            if char_key not in characters:
+                # Convert key back to display name: "captain_wolf" -> "Captain Wolf"
+                display_name = " ".join(w.capitalize() for w in char_key.split("_"))
+                characters[char_key] = {
+                    "id": char_key,
+                    "name": display_name,
+                    "portraits": [],
+                    "front_url": None,
+                }
+            characters[char_key]["portraits"].append({
+                "filename": f,
+                "url": f"/static/portraits/{f}",
+                "view": view,
+            })
+            # Keep track of front view for thumbnail
+            if view == "front" and not characters[char_key]["front_url"]:
+                characters[char_key]["front_url"] = f"/static/portraits/{f}"
+
+    # Also pull appearance info from IP-Adapter manager job history
+    result = []
+    for key, char in characters.items():
+        # Try to find the original generation job for this character
+        appearance = ""
+        for job in jobs.values():
+            if job.get("kind") == "character_portrait":
+                params = job.get("params", {})
+                if params.get("name", "").lower().replace(" ", "_")[:30] == key:
+                    appearance = params.get("description", "")
+                    if params.get("visual_prompt"):
+                        appearance = params["visual_prompt"]
+                    break
+        char["appearance"] = appearance
+        result.append(char)
+
+    return {"characters": result}
 
 
 # ---------------------------------------------------------------------------

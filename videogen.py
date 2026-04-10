@@ -260,9 +260,40 @@ class VideoGenerator:
 
         return round(total, 1)
 
+    def _get_system_free_vram(self) -> Tuple[float, float]:
+        """Get actual system-wide free VRAM (not just PyTorch's view).
+
+        Returns:
+            Tuple of (free_vram_gb, total_vram_gb)
+        """
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.free,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                parts = result.stdout.strip().split(",")
+                free_mb = float(parts[0].strip())
+                total_mb = float(parts[1].strip())
+                return free_mb / 1024, total_mb / 1024
+        except Exception:
+            pass
+        # Fallback to PyTorch view
+        props = torch.cuda.get_device_properties(0)
+        total = props.total_memory / (1024**3)
+        reserved = torch.cuda.memory_reserved(0) / (1024**3)
+        return total - reserved, total
+
     def check_memory_for_generation(self) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Check if there's enough VRAM for generation with current config.
+        Uses system-wide GPU memory (nvidia-smi) not just PyTorch allocations.
+
+        With CPU offloading enabled (default), only one model layer is on GPU at
+        a time, so generation can proceed with much less VRAM than the full model.
+        The check uses a soft threshold: warns but allows generation if CPU offload
+        is on and there's at least 3GB free.
 
         Returns:
             Tuple of (can_proceed, message, info_dict)
@@ -271,12 +302,9 @@ class VideoGenerator:
             return False, "CUDA GPU required", {}
 
         try:
-            # Get current memory state
             props = torch.cuda.get_device_properties(0)
             total_vram = props.total_memory / (1024**3)
-            allocated = torch.cuda.memory_allocated(0) / (1024**3)
-            reserved = torch.cuda.memory_reserved(0) / (1024**3)
-            free_vram = total_vram - reserved  # Use reserved as it's what's actually held
+            free_vram, _ = self._get_system_free_vram()
 
             # Estimate required VRAM
             required_vram = self.estimate_vram_required()
@@ -284,8 +312,6 @@ class VideoGenerator:
             info = {
                 "gpu_name": props.name,
                 "total_vram": round(total_vram, 2),
-                "allocated_vram": round(allocated, 2),
-                "reserved_vram": round(reserved, 2),
                 "free_vram": round(free_vram, 2),
                 "required_vram": required_vram,
                 "engine": self.config.engine,
@@ -293,28 +319,41 @@ class VideoGenerator:
                          self.config.ltx_model if self.config.engine == "ltx" else
                          self.config.model_variant,
                 "num_frames": self.config.num_frames,
+                "cpu_offload": self.config.enable_cpu_offload,
             }
 
-            if free_vram < required_vram:
-                # Build helpful suggestion
-                suggestions = []
-                if self.config.num_frames > 49:
-                    suggestions.append(f"reduce frames from {self.config.num_frames} to 49")
-                if self.config.engine == "wan" and self.config.wan_resolution == "720p":
-                    suggestions.append("use 480p instead of 720p")
-                if self.config.engine == "wan" and "14b" in self.config.wan_model:
-                    suggestions.append("use 1.3b model instead of 14b")
-                if not suggestions:
-                    suggestions.append("close other GPU applications")
+            if free_vram >= required_vram:
+                return True, "OK", info
 
-                suggestion_text = " or ".join(suggestions)
-
-                return False, (
-                    f"Insufficient VRAM: {free_vram:.1f}GB free, ~{required_vram:.1f}GB required. "
-                    f"Try: {suggestion_text}."
+            # With CPU offloading, generation works with much less VRAM because
+            # only one layer is on GPU at a time. Allow if >= 3GB free.
+            if self.config.enable_cpu_offload and free_vram >= 3.0:
+                videogen_logger.warning(
+                    f"Low VRAM ({free_vram:.1f}GB free, ~{required_vram:.1f}GB estimated) "
+                    f"but CPU offloading is enabled - proceeding with sequential layer execution"
+                )
+                return True, (
+                    f"Low VRAM warning: {free_vram:.1f}GB free (need ~{required_vram:.1f}GB). "
+                    f"Using CPU offloading for layer-by-layer execution."
                 ), info
 
-            return True, "OK", info
+            # Hard fail: not enough even with offloading
+            suggestions = []
+            if self.config.num_frames > 49:
+                suggestions.append(f"reduce frames from {self.config.num_frames} to 49")
+            if self.config.engine == "wan" and self.config.wan_resolution == "720p":
+                suggestions.append("use 480p instead of 720p")
+            if self.config.engine == "wan" and "14b" in self.config.wan_model:
+                suggestions.append("use 1.3b model instead of 14b")
+            if not suggestions:
+                suggestions.append("close other GPU applications (Ollama, etc.)")
+
+            suggestion_text = " or ".join(suggestions)
+
+            return False, (
+                f"Insufficient VRAM: {free_vram:.1f}GB free, ~{required_vram:.1f}GB required. "
+                f"Try: {suggestion_text}."
+            ), info
 
         except Exception as e:
             return False, f"Memory check failed: {e}", {}
@@ -564,24 +603,30 @@ class VideoGenerator:
 
     def _load_ip_adapter(self, strength: float = 0.6) -> None:
         """
-        Load IP-Adapter weights into the current pipeline for character consistency.
+        Attempt to load IP-Adapter weights into the current pipeline.
 
-        Uses diffusers' built-in IP-Adapter support. Falls back gracefully if
-        the pipeline doesn't support it or weights aren't available.
+        NOTE: Wan 2.1 T2V pipelines do NOT support IP-Adapter (SD1.5/SDXL weights
+        are incompatible). This method exists for future compatibility with pipelines
+        that do support it. For Wan, character consistency is handled via strong
+        prompt-based anchoring in _run_story().
         """
         if self._pipeline is None:
             raise RuntimeError("Pipeline must be loaded before IP-Adapter")
 
         if self._ip_adapter_loaded:
-            # Just update strength
-            try:
-                self._pipeline.set_ip_adapter_scale(strength)
-            except Exception:
-                pass
+            return
+
+        # Wan pipelines don't support IP-Adapter - skip the attempt entirely
+        # to avoid wasting time downloading incompatible weights
+        if self.config.engine == "wan":
+            videogen_logger.info(
+                "Wan pipeline: IP-Adapter weights not compatible. "
+                "Character consistency uses prompt anchoring instead."
+            )
+            self._ip_adapter_loaded = False
             return
 
         try:
-            # Try loading IP-Adapter Plus weights
             self._pipeline.load_ip_adapter(
                 "h94/IP-Adapter",
                 subfolder="models",
@@ -589,24 +634,10 @@ class VideoGenerator:
             )
             self._pipeline.set_ip_adapter_scale(strength)
             self._ip_adapter_loaded = True
-            videogen_logger.info(f"IP-Adapter Plus loaded (strength={strength})")
-        except Exception as e1:
-            # Try alternative weight file
-            try:
-                self._pipeline.load_ip_adapter(
-                    "h94/IP-Adapter",
-                    subfolder="sdxl_models",
-                    weight_name="ip-adapter-plus_sdxl_vit-h.safetensors",
-                )
-                self._pipeline.set_ip_adapter_scale(strength)
-                self._ip_adapter_loaded = True
-                videogen_logger.info(f"IP-Adapter Plus SDXL loaded (strength={strength})")
-            except Exception as e2:
-                videogen_logger.warning(
-                    f"IP-Adapter not available for this pipeline: {e1}; {e2}. "
-                    "Character consistency will rely on prompt anchoring only."
-                )
-                self._ip_adapter_loaded = False
+            videogen_logger.info(f"IP-Adapter loaded (strength={strength})")
+        except Exception as e:
+            videogen_logger.warning(f"IP-Adapter not available: {e}")
+            self._ip_adapter_loaded = False
 
     def _load_ltx_pipeline(self, mode: str, progress_callback: Callable = None) -> None:
         """Load LTX-Video pipeline."""

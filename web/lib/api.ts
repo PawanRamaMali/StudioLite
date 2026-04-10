@@ -64,5 +64,23 @@ export const generateStory = (params: Record<string, unknown>) =>
 export const generateTTS = (params: { text: string; voice?: string; engine?: string }) =>
   apiFetch<Job>("/api/v1/audio/tts", { method: "POST", body: JSON.stringify(params) });
 
+// Characters
+export const generateCharacterPortrait = (params: {
+  name: string;
+  description: string;
+  visual_prompt?: string;
+  views?: string[];
+  style?: string;
+  register_ip_adapter?: boolean;
+}) => apiFetch<Job>("/api/v1/characters/generate-portrait", { method: "POST", body: JSON.stringify(params) });
+
+export const getCharacterPortraits = (charName: string) =>
+  apiFetch<{ character: string; portraits: { filename: string; url: string; view: string }[] }>(
+    `/api/v1/characters/portraits/${encodeURIComponent(charName)}`
+  );
+
 // Download
 export const getDownloadUrl = (jobId: string) => `${API_BASE}/api/v1/jobs/${jobId}/download`;
+
+// Static assets
+export const getPortraitUrl = (relativePath: string) => `${API_BASE}${relativePath}`;

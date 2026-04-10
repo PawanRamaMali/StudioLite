@@ -10,7 +10,7 @@ import {
   UserCircle, Upload, Shield, ImageIcon, X, Copy, Check, Eye,
   Pause, SkipForward, SkipBack, Volume2, FileText, Film,
 } from "lucide-react";
-import { generateStory, getJob, getDownloadUrl } from "@/lib/api";
+import { generateStory, getJob, getDownloadUrl, getPortraitUrl } from "@/lib/api";
 
 interface Scene {
   id: string;
@@ -18,6 +18,7 @@ interface Scene {
   visual: string;
   narration: string;
   duration: number;
+  characters: string[];  // Character names assigned to this scene
 }
 
 interface StoryCharacter {
@@ -90,6 +91,32 @@ export default function StoryPanel() {
   // IP-Adapter character consistency
   const [ipAdapterEnabled, setIpAdapterEnabled] = useState(true);
   const [ipAdapterStrength, setIpAdapterStrength] = useState(0.6);
+  const [registeredPortraits, setRegisteredPortraits] = useState<{filename: string; url: string; view: string}[]>([]);
+
+  // Fetch registered character portraits from backend
+  useEffect(() => {
+    const fetchPortraits = async () => {
+      try {
+        const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+        const res = await fetch(`${API_BASE}/api/v1/ip-adapter/status`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.registered_characters) {
+            // Also fetch portrait files from disk
+            const pRes = await fetch(`${API_BASE}/api/v1/characters/portraits/_all`);
+            if (pRes.ok) {
+              const pData = await pRes.json();
+              setRegisteredPortraits(pData.portraits || []);
+            }
+          }
+        }
+      } catch { /* API offline */ }
+    };
+    fetchPortraits();
+    // Re-check every 10 seconds in case user generates portraits in Character Studio tab
+    const interval = setInterval(fetchPortraits, 10000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Characters
   const [characters, setCharacters] = useState<StoryCharacter[]>([]);
@@ -216,6 +243,62 @@ export default function StoryPanel() {
     setShowCharForm(false);
   };
 
+  // Import characters from Character Studio (backend portraits)
+  const [importingChars, setImportingChars] = useState(false);
+  const importFromCharacterStudio = async () => {
+    setImportingChars(true);
+    try {
+      const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const res = await fetch(`${API_BASE}/api/v1/characters/list`);
+      if (!res.ok) throw new Error("Failed to fetch characters");
+      const data = await res.json();
+      const studioChars = (data.characters || []) as {
+        name: string; appearance: string; front_url: string | null;
+        portraits: { url: string; view: string }[];
+      }[];
+      if (studioChars.length === 0) {
+        alert("No characters found. Go to Character Studio tab to generate character portraits first.");
+        return;
+      }
+      // Add characters that aren't already in the list
+      const existingNames = new Set(characters.map((c) => c.name.toLowerCase()));
+      const newChars: StoryCharacter[] = [];
+      for (const sc of studioChars) {
+        if (!existingNames.has(sc.name.toLowerCase())) {
+          // Clean appearance: strip image-gen boilerplate, keep the core description
+          let cleanAppearance = sc.appearance || "";
+          // Remove "Character portrait of Name:" prefix
+          cleanAppearance = cleanAppearance.replace(/^Character portrait of [^,]+,\s*/i, "");
+          // Remove image-gen suffixes
+          cleanAppearance = cleanAppearance.replace(/,\s*(highly detailed|sharp focus|clean neutral background|character reference sheet quality|photorealistic|8K|professional photography|detailed skin texture|professional studio lighting|consistent recognizable features|full body visible|cel shaded|clean lines|vibrant colors|3D rendered|Pixar style|subsurface scattering)[^,]*/gi, "");
+          cleanAppearance = cleanAppearance.replace(/,\s*,/g, ",").replace(/,\s*$/, "").trim();
+          if (!cleanAppearance) cleanAppearance = sc.name;
+
+          newChars.push({
+            id: crypto.randomUUID(),
+            name: sc.name,
+            role: "Lead",
+            appearance: cleanAppearance,
+            refImageUploaded: true,
+            refImageName: sc.front_url ? `Portrait (${sc.portraits.length} views)` : undefined,
+          });
+        }
+      }
+      if (newChars.length > 0) {
+        setCharacters((prev) => [...prev, ...newChars]);
+        // Auto-build visual anchor from imported characters
+        setTimeout(() => setVisualAnchor(buildCharacterAnchor()), 100);
+      } else {
+        alert(`All ${studioChars.length} character(s) already imported.`);
+      }
+    } catch (e) {
+      console.error("Import failed:", e);
+      alert("Import failed — check if API server is running.");
+    } finally {
+      setImportingChars(false);
+    }
+  };
+
   const removeCharacter = (id: string) => {
     setCharacters(characters.filter((c) => c.id !== id));
   };
@@ -329,6 +412,7 @@ export default function StoryPanel() {
             visual: (s.visual as string) || "",
             narration: (s.narration as string) || "",
             duration: (s.duration as number) || 5,
+            characters: (s.characters as string[]) || characters.map((c) => c.name),
           })));
           setExpandedScene(0);
 
@@ -354,6 +438,7 @@ export default function StoryPanel() {
         visual: `${concept}, scene ${i + 1} of ${numScenes}, ${genre.toLowerCase()}, ${mood.toLowerCase()}, cinematic`,
         narration: "",
         duration: 5,
+        characters: characters.map((c) => c.name),
       })));
       setExpandedScene(0);
     } finally {
@@ -373,12 +458,22 @@ export default function StoryPanel() {
     const selectedEngine = ENGINES.find((e) => e.id === engine) || ENGINES[0];
 
     try {
-      const scenesPayload = scenes.map((s) => ({
-        title: s.title,
-        visual: s.visual,
-        narration: s.narration,
-        duration: s.duration,
-      }));
+      const scenesPayload = scenes.map((s) => {
+        // Inject character appearance into visual prompt for strong consistency
+        let visual = s.visual;
+        const sceneChars = s.characters || [];
+        if (sceneChars.length > 0) {
+          const charDescs = sceneChars.map((name) => {
+            const char = characters.find((c) => c.name === name);
+            return char ? `${char.name} (${char.appearance})` : name;
+          }).join(", ");
+          // Prepend character descriptions if not already present
+          if (!visual.toLowerCase().includes(sceneChars[0].toLowerCase())) {
+            visual = `${charDescs} in scene: ${visual}`;
+          }
+        }
+        return { title: s.title, visual, narration: s.narration, duration: s.duration, characters: sceneChars };
+      });
 
       const job = await generateStory({
         concept,
@@ -430,10 +525,10 @@ export default function StoryPanel() {
   };
 
   const addScene = () => {
-    setScenes([...scenes, { id: crypto.randomUUID(), title: `Scene ${scenes.length + 1}`, visual: "", narration: "", duration: 5 }]);
+    setScenes([...scenes, { id: crypto.randomUUID(), title: `Scene ${scenes.length + 1}`, visual: "", narration: "", duration: 5, characters: characters.map((c) => c.name) }]);
   };
   const removeScene = (idx: number) => setScenes(scenes.filter((_, i) => i !== idx));
-  const updateScene = (idx: number, field: keyof Scene, value: string | number) => {
+  const updateScene = (idx: number, field: keyof Scene, value: string | number | string[]) => {
     const updated = [...scenes];
     updated[idx] = { ...updated[idx], [field]: value };
     setScenes(updated);
@@ -555,22 +650,32 @@ export default function StoryPanel() {
                     <button onClick={() => setActiveTab("characters")} className="text-[10px] text-purple-400 hover:text-purple-300">Edit Cast</button>
                   </div>
                   <div className="space-y-1.5">
-                    {characters.map((c) => (
-                      <div key={c.id} className="flex items-center gap-2 py-1">
-                        <div className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 ${
-                          c.refImageUploaded ? "bg-purple-600/30" : "bg-indigo-600/20"
-                        }`}>
-                          {c.refImageUploaded ? <Shield className="w-3 h-3 text-purple-400" /> : <UserCircle className="w-3 h-3 text-indigo-400" />}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-xs font-medium text-zinc-200 truncate">{c.name}</span>
-                            <Badge className="text-[8px] flex-shrink-0">{c.role}</Badge>
-                            {c.refImageUploaded && <Badge className="text-[8px] bg-purple-600/20 text-purple-300 border-purple-500/30 flex-shrink-0">Ref</Badge>}
+                    {characters.map((c) => {
+                      // Find portrait URL from registeredPortraits
+                      const charKey = c.name.toLowerCase().replace(/ /g, "_");
+                      const portrait = registeredPortraits.find((p) => p.filename.startsWith(charKey) && p.view === "front");
+                      return (
+                        <div key={c.id} className="flex items-center gap-2 py-1">
+                          {portrait ? (
+                            <img src={`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}${portrait.url}`}
+                              alt={c.name} className="w-8 h-8 rounded-full object-cover border border-purple-500/30 flex-shrink-0" />
+                          ) : (
+                            <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
+                              c.refImageUploaded ? "bg-purple-600/30" : "bg-indigo-600/20"
+                            }`}>
+                              {c.refImageUploaded ? <Shield className="w-3.5 h-3.5 text-purple-400" /> : <UserCircle className="w-3.5 h-3.5 text-indigo-400" />}
+                            </div>
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-medium text-zinc-200 truncate">{c.name}</span>
+                              <Badge className="text-[8px] flex-shrink-0">{c.role}</Badge>
+                              {(c.refImageUploaded || portrait) && <Badge className="text-[8px] bg-purple-600/20 text-purple-300 border-purple-500/30 flex-shrink-0">Portrait</Badge>}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </Card>
               )}
@@ -584,9 +689,13 @@ export default function StoryPanel() {
                 <CardTitle className="text-sm mb-3 flex items-center gap-2">
                   <Users className="w-3.5 h-3.5 text-purple-400" /> 2. Cast Your Characters
                 </CardTitle>
-                <p className="text-xs text-zinc-500 mb-3">
+                <p className="text-xs text-zinc-500 mb-2">
                   Define characters here. Their appearance will be injected into every scene for visual consistency.
                 </p>
+                <Button variant="secondary" className="w-full mb-3" onClick={importFromCharacterStudio} disabled={importingChars}>
+                  {importingChars ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <ImageIcon className="w-3.5 h-3.5 mr-1.5" />}
+                  Import from Character Studio
+                </Button>
 
                 {/* Template characters */}
                 <div className="mb-3">
@@ -744,13 +853,48 @@ export default function StoryPanel() {
                           <span>More Creative</span><span>Strict Match</span>
                         </div>
                       </div>
-                      <div className="bg-zinc-800/50 rounded-lg p-2.5">
-                        <p className="text-[10px] text-zinc-400 leading-relaxed">
-                          <strong className="text-purple-300">How it works:</strong> Upload reference images for each character above.
-                          IP-Adapter will extract visual features and inject them into every scene, ensuring the same face,
-                          clothing, and features appear consistently. Without reference images, the system auto-captures from Scene 1.
-                        </p>
-                      </div>
+                      {/* Show portraits only for characters in the cast */}
+                      {(() => {
+                        // Filter portraits to only show cast members
+                        const castKeys = characters.map((c) => c.name.toLowerCase().replace(/ /g, "_"));
+                        const castPortraits = registeredPortraits.filter((p) =>
+                          castKeys.some((key) => p.filename.startsWith(key))
+                        );
+                        if (castPortraits.length > 0) {
+                          return (
+                            <div className="bg-purple-900/10 rounded-lg p-2.5 border border-purple-500/10">
+                              <p className="text-[10px] text-purple-300 font-medium mb-2">
+                                {castPortraits.length} portrait(s) for {characters.length} cast member(s) will be used:
+                              </p>
+                              <div className="flex gap-2 overflow-x-auto pb-1">
+                                {castPortraits.filter((p) => p.view === "front").slice(0, 8).map((p, i) => (
+                                  <img key={i} src={getPortraitUrl(p.url)} alt={p.view}
+                                    className="w-12 h-12 rounded-md border border-purple-500/20 object-cover flex-shrink-0" />
+                                ))}
+                              </div>
+                              <p className="text-[9px] text-zinc-500 mt-1.5">
+                                Front portraits shown. All views (front, side, 3/4) are used during generation.
+                              </p>
+                            </div>
+                          );
+                        }
+                        if (characters.length > 0) {
+                          return (
+                            <div className="bg-zinc-800/50 rounded-lg p-2.5">
+                              <p className="text-[10px] text-zinc-400 leading-relaxed">
+                                <strong className="text-amber-300">No portraits found for cast.</strong> Go to Character Studio to generate portraits for your characters.
+                              </p>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className="bg-zinc-800/50 rounded-lg p-2.5">
+                            <p className="text-[10px] text-zinc-400 leading-relaxed">
+                              <strong className="text-purple-300">No characters in cast.</strong> Import from Character Studio or add manually above.
+                            </p>
+                          </div>
+                        );
+                      })()}
                     </>
                   )}
                 </div>
@@ -769,9 +913,9 @@ export default function StoryPanel() {
                 <CardTitle className="text-sm mb-3 flex items-center gap-2"><Sparkles className="w-3.5 h-3.5 text-amber-400" /> Quality Preset</CardTitle>
                 <div className="space-y-2">
                   {([
-                    { id: "draft", name: "Draft", desc: "20 steps, fast preview", time: "~3 min/scene", color: "border-zinc-600" },
-                    { id: "standard", name: "Standard", desc: "35 steps, good balance", time: "~5 min/scene", color: "border-indigo-500" },
-                    { id: "high", name: "High Quality", desc: "50 steps, best detail", time: "~8 min/scene", color: "border-amber-500" },
+                    { id: "draft", name: "Draft", desc: "25 steps, fast preview", time: "~3 min/scene", color: "border-zinc-600" },
+                    { id: "standard", name: "Standard", desc: "40 steps, good quality", time: "~6 min/scene", color: "border-indigo-500" },
+                    { id: "high", name: "High Quality", desc: "50 steps, best detail", time: "~9 min/scene", color: "border-amber-500" },
                   ]).map((q) => (
                     <button key={q.id} onClick={() => setQualityPreset(q.id)}
                       className={`w-full text-left px-3 py-2 rounded-lg border transition-all ${
@@ -964,6 +1108,23 @@ export default function StoryPanel() {
             </Card>
           )}
 
+          {/* Bulk character assignment */}
+          {characters.length > 0 && scenes.length > 0 && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <Button size="sm" variant="secondary" onClick={() => {
+                const allNames = characters.map((c) => c.name);
+                setScenes((prev) => prev.map((s) => ({ ...s, characters: allNames })));
+              }}>
+                <Users className="w-3 h-3 mr-1" /> Assign All Characters to Every Scene
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => {
+                setScenes((prev) => prev.map((s) => ({ ...s, characters: [] })));
+              }}>
+                <X className="w-3 h-3 mr-1" /> Clear All Assignments
+              </Button>
+            </div>
+          )}
+
           {/* Scene cards */}
           <div className="space-y-3">
             {scenes.map((scene, i) => {
@@ -1020,6 +1181,46 @@ export default function StoryPanel() {
                         <input type="range" min={2} max={12} value={scene.duration}
                           onChange={(e) => updateScene(i, "duration", Number(e.target.value))} className="w-full accent-indigo-500 mt-1" />
                       </div>
+                      {/* Per-scene character assignment */}
+                      {characters.length > 0 && (
+                        <div>
+                          <div className="flex items-center justify-between">
+                            <label className="text-xs text-zinc-400 font-medium flex items-center gap-1">
+                              <Users className="w-3 h-3" /> Characters in this scene
+                            </label>
+                            <div className="flex gap-2">
+                              <button onClick={() => updateScene(i, "characters", characters.map((c) => c.name))}
+                                className="text-[9px] text-indigo-400 hover:text-indigo-300">All</button>
+                              <button onClick={() => updateScene(i, "characters", [])}
+                                className="text-[9px] text-zinc-500 hover:text-zinc-400">None</button>
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5 mt-1">
+                            {characters.map((char) => {
+                              const isIn = (scene.characters || []).includes(char.name);
+                              return (
+                                <button key={char.id} onClick={() => {
+                                  const current = scene.characters || [];
+                                  const updated = isIn
+                                    ? current.filter((n) => n !== char.name)
+                                    : [...current, char.name];
+                                  updateScene(i, "characters", updated);
+                                }}
+                                  className={`px-2 py-1 rounded text-[10px] border transition-colors ${
+                                    isIn
+                                      ? "bg-purple-600/20 border-purple-500/40 text-purple-300"
+                                      : "bg-zinc-800/50 border-zinc-700 text-zinc-500 hover:border-zinc-600"
+                                  }`}>
+                                  {char.name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <p className="text-[9px] text-zinc-600 mt-0.5">
+                            Only selected characters&apos; portraits are used as IP-Adapter reference for this scene
+                          </p>
+                        </div>
+                      )}
                     </div>
                   )}
                   {i < scenes.length - 1 && transition !== "cut" && (

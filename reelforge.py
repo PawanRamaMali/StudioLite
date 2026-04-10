@@ -497,8 +497,8 @@ def rf_generate_image_nanobanana2(prompt):
     raise RuntimeError("No image in API response")
 
 
-def rf_generate_image_sdxl(prompt, model_name=None, style="photorealistic", steps=None, guidance=None, aspect_ratio="9:16"):
-    """Generate image using local SDXL with configurable aspect ratio."""
+def rf_generate_image_sdxl(prompt, model_name=None, style="photorealistic", steps=None, guidance=None, aspect_ratio="9:16", seed=None, ip_adapter_image=None):
+    """Generate image using local SDXL with configurable aspect ratio and optional seed/IP-Adapter."""
     rf_load_sdxl_pipeline(model_name)
 
     models_dir = os.path.join(ROOT_DIR, "models")
@@ -513,24 +513,31 @@ def rf_generate_image_sdxl(prompt, model_name=None, style="photorealistic", step
     enhanced_prompt = f"{prompt}, {style_preset['positive']}"
     negative = style_preset['negative']
 
-    if has_local:
-        result = _sdxl_pipe(
-            prompt=enhanced_prompt,
-            negative_prompt=negative,
-            num_inference_steps=steps or 30,
-            guidance_scale=guidance or 7.5,
-            width=img_width,
-            height=img_height,
-        )
-    else:
-        result = _sdxl_pipe(
-            prompt=enhanced_prompt,
-            negative_prompt=negative,
-            num_inference_steps=steps or 8,
-            guidance_scale=guidance or 2.0,
-            width=img_width,
-            height=img_height,
-        )
+    # Create generator with seed for reproducibility across views
+    import torch as _torch
+    generator = None
+    if seed is not None:
+        generator = _torch.Generator(device="cpu").manual_seed(seed)
+
+    kwargs = dict(
+        prompt=enhanced_prompt,
+        negative_prompt=negative,
+        num_inference_steps=steps or (30 if has_local else 8),
+        guidance_scale=guidance or (7.5 if has_local else 2.0),
+        width=img_width,
+        height=img_height,
+    )
+    if generator is not None:
+        kwargs["generator"] = generator
+
+    # IP-Adapter image for multi-view consistency
+    if ip_adapter_image is not None:
+        try:
+            kwargs["ip_adapter_image"] = ip_adapter_image
+        except Exception:
+            pass  # Pipeline may not have IP-Adapter loaded
+
+    result = _sdxl_pipe(**kwargs)
 
     img = result.images[0]
     path = os.path.join(ROOT_DIR, ".mp", f"{uuid4()}.png")
@@ -538,11 +545,11 @@ def rf_generate_image_sdxl(prompt, model_name=None, style="photorealistic", step
     return path
 
 
-def rf_generate_image(prompt, provider="sdxl_turbo", model_name=None, style="photorealistic", steps=None, guidance=None, aspect_ratio="9:16"):
+def rf_generate_image(prompt, provider="sdxl_turbo", model_name=None, style="photorealistic", steps=None, guidance=None, aspect_ratio="9:16", seed=None, ip_adapter_image=None):
     """Generate an image for the given prompt with configurable aspect ratio."""
     if provider == "nanobanana2":
         return rf_generate_image_nanobanana2(prompt)
-    return rf_generate_image_sdxl(prompt, model_name, style, steps, guidance, aspect_ratio)
+    return rf_generate_image_sdxl(prompt, model_name, style, steps, guidance, aspect_ratio, seed=seed, ip_adapter_image=ip_adapter_image)
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +588,7 @@ def rf_clean_text_for_tts(text):
     """
     Clean text for TTS with smart symbol replacement.
     Preserves meaning by converting symbols to spoken equivalents.
+    Adds natural pauses at sentence boundaries for better prosody.
     """
     if not text:
         return "Content generated."
@@ -601,7 +609,7 @@ def rf_clean_text_for_tts(text):
         '~': ' approximately ',
         '>': ' greater than ',
         '<': ' less than ',
-        '...': '. ',
+        '...': '... ',
         '--': ', ',
         '—': ', ',
         '–': ', ',
@@ -614,8 +622,15 @@ def rf_clean_text_for_tts(text):
     # Remove remaining problematic characters but keep essential punctuation
     result = re.sub(r'[^\w\s.,!?;:\'\"-]', ' ', result)
 
-    # Normalize whitespace
-    result = re.sub(r'\s+', ' ', result).strip()
+    # Add natural breathing pauses: insert a brief pause after sentence-ending punctuation
+    # Piper TTS respects periods/commas for pacing, so ensure spacing is clean
+    result = re.sub(r'([.!?])\s*', r'\1  ', result)  # Double space after sentences
+    result = re.sub(r'([,;:])\s*', r'\1 ', result)   # Single space after clauses
+
+    # Normalize excessive whitespace but keep double-space sentence gaps
+    result = re.sub(r'  +', '  ', result)
+    result = re.sub(r' +([.,!?;:])', r'\1', result)  # No space before punctuation
+    result = result.strip()
 
     # Ensure text isn't empty
     if not result or len(result) < 3:

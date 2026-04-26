@@ -93,6 +93,24 @@ export default function StoryPanel() {
   const [ipAdapterStrength, setIpAdapterStrength] = useState(0.6);
   const [registeredPortraits, setRegisteredPortraits] = useState<{filename: string; url: string; view: string}[]>([]);
 
+  // Fetch available video engines + lip-sync status from backend
+  useEffect(() => {
+    const fetchEngines = async () => {
+      try {
+        const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+        const res = await fetch(`${API_BASE}/api/v1/system/engines`);
+        if (res.ok) {
+          const data = await res.json();
+          setAvailableEngines(data.video_engines || []);
+          setLipSyncAvailable(!!data.lip_sync?.available);
+        }
+      } catch {
+        // leave defaults — selector will show "auto" only
+      }
+    };
+    fetchEngines();
+  }, []);
+
   // Fetch registered character portraits from backend
   useEffect(() => {
     const fetchPortraits = async () => {
@@ -131,6 +149,12 @@ export default function StoryPanel() {
   const [qualityPreset, setQualityPreset] = useState("standard");
   const [enableUpscale, setEnableUpscale] = useState(false);
   const [enableInterpolation, setEnableInterpolation] = useState(false);
+
+  // Video engine selector (auto / wan22 / hunyuan15 / ltx23)
+  const [videoEngine, setVideoEngine] = useState<string>("auto");
+  const [enableLipSync, setEnableLipSync] = useState(false);
+  const [availableEngines, setAvailableEngines] = useState<Array<{ id: string; name: string; available: boolean; tier?: string; description?: string }>>([]);
+  const [lipSyncAvailable, setLipSyncAvailable] = useState<boolean>(false);
 
   // Loading states
   const [scriptLoading, setScriptLoading] = useState(false);
@@ -495,6 +519,8 @@ export default function StoryPanel() {
         quality_preset: qualityPreset,
         enable_upscale: enableUpscale,
         enable_interpolation: enableInterpolation,
+        video_engine: videoEngine,
+        enable_lip_sync: enableLipSync,
       });
 
       setGenStatus(`Job ${job.job_id.slice(0, 8)}... started`);
@@ -959,6 +985,56 @@ export default function StoryPanel() {
                       <span className="w-3 h-3 rounded-full bg-white mx-0.5 block" />
                     </button>
                   </label>
+                  <label className={`flex items-center justify-between py-1 ${lipSyncAvailable ? "cursor-pointer" : "opacity-50 cursor-not-allowed"}`}>
+                    <div>
+                      <span className="text-xs text-zinc-300">Lip Sync (LatentSync 1.6)</span>
+                      <span className="text-[10px] text-zinc-600 block">
+                        {lipSyncAvailable ? "Sync mouth movement to narration, +1–2 min/scene" : "Install: pip install git+https://github.com/bytedance/LatentSync.git"}
+                      </span>
+                    </div>
+                    <button onClick={() => lipSyncAvailable && setEnableLipSync(!enableLipSync)}
+                      disabled={!lipSyncAvailable}
+                      className={`w-8 h-4 rounded-full transition-colors flex items-center ${
+                        enableLipSync ? "bg-amber-600 justify-end" : "bg-zinc-700 justify-start"
+                      }`}>
+                      <span className="w-3 h-3 rounded-full bg-white mx-0.5 block" />
+                    </button>
+                  </label>
+                </div>
+              </Card>
+
+              {/* Video Engine selector */}
+              <Card>
+                <CardTitle className="text-sm mb-3 flex items-center gap-2"><Sparkles className="w-3.5 h-3.5 text-indigo-400" /> Video Engine</CardTitle>
+                <div className="space-y-1.5">
+                  {(() => {
+                    const autoOpt = { id: "auto", name: "Auto", available: true, description: "Use best available (Wan 2.2 → Hunyuan 1.5 → LTX-2.3)" };
+                    const opts = [autoOpt, ...availableEngines];
+                    return opts.map((e) => {
+                      const disabled = !e.available;
+                      const selected = videoEngine === e.id;
+                      return (
+                        <button key={e.id} onClick={() => !disabled && setVideoEngine(e.id)}
+                          disabled={disabled}
+                          className={`w-full text-left px-3 py-2 rounded-lg border transition-all ${
+                            selected ? "border-indigo-500 bg-zinc-800/80" : disabled ? "border-zinc-800 opacity-40 cursor-not-allowed" : "border-zinc-700/50 hover:border-zinc-600"
+                          }`}>
+                          <div className="flex items-center justify-between">
+                            <span className={`text-xs font-medium ${selected ? "text-zinc-100" : "text-zinc-400"}`}>{e.name}</span>
+                            {"tier" in e && e.tier ? (
+                              <span className="text-[9px] text-zinc-600 font-mono uppercase">{e.tier}</span>
+                            ) : null}
+                          </div>
+                          {e.description ? (
+                            <span className="text-[10px] text-zinc-600 block mt-0.5">{e.description}</span>
+                          ) : null}
+                          {disabled ? (
+                            <span className="text-[10px] text-amber-600/70 block mt-0.5">Weights not downloaded</span>
+                          ) : null}
+                        </button>
+                      );
+                    });
+                  })()}
                 </div>
               </Card>
 

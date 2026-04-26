@@ -150,6 +150,11 @@ class StoryRequest(BaseModel):
     quality_preset: str = "standard"  # draft, standard, high
     enable_upscale: bool = False  # Post-process upscale with Real-ESRGAN
     enable_interpolation: bool = False  # RIFE frame interpolation for smoother motion
+    # Engine override — "auto" picks best available (Wan 2.2 > Hunyuan 1.5 > LTX-2.3 > VACE > T2V).
+    # Map quality tiers: "draft" -> LTX-2.3, "balanced" -> Hunyuan 1.5, "quality" -> Wan 2.2.
+    video_engine: str = "auto"
+    # LatentSync 1.6 post-processing for talking-head scenes.
+    enable_lip_sync: bool = False
 
 
 class TTSRequest(BaseModel):
@@ -459,6 +464,7 @@ Return ONLY valid JSON (close all brackets):
 
         # Step 2 -- Generate narration audio per scene (if enabled)
         narration_paths = []
+        narration_durations = []  # actual duration of each narration in seconds
         if req.enable_narration:
             _update_job(job_id, progress=18, message="Generating narration audio...")
             tts = get_tts_instance(req.engine if req.engine in ("piper", "kitten") else "piper")
@@ -467,8 +473,16 @@ Return ONLY valid JSON (close all brackets):
                 audio_path = os.path.join(OUTPUT_DIR, f"story_narration_{job_id}_{idx}.wav")
                 tts.synthesize(narration_text, audio_path)
                 narration_paths.append(audio_path)
+                # Measure actual narration duration so video generation can
+                # produce a clip long enough to cover the audio (no abrupt cutoff).
+                try:
+                    import soundfile as _sf
+                    info = _sf.info(audio_path)
+                    narration_durations.append(float(info.duration))
+                except Exception:
+                    narration_durations.append(0.0)
                 pct = 18 + int((idx + 1) / len(scene_list) * 12)
-                _update_job(job_id, progress=pct, message=f"Narration {idx + 1}/{len(scene_list)} done")
+                _update_job(job_id, progress=pct, message=f"Narration {idx + 1}/{len(scene_list)} done ({narration_durations[-1]:.1f}s)")
 
         # Step 3 -- Generate video for each scene
         # Free any SDXL/other pipelines from portrait generation to reclaim VRAM
@@ -507,17 +521,6 @@ Return ONLY valid JSON (close all brackets):
         qp = QUALITY_PRESETS.get(quality, QUALITY_PRESETS["standard"])
         _update_job(job_id, progress=29, message=f"Quality: {quality} ({qp['steps']} steps, guidance {qp['guidance']})")
 
-        config = _build_config(
-            engine=req.engine,
-            model=req.model,
-            resolution=req_resolution,
-            num_frames=req_frames,
-            num_inference_steps=qp["steps"],
-            guidance_scale=qp["guidance"],
-            fps=req_fps,
-            seed=shared_seed if req.continuity_mode in ("Prompt Anchoring", "Both") else None,
-        )
-        gen = VideoGenerator(config)
         video_paths = []
 
         # Strong negative prompt to reduce AI artifacts
@@ -604,34 +607,40 @@ Return ONLY valid JSON (close all brackets):
             if not isinstance(scene_dur, (int, float)):
                 scene_dur = 5
             scene_dur = max(3, min(30, float(scene_dur)))
+            # Stretch to cover the actual narration so audio isn't truncated.
+            # +0.4s for inter-scene silence padding the assembler adds later.
+            if idx < len(narration_durations) and narration_durations[idx] > 0:
+                scene_dur = max(scene_dur, narration_durations[idx] + 0.4)
 
             scene_clips = []
 
-            # --- T2V pipeline with strong character prompts ---
-            # Character appearances are baked into the prompt text for Wan T2V.
-            # Shared seed ensures consistent character interpretation across scenes.
-            clip_duration = req_frames / max(req_fps, 1)
-            clips_needed = min(2, max(1, int(scene_dur / clip_duration) + 1))
+            # --- SDXL → Wan VACE pipeline ---
+            # Step 1: SDXL generates scene IMAGE with characters baked in
+            # Step 2: VACE animates it (first frame preserved, rest generated)
+            # Characters WILL appear because they're in the source image.
+            from scene_generator import generate_scene_video as _gen_scene
 
-            continuations = [
-                "continuing the motion smoothly",
-                "the action progresses further",
-                "moments later in the same scene",
-            ]
+            _update_job(
+                job_id, progress=pct_base + 1,
+                message=f"Scene {idx+1}: SDXL image → VACE animation ({scene_dur:.0f}s)...",
+            )
 
-            for ci in range(clips_needed):
-                _update_job(
+            vp = _gen_scene(
+                prompt=scene_prompt,
+                negative_prompt=neg_prompt,
+                target_duration=scene_dur,
+                fps=req_fps,
+                num_inference_steps=qp["steps"],
+                guidance_scale=qp["guidance"],
+                seed=shared_seed + idx,
+                preferred_engine=getattr(req, "video_engine", "auto") or "auto",
+                progress_callback=lambda s, t, m: _update_job(
                     job_id,
-                    progress=pct_base + int((ci / clips_needed) * (55 / len(scene_list))),
-                    message=f"Scene {idx+1}/{len(scene_list)}: clip {ci+1}/{clips_needed} ({scene.get('title', '')})",
-                )
-                clip_prompt = scene_prompt if ci == 0 else f"{scene_prompt}, {continuations[ci % len(continuations)]}"
-                vp = gen.generate_text2video(
-                    prompt=clip_prompt,
-                    negative_prompt=neg_prompt,
-                    progress_callback=None,
-                )
-                scene_clips.append(vp)
+                    progress=pct_base + int((s / t) * (55 / len(scene_list))),
+                    message=f"Scene {idx+1}/{len(scene_list)}: {m}",
+                ),
+            )
+            scene_clips.append(vp)
 
             video_paths.append(scene_clips)
 
@@ -688,6 +697,38 @@ Return ONLY valid JSON (close all brackets):
 
             pct = 86 + int((idx + 1) / len(video_paths) * 4)
             _update_job(job_id, progress=pct, message=f"Scene {idx+1} video assembled ({target_dur:.0f}s)")
+
+        # 4a2: Optional lip sync (LatentSync 1.6) — apply per scene using its narration audio
+        if getattr(req, "enable_lip_sync", False) and narration_paths:
+            try:
+                import lipsync as _lipsync
+                if not _lipsync.available():
+                    _update_job(
+                        job_id, progress=89,
+                        message=f"WARNING: Lip sync requested but not available. {_lipsync.install_hint()}",
+                    )
+                else:
+                    _update_job(job_id, progress=89, message="Applying LatentSync 1.6 lip sync...")
+                    # Free VRAM before loading LatentSync UNet
+                    try:
+                        import scene_generator as _sg
+                        _sg._unload_i2v()
+                    except Exception:
+                        pass
+                    synced_paths = _lipsync.lip_sync_scene_clips(
+                        final_scene_paths,
+                        narration_paths,
+                        progress_callback=lambda i, n, m: _update_job(
+                            job_id, progress=89 + int((i / max(n, 1)) * 1),
+                            message=f"Lip sync {i+1}/{n}: {m}",
+                        ),
+                    )
+                    final_scene_paths = synced_paths
+            except Exception as lipsync_err:
+                _update_job(
+                    job_id, progress=89,
+                    message=f"WARNING: Lip sync failed — {lipsync_err}. Continuing with original video.",
+                )
 
         # 4b: Concatenate all scene videos into one silent video
         _update_job(job_id, progress=90, message="Merging scenes into final video...")
@@ -1142,37 +1183,58 @@ async def system_status():
 
 @app.get("/api/v1/system/engines")
 async def list_engines():
-    """List available video generation engines and TTS engines."""
-    video_engines = [
-        {
-            "id": "wan",
-            "name": "Wan 2.1/2.2",
-            "models": ["1.3b", "14b", "2.2-14b", "2.2-1.3b"],
-            "resolutions": ["480p", "720p"],
-            "description": "Best quality, MoE architecture. Recommended.",
+    """List available video generation engines (live availability) and TTS engines."""
+    # Live availability from scene_generator (checks disk for weights)
+    try:
+        import scene_generator as _sg
+        engine_list = _sg.list_available_engines()
+    except Exception as e:
+        logger.error("scene_generator import failed: %s", e)
+        engine_list = []
+
+    # Add rich metadata
+    ENGINE_META = {
+        "wan22_14b_gguf": {
+            "tier": "quality",
+            "description": "Wan 2.2 14B I2V (GGUF Q3) — highest quality, ~3-5 min/clip.",
+            "resolution": "480p",
         },
-        {
-            "id": "ltx",
-            "name": "LTX-Video",
-            "models": ["base", "distilled", "0.9.7", "0.9.8"],
-            "resolutions": ["480p"],
-            "description": "Fast generation, real-time 30 FPS.",
+        "hunyuan15_i2v_gguf": {
+            "tier": "balanced",
+            "description": "HunyuanVideo 1.5 I2V 480p (GGUF Q4) — cinematic motion, ~1-2 min/clip.",
+            "resolution": "480p",
         },
-        {
-            "id": "cogvideox",
-            "name": "CogVideoX",
-            "models": ["2b", "5b"],
-            "resolutions": ["480p"],
-            "description": "Good quality, 6-10s clips.",
+        "ltx23_distilled_gguf": {
+            "tier": "draft",
+            "description": "LTX-2.3 distilled (GGUF Q3) — fastest, ~45s/clip, 24fps native.",
+            "resolution": "480p",
         },
-        {
-            "id": "hunyuan",
-            "name": "HunyuanVideo",
-            "models": ["1.0", "1.5"],
-            "resolutions": ["540p", "720p", "1080p"],
-            "description": "High resolution video generation.",
+        "vace_1.3b": {
+            "tier": "fallback",
+            "description": "Wan VACE 1.3B — local fallback, lower quality.",
+            "resolution": "480p",
         },
-    ]
+        "t2v_1.3b": {
+            "tier": "last_resort",
+            "description": "Wan T2V 1.3B — text-only, no image conditioning.",
+            "resolution": "480p",
+        },
+    }
+    video_engines = []
+    for e in engine_list:
+        meta = ENGINE_META.get(e["id"], {})
+        video_engines.append({**e, **meta})
+
+    # LatentSync lip-sync availability
+    lip_sync = {"available": False, "install_hint": None}
+    try:
+        import lipsync as _ls
+        lip_sync = {
+            "available": _ls.available(),
+            "install_hint": _ls.install_hint() if not _ls.available() else None,
+        }
+    except Exception:
+        pass
 
     tts_engines = []
     try:
@@ -1182,7 +1244,11 @@ async def list_engines():
     except ImportError:
         pass
 
-    return {"video_engines": video_engines, "tts_engines": tts_engines}
+    return {
+        "video_engines": video_engines,
+        "tts_engines": tts_engines,
+        "lip_sync": lip_sync,
+    }
 
 
 @app.post("/api/v1/generate/text2video", response_model=JobResponse)
@@ -1836,8 +1902,153 @@ async def list_characters():
 
 
 # ---------------------------------------------------------------------------
+# Environment Variables & Logs
+# ---------------------------------------------------------------------------
+
+# Env vars that are safe to expose/edit via the UI
+MANAGED_ENV_VARS = [
+    "HF_TOKEN", "HF_HOME", "NEXT_PUBLIC_API_URL",
+    "CUDA_VISIBLE_DEVICES", "PYTORCH_CUDA_ALLOC_CONF",
+]
+
+
+@app.get("/api/v1/system/env")
+async def get_env_vars():
+    """Get current environment variables relevant to StudioLite."""
+    env = {}
+    for key in MANAGED_ENV_VARS:
+        val = os.environ.get(key, "")
+        # Mask tokens (show first 8 chars only)
+        if "TOKEN" in key and val and len(val) > 8:
+            env[key] = val[:8] + "..." + val[-4:]
+        else:
+            env[key] = val
+    # Also include all HF_ and CUDA_ vars
+    for key, val in os.environ.items():
+        if key.startswith(("HF_", "CUDA_", "TORCH_", "PYTORCH_")) and key not in env:
+            if "TOKEN" in key and val and len(val) > 8:
+                env[key] = val[:8] + "..." + val[-4:]
+            else:
+                env[key] = val
+    return {"env": env, "managed_keys": MANAGED_ENV_VARS}
+
+
+@app.post("/api/v1/system/env")
+async def set_env_var(key: str, value: str):
+    """Set an environment variable. Takes effect immediately for this process."""
+    if not key.strip():
+        raise HTTPException(status_code=422, detail="Key cannot be empty")
+    os.environ[key.strip()] = value
+    # Persist to .env file for next startup
+    env_file = os.path.join(ROOT_DIR, ".env")
+    env_lines = []
+    if os.path.exists(env_file):
+        with open(env_file, "r") as f:
+            env_lines = f.readlines()
+    # Update or add the key
+    found = False
+    for i, line in enumerate(env_lines):
+        if line.strip().startswith(f"{key.strip()}="):
+            env_lines[i] = f"{key.strip()}={value}\n"
+            found = True
+            break
+    if not found:
+        env_lines.append(f"{key.strip()}={value}\n")
+    with open(env_file, "w") as f:
+        f.writelines(env_lines)
+    return {"status": "ok", "key": key.strip(), "persisted": True}
+
+
+@app.delete("/api/v1/system/env")
+async def delete_env_var(key: str):
+    """Remove an environment variable."""
+    if key in os.environ:
+        del os.environ[key]
+    # Remove from .env file
+    env_file = os.path.join(ROOT_DIR, ".env")
+    if os.path.exists(env_file):
+        with open(env_file, "r") as f:
+            lines = f.readlines()
+        lines = [l for l in lines if not l.strip().startswith(f"{key}=")]
+        with open(env_file, "w") as f:
+            f.writelines(lines)
+    return {"status": "ok", "key": key, "deleted": True}
+
+
+@app.get("/api/v1/system/logs")
+async def get_logs(lines: int = 100):
+    """Get recent application logs."""
+    log_file = os.path.join(OUTPUT_DIR, "videogen.log")
+    log_lines = []
+    if os.path.exists(log_file):
+        try:
+            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                all_lines = f.readlines()
+                log_lines = all_lines[-lines:]
+        except Exception:
+            pass
+    # Also get recent job status as pseudo-logs
+    job_logs = []
+    for jid, j in sorted(jobs.items(), key=lambda x: x[1].get("created_at", 0), reverse=True)[:20]:
+        job_logs.append({
+            "job_id": jid[:8],
+            "kind": j.get("kind", ""),
+            "status": j["status"],
+            "progress": j["progress"],
+            "message": j.get("message", ""),
+            "error": j.get("error"),
+            "elapsed": round(time.time() - j["created_at"], 1),
+        })
+    return {
+        "log_lines": [l.rstrip() for l in log_lines],
+        "log_file": log_file,
+        "recent_jobs": job_logs,
+    }
+
+
+@app.post("/api/v1/system/hf-token-test")
+async def test_hf_token(token: str):
+    """Test a HuggingFace token and save it if valid."""
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=token)
+        info = api.whoami()
+        # Token works — save it
+        os.environ["HF_TOKEN"] = token
+        # Persist to .env
+        env_file = os.path.join(ROOT_DIR, ".env")
+        env_lines = []
+        if os.path.exists(env_file):
+            with open(env_file, "r") as f:
+                env_lines = f.readlines()
+        found = False
+        for i, line in enumerate(env_lines):
+            if line.strip().startswith("HF_TOKEN="):
+                env_lines[i] = f"HF_TOKEN={token}\n"
+                found = True
+                break
+        if not found:
+            env_lines.append(f"HF_TOKEN={token}\n")
+        with open(env_file, "w") as f:
+            f.writelines(env_lines)
+        return {"status": "ok", "user": info.get("name", "unknown"), "message": f"Token valid. Authenticated as {info.get('name', 'unknown')}."}
+    except Exception as e:
+        return {"status": "error", "message": f"Token invalid: {e}"}
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+# Load .env file on startup
+_env_file = os.path.join(ROOT_DIR, ".env")
+if os.path.exists(_env_file):
+    with open(_env_file, "r") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _key, _val = _line.split("=", 1)
+                os.environ.setdefault(_key.strip(), _val.strip())
 
 if __name__ == "__main__":
     import uvicorn

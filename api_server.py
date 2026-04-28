@@ -11,11 +11,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional
+import logging
 import threading
 import uuid
 import time
 import os
 import traceback
+
+logger = logging.getLogger("studiolite.api")
 
 app = FastAPI(
     title="StudioLite API",
@@ -43,6 +46,11 @@ os.makedirs(CHAR_PORTRAITS_DIR, exist_ok=True)
 
 # Serve character portraits as static files
 app.mount("/static/portraits", StaticFiles(directory=CHAR_PORTRAITS_DIR), name="portraits")
+
+# Image studio output (text-to-image, edits, upscales, etc.)
+IMAGES_DIR = os.path.join(OUTPUT_DIR, "images")
+os.makedirs(IMAGES_DIR, exist_ok=True)
+app.mount("/static/images", StaticFiles(directory=IMAGES_DIR), name="images")
 
 # ---------------------------------------------------------------------------
 # Job tracking
@@ -179,6 +187,78 @@ class UpscaleRequest(BaseModel):
     video_path: str
     scale: int = Field(default=2, ge=1, le=4)
     preset: str = "quality_2x"
+
+
+# --- Image Studio request models ---
+
+class ImageGenerateRequest(BaseModel):
+    prompt: str
+    negative_prompt: str = ""
+    size: str = "portrait_9x16"
+    width: Optional[int] = None
+    height: Optional[int] = None
+    style: Optional[str] = "photorealistic"
+    seed: Optional[int] = None
+    steps: int = Field(default=30, ge=1, le=80)
+    guidance: float = Field(default=7.5, ge=0.0, le=20.0)
+    provider: str = "sdxl"   # sdxl | fooocus | nanobanana2
+    model: Optional[str] = None
+    enhance_prompt: bool = False  # If true, run prompt through LLM first
+
+
+class ImageEditRequest(BaseModel):
+    image_path: str
+    prompt: str
+    negative_prompt: str = ""
+    strength: float = Field(default=0.75, ge=0.0, le=1.0)
+    style: Optional[str] = None
+    seed: Optional[int] = None
+    steps: int = Field(default=30, ge=1, le=80)
+    guidance: float = Field(default=7.5, ge=0.0, le=20.0)
+    provider: str = "sdxl"
+    # Edit dispatch: "auto" (heuristic), "instruct" (InstructPix2Pix — best for
+    # 'raise her hand' / 'make it night'), or "redraw" (SDXL Img2Img).
+    technique: str = "auto"
+    # InstructPix2Pix only — text vs image preservation balance (1.0-2.0).
+    image_guidance: float = Field(default=1.5, ge=1.0, le=3.0)
+
+
+class ImageInpaintRequest(BaseModel):
+    image_path: str
+    mask_path: str
+    prompt: str
+    negative_prompt: str = ""
+    style: Optional[str] = None
+    seed: Optional[int] = None
+    steps: int = Field(default=30, ge=1, le=80)
+    guidance: float = Field(default=7.5, ge=0.0, le=20.0)
+    invert_mask: bool = False
+
+
+class ImageVariationRequest(BaseModel):
+    image_path: str
+    prompt: Optional[str] = None
+    strength: float = Field(default=0.45, ge=0.05, le=0.95)
+    style: Optional[str] = None
+    seed: Optional[int] = None
+
+
+class ImageUpscaleRequest(BaseModel):
+    image_path: str
+    scale: int = Field(default=2, ge=2, le=4)
+    method: str = "lanczos"  # lanczos | realesrgan
+
+
+class ImageBgRemoveRequest(BaseModel):
+    image_path: str
+
+
+class PromptEnhanceRequest(BaseModel):
+    prompt: str
+    style: Optional[str] = None
+    mode: str = "expand"  # expand | shorten
+    image_path: Optional[str] = None  # When set, BLIP captions it for context
+    negative_prompt: Optional[str] = None  # User's existing negative to refine
 
 
 class JobResponse(BaseModel):
@@ -1134,6 +1214,150 @@ def _run_upscale(job_id: str, req: UpscaleRequest):
 
 
 # ---------------------------------------------------------------------------
+# Image Studio runners (background workers)
+# ---------------------------------------------------------------------------
+
+def _img_progress_cb(job_id: str):
+    return lambda s, t, m: _update_job(
+        job_id, progress=int((s / max(t, 1)) * 100), message=m,
+    )
+
+
+def _run_image_generate(job_id: str, req: ImageGenerateRequest):
+    try:
+        _update_job(job_id, status="running", message="Loading image generator...")
+        import imagegen
+
+        prompt = req.prompt
+        negative = req.negative_prompt
+        if req.enhance_prompt and prompt.strip():
+            _update_job(job_id, progress=4, message="Enhancing prompt with LLM...")
+            res = imagegen.enhance_prompt(prompt, style=req.style, mode="expand",
+                                          negative_prompt=negative)
+            prompt = res.get("enhanced", prompt)
+            if res.get("negative") and not negative:
+                negative = res["negative"]
+
+        out = imagegen.text_to_image(
+            prompt=prompt,
+            negative_prompt=negative or "",
+            size=req.size,
+            width=req.width,
+            height=req.height,
+            style=req.style,
+            seed=req.seed,
+            steps=req.steps,
+            guidance=req.guidance,
+            provider=req.provider,
+            model=req.model,
+            progress_callback=_img_progress_cb(job_id),
+        )
+        _update_job(
+            job_id, status="completed", progress=100, message="Generated.",
+            result={
+                "image_path": out,
+                "url": f"/static/images/{os.path.basename(out)}",
+                "prompt_used": prompt,
+                "negative_used": negative or "",
+            },
+        )
+    except Exception as exc:
+        logger.exception("image generate failed")
+        _update_job(job_id, status="failed", error=str(exc), message=f"Failed: {exc}")
+
+
+def _run_image_edit(job_id: str, req: ImageEditRequest):
+    try:
+        _update_job(job_id, status="running", message=f"Edit ({req.technique})...")
+        import imagegen
+        out = imagegen.image_to_image(
+            image_path=req.image_path, prompt=req.prompt,
+            negative_prompt=req.negative_prompt, strength=req.strength,
+            style=req.style, seed=req.seed, steps=req.steps, guidance=req.guidance,
+            provider=req.provider, technique=req.technique,
+            image_guidance=req.image_guidance,
+            progress_callback=_img_progress_cb(job_id),
+        )
+        _update_job(
+            job_id, status="completed", progress=100, message="Edited.",
+            result={"image_path": out, "url": f"/static/images/{os.path.basename(out)}"},
+        )
+    except Exception as exc:
+        logger.exception("image edit failed")
+        _update_job(job_id, status="failed", error=str(exc), message=f"Failed: {exc}")
+
+
+def _run_image_inpaint(job_id: str, req: ImageInpaintRequest):
+    try:
+        _update_job(job_id, status="running", message="Loading inpaint pipeline...")
+        import imagegen
+        out = imagegen.inpaint(
+            image_path=req.image_path, mask_path=req.mask_path,
+            prompt=req.prompt, negative_prompt=req.negative_prompt,
+            style=req.style, seed=req.seed, steps=req.steps, guidance=req.guidance,
+            invert_mask=req.invert_mask, progress_callback=_img_progress_cb(job_id),
+        )
+        _update_job(
+            job_id, status="completed", progress=100, message="Inpainted.",
+            result={"image_path": out, "url": f"/static/images/{os.path.basename(out)}"},
+        )
+    except Exception as exc:
+        logger.exception("image inpaint failed")
+        _update_job(job_id, status="failed", error=str(exc), message=f"Failed: {exc}")
+
+
+def _run_image_variation(job_id: str, req: ImageVariationRequest):
+    try:
+        _update_job(job_id, status="running", message="Generating variation...")
+        import imagegen
+        out = imagegen.variation(
+            image_path=req.image_path, prompt=req.prompt,
+            strength=req.strength, style=req.style, seed=req.seed,
+            progress_callback=_img_progress_cb(job_id),
+        )
+        _update_job(
+            job_id, status="completed", progress=100, message="Done.",
+            result={"image_path": out, "url": f"/static/images/{os.path.basename(out)}"},
+        )
+    except Exception as exc:
+        logger.exception("image variation failed")
+        _update_job(job_id, status="failed", error=str(exc), message=f"Failed: {exc}")
+
+
+def _run_image_upscale(job_id: str, req: ImageUpscaleRequest):
+    try:
+        _update_job(job_id, status="running", message=f"Upscaling {req.scale}x...")
+        import imagegen
+        out = imagegen.upscale(
+            image_path=req.image_path, scale=req.scale, method=req.method,
+            progress_callback=_img_progress_cb(job_id),
+        )
+        _update_job(
+            job_id, status="completed", progress=100, message="Upscaled.",
+            result={"image_path": out, "url": f"/static/images/{os.path.basename(out)}"},
+        )
+    except Exception as exc:
+        logger.exception("image upscale failed")
+        _update_job(job_id, status="failed", error=str(exc), message=f"Failed: {exc}")
+
+
+def _run_image_remove_bg(job_id: str, req: ImageBgRemoveRequest):
+    try:
+        _update_job(job_id, status="running", message="Removing background...")
+        import imagegen
+        out = imagegen.remove_background(
+            image_path=req.image_path, progress_callback=_img_progress_cb(job_id),
+        )
+        _update_job(
+            job_id, status="completed", progress=100, message="Done.",
+            result={"image_path": out, "url": f"/static/images/{os.path.basename(out)}"},
+        )
+    except Exception as exc:
+        logger.exception("image remove-bg failed")
+        _update_job(job_id, status="failed", error=str(exc), message=f"Failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -1527,6 +1751,134 @@ async def upscale_video(req: UpscaleRequest, background_tasks: BackgroundTasks):
     thread = threading.Thread(target=_run_upscale, args=(job_id, req), daemon=True)
     thread.start()
     return _job_response(job_id)
+
+
+# ---------------------------------------------------------------------------
+# Image Studio endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/images/catalog")
+async def images_catalog():
+    """Return everything the Images UI needs: providers, models, sizes, styles."""
+    import imagegen
+    return imagegen.catalog()
+
+
+@app.post("/api/v1/images/enhance-prompt")
+async def images_enhance_prompt(req: PromptEnhanceRequest):
+    """Run a raw prompt through the LLM to enrich (expand) or compress (shorten).
+    When ``image_path`` is set, BLIP captions the image first so the LLM is
+    grounded in actual scene content (used by Edit / Variation / Inpaint).
+    Always returns both an enhanced positive prompt AND a negative prompt.
+    Surfaces LLM errors to the caller instead of silently echoing the input."""
+    import imagegen
+    try:
+        result = imagegen.enhance_prompt(
+            req.prompt,
+            style=req.style,
+            mode=req.mode,
+            image_path=req.image_path,
+            negative_prompt=req.negative_prompt,
+        )
+    except Exception as e:
+        logger.exception("enhance-prompt failed")
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
+    return {
+        "original": req.prompt,
+        "enhanced": result.get("enhanced", ""),
+        "negative": result.get("negative", ""),
+        "image_caption": result.get("image_caption", ""),
+        "mode": req.mode,
+    }
+
+
+@app.post("/api/v1/images/generate", response_model=JobResponse)
+async def images_generate(req: ImageGenerateRequest):
+    """Text-to-image. Returns a job; poll /api/v1/jobs/{id}."""
+    job_id = _create_job("image_generate", req.model_dump())
+    threading.Thread(target=_run_image_generate, args=(job_id, req), daemon=True).start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/images/edit", response_model=JobResponse)
+async def images_edit(req: ImageEditRequest):
+    """Image-to-image: modify an existing image with a prompt."""
+    if not os.path.isfile(req.image_path):
+        raise HTTPException(status_code=422, detail=f"Image not found: {req.image_path}")
+    job_id = _create_job("image_edit", req.model_dump())
+    threading.Thread(target=_run_image_edit, args=(job_id, req), daemon=True).start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/images/inpaint", response_model=JobResponse)
+async def images_inpaint(req: ImageInpaintRequest):
+    """Mask-based local edit. Mask: white = edit, black = keep."""
+    if not os.path.isfile(req.image_path):
+        raise HTTPException(status_code=422, detail=f"Image not found: {req.image_path}")
+    if not os.path.isfile(req.mask_path):
+        raise HTTPException(status_code=422, detail=f"Mask not found: {req.mask_path}")
+    job_id = _create_job("image_inpaint", req.model_dump())
+    threading.Thread(target=_run_image_inpaint, args=(job_id, req), daemon=True).start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/images/variation", response_model=JobResponse)
+async def images_variation(req: ImageVariationRequest):
+    """\"More like this\" — low-strength img2img on the same prompt."""
+    if not os.path.isfile(req.image_path):
+        raise HTTPException(status_code=422, detail=f"Image not found: {req.image_path}")
+    job_id = _create_job("image_variation", req.model_dump())
+    threading.Thread(target=_run_image_variation, args=(job_id, req), daemon=True).start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/images/upscale", response_model=JobResponse)
+async def images_upscale(req: ImageUpscaleRequest):
+    """Upscale 2x or 4x via Real-ESRGAN (if installed) or Lanczos."""
+    if not os.path.isfile(req.image_path):
+        raise HTTPException(status_code=422, detail=f"Image not found: {req.image_path}")
+    job_id = _create_job("image_upscale", req.model_dump())
+    threading.Thread(target=_run_image_upscale, args=(job_id, req), daemon=True).start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/images/remove-bg", response_model=JobResponse)
+async def images_remove_bg(req: ImageBgRemoveRequest):
+    """Cut out subject; transparent PNG out. Requires rembg."""
+    if not os.path.isfile(req.image_path):
+        raise HTTPException(status_code=422, detail=f"Image not found: {req.image_path}")
+    job_id = _create_job("image_remove_bg", req.model_dump())
+    threading.Thread(target=_run_image_remove_bg, args=(job_id, req), daemon=True).start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/images/upload")
+async def images_upload(file: UploadFile = File(...)):
+    """Upload an image so it can be referenced by image_path in subsequent calls."""
+    ext = os.path.splitext(file.filename or "")[1].lower() or ".png"
+    if ext not in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+        raise HTTPException(status_code=422, detail=f"Unsupported file type: {ext}")
+    out_path = os.path.join(IMAGES_DIR, f"upload_{uuid.uuid4().hex[:8]}{ext}")
+    contents = await file.read()
+    with open(out_path, "wb") as f:
+        f.write(contents)
+    return {
+        "image_path": out_path,
+        "url": f"/static/images/{os.path.basename(out_path)}",
+        "size_bytes": len(contents),
+    }
+
+
+@app.get("/api/v1/images/history")
+async def images_history(limit: int = 50):
+    """Recent image generations on disk, newest first."""
+    import imagegen
+    items = imagegen.list_history(limit=limit)
+    return {
+        "images": [
+            {**i, "url": f"/static/images/{i['filename']}"} for i in items
+        ],
+    }
 
 
 @app.get("/api/v1/jobs")

@@ -82,5 +82,85 @@ export const getCharacterPortraits = (charName: string) =>
 // Download
 export const getDownloadUrl = (jobId: string) => `${API_BASE}/api/v1/jobs/${jobId}/download`;
 
+// Trigger a real file download in the browser, preserving panel state.
+// The native `download` attribute on <a> is ignored cross-origin unless the
+// server sends Content-Disposition: attachment, so we fetch as blob and
+// click a synthetic anchor with an object URL — works for any URL the
+// browser can fetch (CORS permitting).
+export async function downloadBlob(url: string, suggestedName?: string): Promise<void> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objectUrl;
+  a.download = suggestedName || url.split(/[\\/?#]/).pop() || "download";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
 // Static assets
 export const getPortraitUrl = (relativePath: string) => `${API_BASE}${relativePath}`;
+export const getImageUrl = (relativePath: string) => `${API_BASE}${relativePath}`;
+
+// Images Studio
+export const getImagesCatalog = () => apiFetch<{
+  providers: { id: string; name: string; description: string }[];
+  models: { id: string; name: string; path: string | null }[];
+  sizes: { id: string; name: string; width: number; height: number }[];
+  styles: string[];
+  fooocus_styles: string[];
+  edit_techniques: { id: string; name: string; description: string }[];
+  qwen_edit_available: boolean;
+  default_negatives: Record<string, string>;
+  rembg_available: boolean;
+  realesrgan_available: boolean;
+}>("/api/v1/images/catalog");
+
+export const enhancePrompt = (params: {
+  prompt: string;
+  style?: string | null;
+  mode?: string;
+  image_path?: string | null;
+  negative_prompt?: string | null;
+}) =>
+  apiFetch<{ original: string; enhanced: string; negative: string; image_caption: string; mode: string }>(
+    "/api/v1/images/enhance-prompt",
+    { method: "POST", body: JSON.stringify(params) },
+  );
+
+export const generateImage = (params: Record<string, unknown>) =>
+  apiFetch<Job>("/api/v1/images/generate", { method: "POST", body: JSON.stringify(params) });
+
+export const editImage = (params: Record<string, unknown>) =>
+  apiFetch<Job>("/api/v1/images/edit", { method: "POST", body: JSON.stringify(params) });
+
+export const inpaintImage = (params: Record<string, unknown>) =>
+  apiFetch<Job>("/api/v1/images/inpaint", { method: "POST", body: JSON.stringify(params) });
+
+export const variationImage = (params: Record<string, unknown>) =>
+  apiFetch<Job>("/api/v1/images/variation", { method: "POST", body: JSON.stringify(params) });
+
+export const upscaleImage = (params: Record<string, unknown>) =>
+  apiFetch<Job>("/api/v1/images/upscale", { method: "POST", body: JSON.stringify(params) });
+
+export const removeBgImage = (params: { image_path: string }) =>
+  apiFetch<Job>("/api/v1/images/remove-bg", { method: "POST", body: JSON.stringify(params) });
+
+export const getImagesHistory = (limit = 50) =>
+  apiFetch<{ images: { filename: string; path: string; url: string; size_bytes: number; mtime: number }[] }>(
+    `/api/v1/images/history?limit=${limit}`,
+  );
+
+export async function uploadImage(file: File): Promise<{ image_path: string; url: string; size_bytes: number }> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch(`${API_BASE}/api/v1/images/upload`, { method: "POST", body: fd });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `Upload failed: ${res.status}`);
+  }
+  return res.json();
+}

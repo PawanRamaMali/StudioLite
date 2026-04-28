@@ -4,6 +4,7 @@ import { useState } from "react";
 import Sidebar from "@/components/Sidebar";
 import GeneratePanel from "@/components/panels/GeneratePanel";
 import StoryPanel from "@/components/panels/StoryPanel";
+import ImagesPanel from "@/components/panels/ImagesPanel";
 import EditPanel from "@/components/panels/EditPanel";
 import AudioPanel from "@/components/panels/AudioPanel";
 import UpscalePanel from "@/components/panels/UpscalePanel";
@@ -15,6 +16,7 @@ import SettingsPanel from "@/components/panels/SettingsPanel";
 const PANELS: Record<string, { component: React.FC; label: string }> = {
   generate: { component: GeneratePanel, label: "Video Generator" },
   story: { component: StoryPanel, label: "Story Mode" },
+  images: { component: ImagesPanel, label: "Images Studio" },
   edit: { component: EditPanel, label: "Video Editor" },
   audio: { component: AudioPanel, label: "Audio Studio" },
   upscale: { component: UpscalePanel, label: "Upscale Video" },

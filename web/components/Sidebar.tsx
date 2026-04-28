@@ -3,7 +3,7 @@
 import {
   Video, Wand2, BookOpen, Scissors, Music, ArrowUpCircle,
   Users, KeyRound, Briefcase, Settings, ChevronLeft, ChevronRight,
-  Sparkles,
+  Sparkles, Image as ImageIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -17,6 +17,7 @@ interface SidebarProps {
 const NAV_ITEMS = [
   { id: "generate", label: "Video Generator", icon: Video, group: "Create" },
   { id: "story", label: "Story Mode", icon: BookOpen, group: "Create" },
+  { id: "images", label: "Images Studio", icon: ImageIcon, group: "Create" },
   { id: "edit", label: "Video Editor", icon: Scissors, group: "Tools" },
   { id: "audio", label: "Audio Studio", icon: Music, group: "Tools" },
   { id: "upscale", label: "Upscale Video", icon: ArrowUpCircle, group: "Tools" },

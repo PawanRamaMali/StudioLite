@@ -3,7 +3,7 @@
 import {
   Video, Wand2, BookOpen, Scissors, Music, ArrowUpCircle,
   Users, KeyRound, Briefcase, Settings, ChevronLeft, ChevronRight,
-  Sparkles, Image as ImageIcon,
+  Sparkles, Image as ImageIcon, Radio,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -20,6 +20,7 @@ const NAV_ITEMS = [
   { id: "images", label: "Images Studio", icon: ImageIcon, group: "Create" },
   { id: "edit", label: "Video Editor", icon: Scissors, group: "Tools" },
   { id: "audio", label: "Audio Studio", icon: Music, group: "Tools" },
+  { id: "live-transcribe", label: "Live Transcribe", icon: Radio, group: "Tools" },
   { id: "upscale", label: "Upscale Video", icon: ArrowUpCircle, group: "Tools" },
   { id: "characters", label: "Characters", icon: Users, group: "Assets" },
   { id: "keyframes", label: "Keyframes", icon: KeyRound, group: "Assets" },

@@ -5,7 +5,7 @@ Run with: uvicorn api_server:app --host 0.0.0.0 --port 8000
 Or: python api_server.py
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,6 +51,11 @@ app.mount("/static/portraits", StaticFiles(directory=CHAR_PORTRAITS_DIR), name="
 IMAGES_DIR = os.path.join(OUTPUT_DIR, "images")
 os.makedirs(IMAGES_DIR, exist_ok=True)
 app.mount("/static/images", StaticFiles(directory=IMAGES_DIR), name="images")
+
+# Live transcripts directory
+TRANSCRIPTS_DIR = os.path.join(OUTPUT_DIR, "transcripts")
+os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
+app.mount("/static/transcripts", StaticFiles(directory=TRANSCRIPTS_DIR), name="transcripts")
 
 # ---------------------------------------------------------------------------
 # Job tracking
@@ -2386,6 +2391,146 @@ async def test_hf_token(token: str):
         return {"status": "ok", "user": info.get("name", "unknown"), "message": f"Token valid. Authenticated as {info.get('name', 'unknown')}."}
     except Exception as e:
         return {"status": "error", "message": f"Token invalid: {e}"}
+
+
+# ---------------------------------------------------------------------------
+# Live transcription (WebSocket)
+# ---------------------------------------------------------------------------
+
+@app.websocket("/api/v1/transcribe/live")
+async def live_transcribe_ws(websocket: WebSocket):
+    """
+    Streaming transcription over WebSocket.
+
+    Query params:
+        session: client-supplied session id (also used for output filenames)
+        model: whisper model size (tiny|base|small|medium|large-v2|large-v3)
+        language: ISO 639-1 source language code, or omit for auto-detect
+        translate: "1" to translate to English
+
+    Wire protocol:
+        Binary frames -> raw PCM int16 little-endian, mono, 16 kHz
+        Text frame "stop" -> finalize and close
+        Server sends JSON:
+            {"type":"ready","session":...}
+            {"type":"status","stage":"loading_model"|"model_ready",...}
+            {"type":"final"|"partial","start":..,"end":..,"text":..}
+            {"type":"complete","transcripts":{"txt":..,"srt":..,"json":..}}
+            {"type":"error","message":..}
+    """
+    import asyncio
+    from transcriber import LiveTranscriber
+
+    await websocket.accept()
+    qp = websocket.query_params
+    session_id = qp.get("session") or str(uuid.uuid4())
+    model_size = qp.get("model", "base")
+    language = qp.get("language") or None
+    translate = qp.get("translate") == "1"
+
+    transcriber: Optional["LiveTranscriber"] = None
+    model_ready = asyncio.Event()
+    stop_event = asyncio.Event()
+    audio_queue: "asyncio.Queue[bytes]" = asyncio.Queue(maxsize=200)
+
+    async def receiver_task():
+        """Pull frames off the WS as fast as possible so the OS buffer never fills."""
+        try:
+            while not stop_event.is_set():
+                msg = await websocket.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    stop_event.set()
+                    break
+                if msg.get("bytes") is not None:
+                    try:
+                        audio_queue.put_nowait(msg["bytes"])
+                    except asyncio.QueueFull:
+                        # Drop oldest if processor is way behind
+                        try:
+                            audio_queue.get_nowait()
+                            audio_queue.put_nowait(msg["bytes"])
+                        except Exception:
+                            pass
+                elif msg.get("text") and msg["text"].strip().lower() == "stop":
+                    stop_event.set()
+                    break
+        except WebSocketDisconnect:
+            stop_event.set()
+
+    async def processor_task():
+        """Drain the audio queue, run decode in a thread so it never blocks the loop."""
+        await model_ready.wait()
+        while not stop_event.is_set() or not audio_queue.empty():
+            try:
+                chunk = await asyncio.wait_for(audio_queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            transcriber.feed_pcm16(chunk)
+            # Drain any other queued chunks before deciding to decode
+            while True:
+                try:
+                    extra = audio_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                transcriber.feed_pcm16(extra)
+            result = await asyncio.to_thread(transcriber.maybe_decode)
+            if result:
+                for fs in result["final"]:
+                    await websocket.send_json({"type": "final", **fs})
+                for ps in result["partial"]:
+                    await websocket.send_json({"type": "partial", **ps})
+
+    try:
+        transcriber = LiveTranscriber(
+            session_id=session_id,
+            transcripts_dir=TRANSCRIPTS_DIR,
+            model_size=model_size,
+            language=language,
+            translate_to_english=translate,
+        )
+        await websocket.send_json({"type": "ready", "session": session_id, "device": transcriber.device})
+        await websocket.send_json({"type": "status", "stage": "loading_model", "model": model_size})
+
+        # Load the model in a thread so the event loop stays responsive.
+        await asyncio.to_thread(transcriber._ensure_model)
+        await websocket.send_json({"type": "status", "stage": "model_ready"})
+        model_ready.set()
+
+        recv = asyncio.create_task(receiver_task())
+        proc = asyncio.create_task(processor_task())
+        await asyncio.gather(recv, proc)
+
+        # Final flush
+        result = await asyncio.to_thread(transcriber.flush)
+        if result:
+            for fs in result.get("final", []):
+                await websocket.send_json({"type": "final", **fs})
+
+        urls = transcriber.transcript_urls(base_url="/static/transcripts")
+        await websocket.send_json({"type": "complete", "transcripts": urls})
+
+    except WebSocketDisconnect:
+        if transcriber:
+            try:
+                await asyncio.to_thread(transcriber.flush)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.exception("Live transcribe error")
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
+        if transcriber:
+            try:
+                await asyncio.to_thread(transcriber.flush)
+            except Exception:
+                pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

@@ -290,3 +290,207 @@ def get_language_list() -> List[str]:
 def get_language_code(language_name: str) -> Optional[str]:
     """Get language code from language name."""
     return LANGUAGES.get(language_name)
+
+
+# ---------------------------------------------------------------------------
+# Live (streaming) transcription
+# ---------------------------------------------------------------------------
+
+LIVE_SAMPLE_RATE = 16000
+LIVE_WINDOW_SECONDS = 30          # max audio kept in the rolling buffer
+LIVE_TAIL_SECONDS = 4.0           # last N seconds of buffer treated as unstable / partial
+LIVE_DECODE_INTERVAL_SECONDS = 2.5  # re-decode after this much new audio
+LIVE_MIN_DECODE_SECONDS = 1.5     # don't decode buffers shorter than this
+
+# Process-wide model cache so connections share weights
+_LIVE_MODEL_CACHE: Dict[tuple, Any] = {}
+
+
+def _get_live_model(model_size: str, device: str, compute_type: str):
+    """Lazy-load and cache a faster-whisper model keyed by (size, device, compute)."""
+    from faster_whisper import WhisperModel
+    key = (model_size, device, compute_type)
+    if key not in _LIVE_MODEL_CACHE:
+        logger.info(f"Loading live whisper model: {key}")
+        _LIVE_MODEL_CACHE[key] = WhisperModel(model_size, device=device, compute_type=compute_type)
+    return _LIVE_MODEL_CACHE[key]
+
+
+class LiveTranscriber:
+    """
+    Sliding-window live transcription over a stream of PCM int16 16kHz mono chunks.
+
+    Producers call `feed_pcm16` with raw bytes; whenever enough new audio has
+    accumulated, `maybe_decode` is called to run faster-whisper across the
+    whole buffer. Segments older than the unstable-tail threshold become
+    "final" and are persisted to disk + returned; newer ones are "partial"
+    and may change on the next pass.
+
+    Files written incrementally to .mp/transcripts/<session>.{txt,srt,json}.
+    """
+
+    def __init__(
+        self,
+        session_id: str,
+        transcripts_dir: str,
+        model_size: str = "base",
+        language: Optional[str] = None,
+        translate_to_english: bool = False,
+    ):
+        import numpy as np
+
+        self.session_id = session_id
+        self.transcripts_dir = transcripts_dir
+        os.makedirs(transcripts_dir, exist_ok=True)
+
+        self.model_size = model_size
+        self.language = language
+        self.task = "translate" if translate_to_english else "transcribe"
+
+        self.device = get_device()
+        self.compute_type = "int8" if self.device == "cpu" else "float16"
+
+        self._np = np
+        self._buffer = np.zeros(0, dtype=np.float32)
+        self._buffer_start_time = 0.0          # absolute offset of buffer[0]
+        self._committed_through = 0.0          # absolute time before which segments are final
+        self._last_decode_samples = 0          # sample count at last decode
+        self._final_segments: List[Dict[str, Any]] = []
+
+        self.txt_path = os.path.join(transcripts_dir, f"{session_id}.txt")
+        self.srt_path = os.path.join(transcripts_dir, f"{session_id}.srt")
+        self.json_path = os.path.join(transcripts_dir, f"{session_id}.json")
+        self._txt_fh = open(self.txt_path, "w", encoding="utf-8")
+        self._srt_fh = open(self.srt_path, "w", encoding="utf-8")
+        self._srt_index = 0
+
+        self._model = None  # loaded on first decode
+
+    def feed_pcm16(self, pcm_bytes: bytes) -> None:
+        """Append int16 little-endian PCM bytes (16kHz mono) to the buffer."""
+        if not pcm_bytes:
+            return
+        ints = self._np.frombuffer(pcm_bytes, dtype=self._np.int16)
+        floats = ints.astype(self._np.float32) / 32768.0
+        self._buffer = self._np.concatenate([self._buffer, floats])
+
+    def _ensure_model(self):
+        if self._model is None:
+            self._model = _get_live_model(self.model_size, self.device, self.compute_type)
+
+    def maybe_decode(self) -> Optional[Dict[str, Any]]:
+        """
+        If enough new audio has accumulated, decode and return
+        {"final": [...], "partial": [...]} with absolute timestamps.
+        Otherwise return None.
+        """
+        new_samples = len(self._buffer) - self._last_decode_samples
+        if new_samples < LIVE_DECODE_INTERVAL_SECONDS * LIVE_SAMPLE_RATE:
+            return None
+        if len(self._buffer) < LIVE_MIN_DECODE_SECONDS * LIVE_SAMPLE_RATE:
+            return None
+        return self._decode(force_final=False)
+
+    def flush(self) -> Optional[Dict[str, Any]]:
+        """Decode any remaining audio, treating everything as final. Called on stop."""
+        if len(self._buffer) < 0.4 * LIVE_SAMPLE_RATE:
+            return self._finalize_files()
+        result = self._decode(force_final=True)
+        self._finalize_files()
+        return result
+
+    def _decode(self, force_final: bool) -> Dict[str, Any]:
+        self._ensure_model()
+        segments_gen, _info = self._model.transcribe(
+            self._buffer,
+            task=self.task,
+            language=self.language,
+            beam_size=1,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=400),
+            condition_on_previous_text=False,
+        )
+
+        buffer_duration = len(self._buffer) / LIVE_SAMPLE_RATE
+        stable_cutoff = buffer_duration if force_final else max(0.0, buffer_duration - LIVE_TAIL_SECONDS)
+
+        new_finals: List[Dict[str, Any]] = []
+        partials: List[Dict[str, Any]] = []
+
+        for seg in segments_gen:
+            text = (seg.text or "").strip()
+            if not text:
+                continue
+            abs_start = self._buffer_start_time + float(seg.start)
+            abs_end = self._buffer_start_time + float(seg.end)
+            if seg.end <= stable_cutoff:
+                if abs_start + 0.05 >= self._committed_through:
+                    new_finals.append({"start": abs_start, "end": abs_end, "text": text})
+            else:
+                partials.append({"start": abs_start, "end": abs_end, "text": text})
+
+        for fs in new_finals:
+            self._final_segments.append(fs)
+            self._srt_index += 1
+            self._txt_fh.write(fs["text"] + "\n")
+            self._srt_fh.write(self._format_srt_entry(self._srt_index, fs))
+            self._committed_through = max(self._committed_through, fs["end"])
+        if new_finals:
+            self._txt_fh.flush()
+            self._srt_fh.flush()
+            import json as _json
+            with open(self.json_path, "w", encoding="utf-8") as f:
+                _json.dump({"session": self.session_id, "segments": self._final_segments}, f, indent=2)
+
+        # Trim buffer up to the last committed point so we don't re-decode it
+        if new_finals:
+            keep_from_relative = self._committed_through - self._buffer_start_time
+            keep_from_samples = int(keep_from_relative * LIVE_SAMPLE_RATE)
+            if keep_from_samples > 0:
+                self._buffer = self._buffer[keep_from_samples:]
+                self._buffer_start_time = self._committed_through
+
+        # Cap absolute buffer length so we don't drift
+        max_samples = int(LIVE_WINDOW_SECONDS * LIVE_SAMPLE_RATE)
+        if len(self._buffer) > max_samples:
+            drop = len(self._buffer) - max_samples
+            self._buffer = self._buffer[drop:]
+            self._buffer_start_time += drop / LIVE_SAMPLE_RATE
+
+        self._last_decode_samples = len(self._buffer)
+        return {"final": new_finals, "partial": partials}
+
+    def _finalize_files(self) -> Dict[str, Any]:
+        try:
+            self._txt_fh.close()
+        except Exception:
+            pass
+        try:
+            self._srt_fh.close()
+        except Exception:
+            pass
+        return {"final": [], "partial": [], "complete": True}
+
+    def transcript_urls(self, base_url: str = "") -> Dict[str, str]:
+        """Return URLs (or paths) for the persisted transcript files."""
+        return {
+            "txt": f"{base_url}/{self.session_id}.txt",
+            "srt": f"{base_url}/{self.session_id}.srt",
+            "json": f"{base_url}/{self.session_id}.json",
+        }
+
+    @staticmethod
+    def _format_srt_entry(index: int, seg: Dict[str, Any]) -> str:
+        start = LiveTranscriber._format_srt_timestamp(seg["start"])
+        end = LiveTranscriber._format_srt_timestamp(seg["end"])
+        return f"{index}\n{start} --> {end}\n{seg['text']}\n\n"
+
+    @staticmethod
+    def _format_srt_timestamp(seconds: float) -> str:
+        if seconds < 0:
+            seconds = 0.0
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        millis = int((seconds - int(seconds)) * 1000)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"

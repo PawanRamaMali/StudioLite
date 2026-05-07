@@ -7,6 +7,7 @@ import StoryPanel from "@/components/panels/StoryPanel";
 import ImagesPanel from "@/components/panels/ImagesPanel";
 import EditPanel from "@/components/panels/EditPanel";
 import AudioPanel from "@/components/panels/AudioPanel";
+import LiveTranscribePanel from "@/components/panels/LiveTranscribePanel";
 import UpscalePanel from "@/components/panels/UpscalePanel";
 import CharactersPanel from "@/components/panels/CharactersPanel";
 import KeyframesPanel from "@/components/panels/KeyframesPanel";
@@ -19,6 +20,7 @@ const PANELS: Record<string, { component: React.FC; label: string }> = {
   images: { component: ImagesPanel, label: "Images Studio" },
   edit: { component: EditPanel, label: "Video Editor" },
   audio: { component: AudioPanel, label: "Audio Studio" },
+  "live-transcribe": { component: LiveTranscribePanel, label: "Live Transcribe" },
   upscale: { component: UpscalePanel, label: "Upscale Video" },
   characters: { component: CharactersPanel, label: "Characters" },
   keyframes: { component: KeyframesPanel, label: "Keyframes" },

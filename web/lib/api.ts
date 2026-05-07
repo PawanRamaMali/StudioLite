@@ -61,11 +61,58 @@ export const generateStory = (params: Record<string, unknown>) =>
   apiFetch<Job>("/api/v1/generate/story", { method: "POST", body: JSON.stringify(params) });
 
 // Audio
-export const generateTTS = (params: { text: string; voice?: string; engine?: string }) =>
+export interface TTSParams {
+  text: string;
+  voice?: string;
+  engine?: string;
+  persona?: string;
+  speed?: number;
+  pitch?: number;
+  volume?: number;
+  output_format?: "wav" | "mp3";
+}
+export const generateTTS = (params: TTSParams) =>
   apiFetch<Job>("/api/v1/audio/tts", { method: "POST", body: JSON.stringify(params) });
 
-export const generateSFX = (params: { sfx_type: string; duration?: number }) =>
+export const generateSFX = (params: { sfx_type: string; prompt?: string; duration?: number }) =>
   apiFetch<Job>("/api/v1/audio/sfx", { method: "POST", body: JSON.stringify(params) });
+
+export interface PersonaInfo {
+  id: string;
+  label: string;
+  voice: string;
+  speed: number;
+  pitch: number;
+  volume: number;
+  description: string;
+}
+export interface VoiceInfo {
+  id: string;
+  model: string;
+  quality: string;
+  gender: string;
+  accent: string;
+}
+export const getAudioVoices = () =>
+  apiFetch<{ personas: PersonaInfo[]; voices: VoiceInfo[] }>("/api/v1/audio/voices");
+
+// Multipart-upload helper for file-based audio endpoints
+async function uploadAudio<T>(path: string, file: File, extraFormData?: Record<string, string>): Promise<T> {
+  const fd = new FormData();
+  fd.append("file", file);
+  if (extraFormData) {
+    for (const [k, v] of Object.entries(extraFormData)) fd.append(k, v);
+  }
+  const res = await fetch(`${API_BASE}${path}`, { method: "POST", body: fd });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `Upload error: ${res.status}`);
+  }
+  return res.json();
+}
+export const isolateVoice = (file: File) => uploadAudio<Job>("/api/v1/audio/isolate", file);
+export const normalizeAudio = (file: File, target_db: number) =>
+  uploadAudio<Job>(`/api/v1/audio/normalize?target_db=${target_db}`, file);
 
 // Characters
 export const generateCharacterPortrait = (params: {

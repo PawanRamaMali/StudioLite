@@ -572,6 +572,235 @@ def list_sfx_types() -> list:
     return list(_PROCEDURAL_GENERATORS.keys())
 
 
+# =============================================
+# TTS Personas + audio post-processing
+# =============================================
+
+# Each persona maps to: (default_voice, speed_multiplier, pitch_semitones,
+# volume_gain, description). The voice can be overridden by the user.
+TTS_PERSONAS = {
+    "narrator": {
+        "label": "Narrator",
+        "voice": "Lessac",
+        "speed": 0.95,
+        "pitch": -1,
+        "volume": 1.0,
+        "description": "Calm, authoritative voice for documentaries and explainers.",
+    },
+    "audiobook": {
+        "label": "Audiobook",
+        "voice": "Amy",
+        "speed": 1.0,
+        "pitch": 0,
+        "volume": 1.0,
+        "description": "Warm and expressive, paced for long-form listening.",
+    },
+    "news_anchor": {
+        "label": "News Anchor",
+        "voice": "Ryan",
+        "speed": 1.05,
+        "pitch": 0,
+        "volume": 1.05,
+        "description": "Clear, professional delivery with broadcast pacing.",
+    },
+    "storyteller": {
+        "label": "Storyteller",
+        "voice": "Jenny",
+        "speed": 0.9,
+        "pitch": 1,
+        "volume": 1.0,
+        "description": "Dramatic, expressive cadence for fiction or kids' content.",
+    },
+    "documentary": {
+        "label": "Documentary",
+        "voice": "Alan",
+        "speed": 0.88,
+        "pitch": -1,
+        "volume": 1.0,
+        "description": "Slow, deliberate UK-English voice for serious topics.",
+    },
+    "excited": {
+        "label": "Excited Host",
+        "voice": "Kathleen",
+        "speed": 1.18,
+        "pitch": 2,
+        "volume": 1.05,
+        "description": "Fast, upbeat energy for adverts and social shorts.",
+    },
+    "casual": {
+        "label": "Casual",
+        "voice": "Amy",
+        "speed": 1.0,
+        "pitch": 0,
+        "volume": 1.0,
+        "description": "Conversational and approachable, vlog-style.",
+    },
+    "deep_voice": {
+        "label": "Deep Voice",
+        "voice": "Northern",
+        "speed": 0.92,
+        "pitch": -2,
+        "volume": 1.05,
+        "description": "Deep, gravelly trailer voice. Pairs well with longer text.",
+    },
+    "british_lady": {
+        "label": "British Lady",
+        "voice": "Alba",
+        "speed": 1.0,
+        "pitch": 0,
+        "volume": 1.0,
+        "description": "Refined UK-English female voice.",
+    },
+    "robot": {
+        "label": "Robot / AI",
+        "voice": "Libritts",
+        "speed": 1.0,
+        "pitch": -3,
+        "volume": 1.0,
+        "description": "Lower pitch with flat dynamics for AI / sci-fi readouts.",
+    },
+    "whisper": {
+        "label": "Whisper",
+        "voice": "Amy",
+        "speed": 0.95,
+        "pitch": -1,
+        "volume": 0.55,
+        "description": "Soft, intimate delivery for voiceovers and ASMR.",
+    },
+}
+
+
+def list_personas() -> list:
+    """Return persona metadata for the UI."""
+    return [
+        {
+            "id": pid,
+            "label": p["label"],
+            "voice": p["voice"],
+            "speed": p["speed"],
+            "pitch": p["pitch"],
+            "volume": p["volume"],
+            "description": p["description"],
+        }
+        for pid, p in TTS_PERSONAS.items()
+    ]
+
+
+def list_piper_voices() -> list:
+    """Return all available Piper voices with metadata."""
+    try:
+        from mpv2.classes.PiperTts import PIPER_VOICES
+    except Exception:
+        return []
+    return [
+        {
+            "id": name,
+            "model": info.get("model"),
+            "quality": info.get("quality"),
+            "gender": info.get("gender"),
+            # Heuristic: model id starts with en_GB -> UK, en_US -> US.
+            "accent": (info.get("model", "")[:5] if info.get("model") else "").replace("_", "-"),
+        }
+        for name, info in PIPER_VOICES.items()
+    ]
+
+
+def _ffmpeg_run(cmd: list) -> None:
+    """Run ffmpeg and raise with stderr on failure."""
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip().splitlines()[-1] if proc.stderr else 'unknown'}")
+
+
+def _atempo_chain(factor: float) -> str:
+    """ffmpeg's atempo only accepts 0.5..2.0 — chain filters for larger ranges."""
+    f = max(0.25, min(4.0, factor))
+    if 0.5 <= f <= 2.0:
+        return f"atempo={f:.4f}"
+    # Decompose: 0.4 = 0.5 * 0.8 ; 2.5 = 2.0 * 1.25
+    if f < 0.5:
+        return f"atempo=0.5,atempo={f / 0.5:.4f}"
+    return f"atempo=2.0,atempo={f / 2.0:.4f}"
+
+
+def apply_audio_effects(
+    input_path: str,
+    output_path: Optional[str] = None,
+    speed: float = 1.0,
+    pitch_semitones: float = 0.0,
+    volume: float = 1.0,
+    output_format: str = "wav",
+) -> str:
+    """
+    Apply speed, pitch, and volume adjustments to an audio file via ffmpeg.
+
+    speed: 0.5..2.0 typical (clamped to 0.25..4.0)
+    pitch_semitones: -12..+12 typical (uses asetrate trick + tempo correction)
+    volume: linear gain (1.0 = unchanged)
+    output_format: 'wav' or 'mp3'
+
+    Returns the output path.
+    """
+    ensure_output_dir()
+    if output_format not in ("wav", "mp3"):
+        output_format = "wav"
+    output_path = output_path or os.path.join(OUTPUT_DIR, f"tts_proc_{uuid4()}.{output_format}")
+    speed = max(0.25, min(4.0, float(speed)))
+    pitch = max(-12.0, min(12.0, float(pitch_semitones)))
+    volume = max(0.0, min(3.0, float(volume)))
+
+    # If everything is identity AND output format matches, copy and return.
+    if abs(speed - 1.0) < 0.005 and abs(pitch) < 0.05 and abs(volume - 1.0) < 0.005:
+        if input_path.lower().endswith(f".{output_format}"):
+            try:
+                import shutil
+                if os.path.abspath(input_path) != os.path.abspath(output_path):
+                    shutil.copyfile(input_path, output_path)
+                else:
+                    output_path = input_path
+                return output_path
+            except OSError:
+                pass
+
+    # Probe sample rate so the asetrate-based pitch shift can preserve it.
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate",
+             "-of", "csv=p=0", input_path],
+            capture_output=True, text=True,
+        )
+        sr = int(probe.stdout.strip() or "44100")
+    except Exception:
+        sr = 44100
+
+    filters = []
+    pitch_factor = 2 ** (pitch / 12.0) if pitch else 1.0
+    if abs(pitch) >= 0.05:
+        # Pitch shift via asetrate (changes both pitch and tempo) then compensate tempo.
+        filters.append(f"asetrate={int(sr * pitch_factor)}")
+        # After asetrate, audio sample rate is non-standard — set back.
+        filters.append(f"aresample={sr}")
+        # Compensating tempo so pitch shift doesn't change speed: divide by pitch_factor
+        comp = 1.0 / pitch_factor
+        if speed != 1.0:
+            comp *= speed
+        filters.append(_atempo_chain(comp))
+    elif abs(speed - 1.0) >= 0.005:
+        filters.append(_atempo_chain(speed))
+    if abs(volume - 1.0) >= 0.005:
+        filters.append(f"volume={volume:.3f}")
+
+    af = ",".join(filters) if filters else "anull"
+
+    cmd = ["ffmpeg", "-y", "-i", input_path, "-af", af]
+    if output_format == "mp3":
+        cmd += ["-c:a", "libmp3lame", "-b:a", "192k", output_path]
+    else:
+        cmd += ["-c:a", "pcm_s16le", output_path]
+    _ffmpeg_run(cmd)
+    return output_path
+
+
 def generate_sfx_ai(prompt: str, duration: float = 3.0, output_path: str = None) -> str:
     """
     Generate sound effects from text description using AudioLDM.

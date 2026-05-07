@@ -174,6 +174,11 @@ class TTSRequest(BaseModel):
     text: str
     voice: str = "Amy"
     engine: str = "piper"  # piper or kitten
+    persona: str = ""               # optional persona id from list_personas()
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    pitch: float = Field(default=0.0, ge=-12.0, le=12.0)
+    volume: float = Field(default=1.0, ge=0.0, le=3.0)
+    output_format: str = "wav"      # 'wav' or 'mp3'
 
 
 class SFXRequest(BaseModel):
@@ -1058,26 +1063,76 @@ def _run_tts(job_id: str, req: TTSRequest):
         _update_job(job_id, status="running", message="Initializing TTS engine...")
         from mpv2.classes.TtsFactory import get_tts_instance
         from reelforge import rf_clean_text_for_tts
+        from audio_studio import TTS_PERSONAS, apply_audio_effects
+
+        # Persona defaults — explicit request fields override the persona's preset.
+        # We treat 1.0/0.0 as "not set" since they're the schema defaults.
+        persona = TTS_PERSONAS.get(req.persona) if req.persona else None
+        voice = req.voice
+        speed = req.speed
+        pitch = req.pitch
+        volume = req.volume
+        if persona:
+            if not voice or voice == "Amy":
+                voice = persona["voice"]
+            if abs(speed - 1.0) < 1e-6:
+                speed = persona["speed"]
+            if abs(pitch) < 1e-6:
+                pitch = persona["pitch"]
+            if abs(volume - 1.0) < 1e-6:
+                volume = persona["volume"]
 
         tts = get_tts_instance(req.engine)
-
-        # If piper, we can set the voice via constructor
-        if req.engine == "piper" and req.voice:
+        if req.engine == "piper" and voice:
             from mpv2.classes.PiperTts import PiperTTS
-            tts = PiperTTS(voice_name=req.voice)
+            tts = PiperTTS(voice_name=voice)
 
         clean_text = rf_clean_text_for_tts(req.text)
-        output_path = os.path.join(OUTPUT_DIR, f"tts_{job_id}.wav")
+        raw_path = os.path.join(OUTPUT_DIR, f"tts_{job_id}_raw.wav")
 
-        _update_job(job_id, progress=30, message="Synthesizing speech...")
-        tts.synthesize(clean_text, output_path)
+        _update_job(job_id, progress=30, message=f"Synthesizing with {voice}...")
+        tts.synthesize(clean_text, raw_path)
+
+        # Post-process if any effect is non-identity OR the user wants mp3.
+        needs_proc = (
+            abs(speed - 1.0) > 0.005
+            or abs(pitch) > 0.05
+            or abs(volume - 1.0) > 0.005
+            or req.output_format == "mp3"
+        )
+        if needs_proc:
+            _update_job(job_id, progress=70, message="Applying voice effects...")
+            ext = "mp3" if req.output_format == "mp3" else "wav"
+            output_path = os.path.join(OUTPUT_DIR, f"tts_{job_id}.{ext}")
+            apply_audio_effects(
+                raw_path, output_path,
+                speed=speed, pitch_semitones=pitch, volume=volume,
+                output_format=ext,
+            )
+            try:
+                if os.path.abspath(raw_path) != os.path.abspath(output_path):
+                    os.remove(raw_path)
+            except OSError:
+                pass
+        else:
+            output_path = raw_path
 
         _update_job(
             job_id,
             status="completed",
             progress=100,
-            message="TTS synthesis complete.",
-            result={"audio_path": output_path, "voice": req.voice, "engine": req.engine},
+            message=f"TTS ready ({voice}, persona={req.persona or 'none'}).",
+            result={
+                "audio_path": output_path,
+                "voice": voice,
+                "engine": req.engine,
+                "persona": req.persona or None,
+                "persona_label": persona["label"] if persona else None,
+                "speed": speed,
+                "pitch": pitch,
+                "volume": volume,
+                "output_format": "mp3" if req.output_format == "mp3" else "wav",
+            },
         )
     except Exception as exc:
         _update_job(
@@ -1757,6 +1812,141 @@ async def generate_sfx(req: SFXRequest, background_tasks: BackgroundTasks):
     """Generate a procedural sound effect (rain, thunder, etc.) as a .wav file."""
     job_id = _create_job("sfx", req.model_dump())
     thread = threading.Thread(target=_run_sfx, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.get("/api/v1/audio/voices")
+async def audio_voices():
+    """Catalog of TTS voices and personas for the UI's TTS panel."""
+    from audio_studio import list_personas, list_piper_voices
+    return {"personas": list_personas(), "voices": list_piper_voices()}
+
+
+# ---- Voice isolation + normalize: file upload (multipart) ----------------
+
+UPLOADS_DIR = os.path.join(OUTPUT_DIR, "uploads")
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+app.mount("/static/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
+
+
+def _save_upload(file: UploadFile, prefix: str) -> str:
+    """Persist an UploadFile to disk and return its path."""
+    safe_name = os.path.basename(file.filename or "input.wav").replace(" ", "_")
+    dest = os.path.join(UPLOADS_DIR, f"{prefix}_{uuid.uuid4().hex[:8]}_{safe_name}")
+    with open(dest, "wb") as f:
+        while True:
+            chunk = file.file.read(1024 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+    file.file.close()
+    return dest
+
+
+def _run_isolate(job_id: str, input_path: str):
+    try:
+        _update_job(job_id, status="running", message="Separating vocals from background...")
+        from audio_studio import isolate_voice
+
+        result = isolate_voice(input_path)
+        if "error" in result:
+            raise RuntimeError(result["error"])
+
+        # The output_path key in download_result expects audio_path; expose
+        # the vocals there for backward-compat, plus full URLs for both stems.
+        vocals = result.get("vocals")
+        background = result.get("background")
+        method = result.get("method", "ffmpeg_filter")
+
+        # Move outputs under uploads dir so they can be served via static mount.
+        def _to_static(path: str, label: str) -> str:
+            if not path or not os.path.isfile(path):
+                return ""
+            name = f"{label}_{job_id}.wav"
+            target = os.path.join(UPLOADS_DIR, name)
+            try:
+                import shutil
+                shutil.move(path, target)
+            except Exception:
+                target = path
+            return target
+
+        vocals_path = _to_static(vocals, "vocals") if vocals else ""
+        bg_path = _to_static(background, "background") if background else ""
+
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message=f"Voice isolation complete ({method}).",
+            result={
+                "audio_path": vocals_path or bg_path,
+                "vocals_path": vocals_path,
+                "background_path": bg_path,
+                "vocals_url": f"/static/uploads/{os.path.basename(vocals_path)}" if vocals_path else "",
+                "background_url": f"/static/uploads/{os.path.basename(bg_path)}" if bg_path else "",
+                "method": method,
+            },
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Isolate failed: {exc}")
+    finally:
+        # Clean up upload after processing
+        try:
+            if os.path.isfile(input_path):
+                os.remove(input_path)
+        except OSError:
+            pass
+
+
+def _run_normalize(job_id: str, input_path: str, target_db: float):
+    try:
+        _update_job(job_id, status="running", message=f"Normalizing to {target_db:.1f} dB...")
+        from audio_studio import normalize_audio
+
+        out_name = f"normalized_{job_id}.wav"
+        target_path = os.path.join(UPLOADS_DIR, out_name)
+        normalize_audio(input_path, output_path=target_path, target_db=target_db)
+
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Normalize complete.",
+            result={
+                "audio_path": target_path,
+                "audio_url": f"/static/uploads/{out_name}",
+                "target_db": target_db,
+            },
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Normalize failed: {exc}")
+    finally:
+        try:
+            if os.path.isfile(input_path):
+                os.remove(input_path)
+        except OSError:
+            pass
+
+
+@app.post("/api/v1/audio/isolate", response_model=JobResponse)
+async def audio_isolate(file: UploadFile = File(...)):
+    """Separate vocals from background. Accepts any audio/video file."""
+    saved = _save_upload(file, prefix="iso")
+    job_id = _create_job("isolate", {"filename": file.filename})
+    thread = threading.Thread(target=_run_isolate, args=(job_id, saved), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/audio/normalize", response_model=JobResponse)
+async def audio_normalize(file: UploadFile = File(...), target_db: float = -3.0):
+    """Normalize an audio file to a target dB level. Accepts any audio/video file."""
+    target_db = max(-30.0, min(0.0, float(target_db)))
+    saved = _save_upload(file, prefix="norm")
+    job_id = _create_job("normalize", {"filename": file.filename, "target_db": target_db})
+    thread = threading.Thread(target=_run_normalize, args=(job_id, saved, target_db), daemon=True)
     thread.start()
     return _job_response(job_id)
 
@@ -2578,6 +2768,27 @@ async def live_transcribe_ws(websocket: WebSocket):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+# Make sure ffmpeg/ffprobe are findable. Some Windows shells don't pick up
+# the registry PATH entry that winget adds, which causes audio_studio's
+# ffmpeg subprocess calls to fail with WinError 2.
+def _ensure_ffmpeg_on_path():
+    import shutil
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        return
+    candidates = [
+        r"C:\Program Files\WinGet\Links",
+        r"C:\Program Files\Gyan.FFmpeg\bin",
+        r"C:\ffmpeg\bin",
+        r"C:\ProgramData\chocolatey\bin",
+    ]
+    for c in candidates:
+        if os.path.isfile(os.path.join(c, "ffmpeg.exe")):
+            os.environ["PATH"] = c + os.pathsep + os.environ.get("PATH", "")
+            return
+
+_ensure_ffmpeg_on_path()
+
 
 # Load .env file on startup
 _env_file = os.path.join(ROOT_DIR, ".env")

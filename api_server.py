@@ -1065,22 +1065,15 @@ def _run_tts(job_id: str, req: TTSRequest):
         from reelforge import rf_clean_text_for_tts
         from audio_studio import TTS_PERSONAS, apply_audio_effects
 
-        # Persona defaults — explicit request fields override the persona's preset.
-        # We treat 1.0/0.0 as "not set" since they're the schema defaults.
+        # Persona is a label only at this stage. The frontend snaps the
+        # controls when a persona is picked, so by the time we get the
+        # request the values on the sliders ARE what should run. No
+        # silent overrides on the server.
         persona = TTS_PERSONAS.get(req.persona) if req.persona else None
-        voice = req.voice
+        voice = req.voice or "Amy"
         speed = req.speed
         pitch = req.pitch
         volume = req.volume
-        if persona:
-            if not voice or voice == "Amy":
-                voice = persona["voice"]
-            if abs(speed - 1.0) < 1e-6:
-                speed = persona["speed"]
-            if abs(pitch) < 1e-6:
-                pitch = persona["pitch"]
-            if abs(volume - 1.0) < 1e-6:
-                volume = persona["volume"]
 
         tts = get_tts_instance(req.engine)
         if req.engine == "piper" and voice:

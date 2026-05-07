@@ -98,10 +98,22 @@ export default function AudioPanel() {
 
   const activePersona = personas.find((p) => p.id === selectedPersona);
 
-  // Apply persona's defaults to the sliders
+  // When the persona changes (or first arrives from the catalog), snap the
+  // controls to its preset. After that the user can tweak freely; whatever
+  // is on the sliders is what runs (no hidden server-side override).
+  useEffect(() => {
+    if (!activePersona) return;
+    setVoiceOverride(activePersona.voice);
+    setSpeed(activePersona.speed);
+    setPitch(activePersona.pitch);
+    setVolume(activePersona.volume);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePersona?.id]);
+
+  // Manual reapply (handy after the user has tweaked and wants to start over)
   const applyPersonaDefaults = () => {
     if (!activePersona) return;
-    setVoiceOverride("");
+    setVoiceOverride(activePersona.voice);
     setSpeed(activePersona.speed);
     setPitch(activePersona.pitch);
     setVolume(activePersona.volume);
@@ -163,9 +175,9 @@ export default function AudioPanel() {
       const job = await generateTTS({
         text: ttsText.trim(),
         engine: "piper",
-        voice: voiceOverride || (activePersona?.voice ?? "Amy"),
-        persona: selectedPersona,
-        speed, pitch, volume,
+        voice: voiceOverride || activePersona?.voice || "Amy",
+        persona: selectedPersona,           // label only — server doesn't override
+        speed, pitch, volume,                // exactly what's on the sliders
         output_format: outputFormat,
       });
       const out = await pollJob(job.job_id, setLoadingMsg);
@@ -492,40 +504,52 @@ function TTSControls({
           ))}
         </select>
         {persona && (
-          <p className="text-[10px] text-zinc-500 mt-2 leading-relaxed italic">{persona.description}</p>
+          <>
+            <p className="text-[10px] text-zinc-500 mt-2 leading-relaxed italic">{persona.description}</p>
+            <p className="text-[10px] text-zinc-600 mt-2 font-mono">
+              voice {persona.voice} · {persona.speed.toFixed(2)}x · {persona.pitch > 0 ? "+" : ""}{persona.pitch} st · {persona.volume.toFixed(2)}x vol
+            </p>
+          </>
         )}
-        <div className="flex gap-2 mt-3">
-          <Button variant="ghost" size="sm" className="flex-1" onClick={applyPersonaDefaults}>
-            <RotateCcw className="w-3 h-3 mr-1.5" /> Use Persona Defaults
-          </Button>
-        </div>
+        <Button variant="ghost" size="sm" className="w-full mt-3" onClick={applyPersonaDefaults}>
+          <RotateCcw className="w-3 h-3 mr-1.5" /> Reset to Persona
+        </Button>
       </Card>
 
       <Card>
-        <CardTitle className="text-sm mb-3">Voice</CardTitle>
-        <p className="text-[10px] text-zinc-500 mb-2">
-          Default for this persona: <span className="text-zinc-300 font-mono">{persona?.voice || "Amy"}</span>
-        </p>
-        <select value={voiceOverride}
+        <div className="flex items-center justify-between mb-3">
+          <CardTitle className="text-sm">Voice</CardTitle>
+          {persona && voiceOverride && voiceOverride !== persona.voice && (
+            <span className="text-[10px] text-amber-400/80">customised</span>
+          )}
+        </div>
+        <select value={voiceOverride || (persona?.voice || "Amy")}
           onChange={(e) => setVoiceOverride(e.target.value)}
           className="w-full bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:ring-2 focus:ring-indigo-500/50">
-          <option value="">— Use persona default —</option>
           {voices.map((v) => (
             <option key={v.id} value={v.id}>
               {v.id} · {v.accent} · {v.gender} ({v.quality})
             </option>
           ))}
         </select>
-        <p className="text-[10px] text-amber-500/70 mt-2 leading-relaxed">
-          First use of a new voice downloads ~30–80 MB from HuggingFace; subsequent runs are fast.
+        <p className="text-[10px] text-zinc-500 mt-2 leading-relaxed">
+          The persona auto-fills this picker; pick a different voice anytime.
+          First run with a new voice downloads ~30–80 MB from HuggingFace.
         </p>
       </Card>
 
       <Card>
         <div className="flex items-center justify-between mb-3">
-          <CardTitle className="text-sm">Voice Effects</CardTitle>
-          <Button variant="ghost" size="sm" onClick={resetSliders}>
-            <RotateCcw className="w-3 h-3 mr-1.5" /> Reset
+          <CardTitle className="text-sm">
+            Voice Effects
+            {persona && (Math.abs(speed - persona.speed) > 0.005 ||
+                         Math.abs(pitch - persona.pitch) > 0.05 ||
+                         Math.abs(volume - persona.volume) > 0.005) && (
+              <span className="text-[10px] text-amber-400/80 ml-2 font-normal">customised</span>
+            )}
+          </CardTitle>
+          <Button variant="ghost" size="sm" onClick={resetSliders} title="Set speed=1.0, pitch=0, volume=1.0">
+            <RotateCcw className="w-3 h-3 mr-1.5" /> 1:1
           </Button>
         </div>
         <Slider label="Speed" value={speed} min={0.5} max={2.0} step={0.05}

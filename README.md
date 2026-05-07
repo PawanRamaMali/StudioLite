@@ -21,6 +21,61 @@ A lightweight, web-based video editor and AI video generation studio built with 
 
 ---
 
+## UI Options: Streamlit vs Next.js
+
+StudioLite ships with **two front-ends** that share the underlying Python engines but cover different feature subsets.
+
+| UI | Default URL | Stack | Status |
+|----|-------------|-------|--------|
+| **Streamlit** (legacy) | http://localhost:8501 | `app.py` | Feature-complete (~20 tools) |
+| **Next.js** (modern) | http://localhost:3000 | `web/` + FastAPI `api_server.py` on :8000 | Curated subset focused on creative/GPU workflows |
+
+### Running both
+
+```bash
+# Streamlit
+streamlit run app.py
+
+# Next.js (two processes)
+python api_server.py            # FastAPI backend on :8000
+cd web && npm install && npm run dev   # Next.js dev server on :3000
+```
+
+### Feature coverage
+
+| Feature | Streamlit | Next.js |
+|---------|:---------:|:-------:|
+| Video Generator (T2V / I2V) | ✓ | ✓ |
+| Story Mode (multi-scene movies) | ✓ | ✓ |
+| Characters (portrait + IP-Adapter) | ✓ | ✓ |
+| Audio Studio (TTS) | ✓ | ✓ (TTS only) |
+| Audio Studio (SFX, voice isolation) | ✓ | stub — falls back to Streamlit |
+| Images Studio (T2I / edit / inpaint / upscale / bg-remove) | — | ✓ |
+| Jobs panel (live progress monitor) | — | ✓ |
+| Video Editor (region edits, filters) | ✓ | stub — punts to Streamlit |
+| Upscale Video | ✓ | stub (UI only, no handler) |
+| Keyframes | ✓ | stub (UI only, no handler) |
+| Trim / Cut | ✓ | API exists, no UI |
+| Merge Videos | ✓ | API exists, no UI |
+| Remove Watermark | ✓ | — |
+| Add Image Overlay | ✓ | — |
+| Change Speed | ✓ | — |
+| Extract Frame | ✓ | — |
+| Export Video (codec / resolution) | ✓ | — |
+| Transcribe (WhisperX) | ✓ | — |
+| View & Publish (YouTube OAuth) | ✓ | — |
+| Motion Brush | ✓ | — |
+| ReelForge (LLM-driven short videos) | ✓ | — |
+
+### Which one should I use?
+
+- **Streamlit** for: transcription, YouTube upload, watermark removal, frame/format export, image overlay, speed control, ReelForge, motion brush, video editor.
+- **Next.js** for: image generation, multi-scene story mode, character portraits, video gen, live job monitoring.
+
+Tracking work to close the gaps: see the GitHub issue **"Next.js UI feature parity with Streamlit"**.
+
+---
+
 ## Video Generator - AI Video Diffusion
 
 Video Generator creates **real AI-generated video** using state-of-the-art diffusion models. Unlike ReelForge (which stitches images), this generates actual motion video frame-by-frame.

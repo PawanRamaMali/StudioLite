@@ -5,7 +5,7 @@ import { Card, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Music, Mic, Headphones, Volume2, Waves, Loader2, Download, Play } from "lucide-react";
-import { generateTTS } from "@/lib/api";
+import { generateTTS, generateSFX, downloadBlob } from "@/lib/api";
 
 const SFX_CATEGORIES: Record<string, string[]> = {
   "Nature": ["rain", "thunder", "wind", "ocean_waves"],
@@ -22,28 +22,79 @@ const TTS_SAMPLES = [
   "Welcome to StudioLite, your personal AI video creation studio.",
 ];
 
+interface SfxResultMeta {
+  engine: string;
+  method: string;
+  sfx_type: string;
+  details: string;
+  duration: number;
+  channels: number;
+  sample_rate: number;
+}
+
 export default function AudioPanel() {
   const [mode, setMode] = useState<"sfx" | "tts" | "isolate" | "normalize">("sfx");
+  const [sfxMode, setSfxMode] = useState<"preset" | "prompt">("preset");
   const [selectedSfx, setSelectedSfx] = useState("rain");
+  const [sfxPrompt, setSfxPrompt] = useState("");
   const [sfxDuration, setSfxDuration] = useState(2);
   const [ttsText, setTtsText] = useState(TTS_SAMPLES[0]);
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
   const [resultUrl, setResultUrl] = useState<string | null>(null);
+  const [resultMeta, setResultMeta] = useState<SfxResultMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleGenerateSFX = async () => {
+    if (sfxMode === "prompt" && !sfxPrompt.trim()) {
+      setError("Enter a prompt or switch to Preset mode.");
+      return;
+    }
+    const label = sfxMode === "prompt" ? sfxPrompt.trim() : selectedSfx.replace(/_/g, " ");
     setLoading(true);
-    setLoadingMsg(`Generating ${selectedSfx.replace(/_/g, " ")} sound effect...`);
+    setLoadingMsg(`Generating ${label}...`);
     setError(null);
     setResultUrl(null);
+    setResultMeta(null);
     try {
-      // SFX is generated server-side - for now show feedback
-      await new Promise((r) => setTimeout(r, 1500));
-      setLoadingMsg("SFX generation requires the Streamlit backend. Use http://localhost:8501 > Audio Studio");
+      const job = await generateSFX(
+        sfxMode === "prompt"
+          ? { sfx_type: "", prompt: sfxPrompt.trim(), duration: sfxDuration }
+          : { sfx_type: selectedSfx, duration: sfxDuration }
+      );
+      setLoadingMsg(`Job ${job.job_id} - synthesizing...`);
+
+      const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const poll = setInterval(async () => {
+        try {
+          const res = await fetch(`${apiBase}/api/v1/jobs/${job.job_id}`);
+          const status = await res.json();
+          setLoadingMsg(status.message || "Processing...");
+          if (status.status === "completed") {
+            clearInterval(poll);
+            setResultUrl(`${apiBase}/api/v1/jobs/${job.job_id}/download?t=${Date.now()}`);
+            const r = status.result || {};
+            setResultMeta({
+              engine: r.engine || "unknown",
+              method: r.method || "Procedural synthesis",
+              sfx_type: r.sfx_type || selectedSfx,
+              details: r.details || "",
+              duration: r.duration || sfxDuration,
+              channels: r.channels || 1,
+              sample_rate: r.sample_rate || 22050,
+            });
+            setLoading(false);
+            setLoadingMsg("");
+          } else if (status.status === "failed") {
+            clearInterval(poll);
+            setError(status.error || "SFX generation failed");
+            setLoading(false);
+            setLoadingMsg("");
+          }
+        } catch { /* keep polling */ }
+      }, 800);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
-    } finally {
+      setError(e instanceof Error ? e.message : "Failed to start SFX job");
       setLoading(false);
       setLoadingMsg("");
     }
@@ -115,26 +166,56 @@ export default function AudioPanel() {
           {mode === "sfx" && (
             <>
               <Card>
-                <CardTitle className="text-sm mb-3">Sound Effects Library</CardTitle>
-                {Object.entries(SFX_CATEGORIES).map(([cat, effects]) => (
-                  <div key={cat} className="mb-3">
-                    <p className="text-[10px] text-zinc-500 uppercase font-semibold mb-1.5">{cat}</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {effects.map((sfx) => (
-                        <button key={sfx} onClick={() => setSelectedSfx(sfx)}
-                          className={`px-2.5 py-1 rounded-full text-xs transition-all ${
-                            selectedSfx === sfx ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700"
-                          }`}>
-                          {sfx.replace(/_/g, " ")}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ))}
+                <div className="flex gap-1 mb-3">
+                  <button onClick={() => setSfxMode("preset")}
+                    className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                      sfxMode === "preset" ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200"
+                    }`}>
+                    Preset
+                  </button>
+                  <button onClick={() => setSfxMode("prompt")}
+                    className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                      sfxMode === "prompt" ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200"
+                    }`}>
+                    Prompt
+                  </button>
+                </div>
+                {sfxMode === "preset" && (
+                  <>
+                    <CardTitle className="text-sm mb-3">Sound Effects Library</CardTitle>
+                    {Object.entries(SFX_CATEGORIES).map(([cat, effects]) => (
+                      <div key={cat} className="mb-3">
+                        <p className="text-[10px] text-zinc-500 uppercase font-semibold mb-1.5">{cat}</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {effects.map((sfx) => (
+                            <button key={sfx} onClick={() => setSelectedSfx(sfx)}
+                              className={`px-2.5 py-1 rounded-full text-xs transition-all ${
+                                selectedSfx === sfx ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700"
+                              }`}>
+                              {sfx.replace(/_/g, " ")}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </>
+                )}
+                {sfxMode === "prompt" && (
+                  <>
+                    <CardTitle className="text-sm mb-3">Describe the sound</CardTitle>
+                    <textarea value={sfxPrompt} onChange={(e) => setSfxPrompt(e.target.value)}
+                      placeholder="e.g. heavy rain on a tin roof, distant thunder rumble, crackling campfire..."
+                      className="w-full h-20 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 placeholder-zinc-600 focus:ring-2 focus:ring-indigo-500/50 resize-none" />
+                    <p className="text-[10px] text-zinc-500 mt-2 leading-relaxed">
+                      Keywords (rain, thunder, wind, fire, footsteps, etc.) are matched to a procedural preset.
+                      For a true text-to-audio AI model, install AudioLDM2 (~3 GB).
+                    </p>
+                  </>
+                )}
               </Card>
               <Card>
                 <label className="text-xs text-zinc-400">Duration: <span className="text-indigo-400 font-mono">{sfxDuration}s</span></label>
-                <input type="range" min={0.5} max={10} step={0.5} value={sfxDuration}
+                <input type="range" min={0.5} max={15} step={0.5} value={sfxDuration}
                   onChange={(e) => setSfxDuration(Number(e.target.value))} className="w-full mt-1 accent-indigo-500" />
               </Card>
               <Button className="w-full" onClick={handleGenerateSFX} disabled={loading}>
@@ -215,13 +296,39 @@ export default function AudioPanel() {
 
           {resultUrl && !loading && (
             <Card className="border-green-500/20 bg-green-500/5">
-              <p className="text-green-400 text-sm font-medium mb-3">Audio Generated!</p>
-              <audio src={resultUrl} controls className="w-full mb-3" />
-              <a href={resultUrl} download>
-                <Button variant="secondary" className="w-full">
-                  <Download className="w-4 h-4 mr-2" /> Download Audio
-                </Button>
-              </a>
+              <div className="flex items-start justify-between gap-3 mb-3">
+                <div>
+                  <p className="text-green-400 text-sm font-medium">
+                    {mode === "sfx"
+                      ? `${(resultMeta?.sfx_type || selectedSfx).replace(/_/g, " ")} (${(resultMeta?.duration ?? sfxDuration).toFixed(1)}s)`
+                      : "Audio Generated!"}
+                  </p>
+                  {mode === "sfx" && resultMeta && (
+                    <p className="text-[10px] text-zinc-500 mt-1 leading-relaxed">
+                      {resultMeta.method} · {resultMeta.engine} · {resultMeta.channels === 2 ? "stereo" : "mono"} @ {resultMeta.sample_rate} Hz
+                    </p>
+                  )}
+                </div>
+                {mode === "sfx" && resultMeta && (
+                  <Badge>{resultMeta.engine}</Badge>
+                )}
+              </div>
+              <audio key={resultUrl} src={resultUrl} controls autoPlay className="w-full mb-3" />
+              {mode === "sfx" && resultMeta?.details && (
+                <p className="text-[10px] text-zinc-600 mb-3 italic leading-relaxed">{resultMeta.details}</p>
+              )}
+              <Button
+                variant="secondary"
+                className="w-full"
+                onClick={() => {
+                  const fname = mode === "sfx"
+                    ? `${(resultMeta?.sfx_type || selectedSfx)}_${(resultMeta?.duration ?? sfxDuration).toFixed(1)}s.wav`
+                    : "tts.wav";
+                  downloadBlob(resultUrl, fname).catch((e) => setError(`Download failed: ${e.message}`));
+                }}
+              >
+                <Download className="w-4 h-4 mr-2" /> Download Audio
+              </Button>
             </Card>
           )}
 

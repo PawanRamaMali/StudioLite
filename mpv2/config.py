@@ -8,6 +8,32 @@ from termcolor import colored
 # ROOT_DIR = project root (StudioLite directory)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Auto-bootstrap config.json from config.example.json so a fresh checkout works.
+# Existing configs are never overwritten.
+def _bootstrap_config_if_missing():
+    cfg = os.path.join(ROOT_DIR, "config.json")
+    example = os.path.join(ROOT_DIR, "config.example.json")
+    if not os.path.exists(cfg) and os.path.exists(example):
+        try:
+            with open(example, "r", encoding="utf-8") as src:
+                data = src.read()
+            with open(cfg, "w", encoding="utf-8") as dst:
+                dst.write(data)
+        except OSError:
+            pass
+
+_bootstrap_config_if_missing()
+
+
+def _load_config() -> dict:
+    """Read config.json, returning {} if missing/unreadable instead of raising."""
+    path = os.path.join(ROOT_DIR, "config.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
 def assert_folder_structure() -> None:
     """
     Make sure that the nessecary folder structure is present.

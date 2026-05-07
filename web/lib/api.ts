@@ -64,6 +64,9 @@ export const generateStory = (params: Record<string, unknown>) =>
 export const generateTTS = (params: { text: string; voice?: string; engine?: string }) =>
   apiFetch<Job>("/api/v1/audio/tts", { method: "POST", body: JSON.stringify(params) });
 
+export const generateSFX = (params: { sfx_type: string; duration?: number }) =>
+  apiFetch<Job>("/api/v1/audio/sfx", { method: "POST", body: JSON.stringify(params) });
+
 // Characters
 export const generateCharacterPortrait = (params: {
   name: string;

@@ -176,6 +176,12 @@ class TTSRequest(BaseModel):
     engine: str = "piper"  # piper or kitten
 
 
+class SFXRequest(BaseModel):
+    sfx_type: str = ""  # one of generate_sfx_procedural's preset keys, or empty when using prompt
+    prompt: str = ""    # free-text description (matched to a preset by keyword)
+    duration: float = Field(default=2.0, ge=0.2, le=30.0)
+
+
 class TrimRequest(BaseModel):
     video_path: str
     start_time: float = Field(..., ge=0)
@@ -1020,6 +1026,33 @@ Return ONLY valid JSON (close all brackets):
         )
 
 
+def _run_sfx(job_id: str, req: SFXRequest):
+    try:
+        label = req.sfx_type or req.prompt or "sound effect"
+        _update_job(job_id, status="running", message=f"Generating {label} ({req.duration}s)...")
+        from audio_studio import generate_sfx
+
+        output_path = os.path.join(OUTPUT_DIR, f"sfx_{job_id}.wav")
+        info = generate_sfx(
+            sfx_type=req.sfx_type,
+            prompt=req.prompt,
+            duration=req.duration,
+            output_path=output_path,
+        )
+        if not info or not os.path.isfile(info["path"]):
+            raise RuntimeError("SFX generator returned no file")
+
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message=f"{info['sfx_type']} ready ({info['method']}, {info['channels']}ch @ {info['sample_rate']}Hz)",
+            result={"audio_path": info["path"], **info},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"SFX failed: {exc}")
+
+
 def _run_tts(job_id: str, req: TTSRequest):
     try:
         _update_job(job_id, status="running", message="Initializing TTS engine...")
@@ -1715,6 +1748,15 @@ async def text_to_speech(req: TTSRequest, background_tasks: BackgroundTasks):
 
     job_id = _create_job("tts", req.model_dump())
     thread = threading.Thread(target=_run_tts, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/audio/sfx", response_model=JobResponse)
+async def generate_sfx(req: SFXRequest, background_tasks: BackgroundTasks):
+    """Generate a procedural sound effect (rain, thunder, etc.) as a .wav file."""
+    job_id = _create_job("sfx", req.model_dump())
+    thread = threading.Thread(target=_run_sfx, args=(job_id, req), daemon=True)
     thread.start()
     return _job_response(job_id)
 

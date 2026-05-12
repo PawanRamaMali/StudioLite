@@ -1,0 +1,8 @@
+# Force LF for shell scripts so they remain executable on Linux/macOS even
+# when the repo is cloned on Windows with autocrlf=true.
+*.sh text eol=lf
+
+# Windows-native scripts always use CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf

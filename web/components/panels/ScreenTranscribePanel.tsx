@@ -43,8 +43,10 @@ function fmtClock(seconds: number): string {
 export default function ScreenTranscribePanel() {
   const [source, setSource] = useState<"browser" | "local">("browser");
   const [fps, setFps] = useState(1);
-  const [confidence, setConfidence] = useState(0.5);
+  const [confidence, setConfidence] = useState(0.6);
   const [diff, setDiff] = useState(4);
+  const [maxRepeats, setMaxRepeats] = useState(2);
+  const [dropGarbage, setDropGarbage] = useState(true);
   const [monitors, setMonitors] = useState<Monitor[]>([]);
   const [monitor, setMonitor] = useState<number>(1);
 
@@ -122,6 +124,8 @@ export default function ScreenTranscribePanel() {
         source,
         confidence: String(confidence),
         diff: String(diff),
+        max_repeats: String(maxRepeats),
+        drop_garbage: dropGarbage ? "1" : "0",
       });
       if (source === "local") {
         qp.set("monitor", String(monitor));
@@ -247,7 +251,7 @@ export default function ScreenTranscribePanel() {
       setStatus("error");
       cleanup();
     }
-  }, [source, fps, confidence, diff, monitor, status, cleanup]);
+  }, [source, fps, confidence, diff, maxRepeats, dropGarbage, monitor, status, cleanup]);
 
   const stop = useCallback(() => {
     if (!["running", "loading-model"].includes(status)) return;
@@ -409,6 +413,30 @@ export default function ScreenTranscribePanel() {
                 />
                 <p className="text-[10px] text-zinc-500 mt-1">Skip OCR when perceptual-hash diff is below this (0 = always OCR).</p>
               </div>
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[11px] text-zinc-400">Suppress repeats after</label>
+                  <span className="text-[11px] font-mono text-zinc-300">{maxRepeats}x</span>
+                </div>
+                <input
+                  type="range" min={1} max={10} step={1}
+                  value={maxRepeats}
+                  disabled={active}
+                  onChange={(e) => setMaxRepeats(Number(e.target.value))}
+                  className="w-full accent-indigo-500"
+                />
+                <p className="text-[10px] text-zinc-500 mt-1">Stop emitting a line after it appears this many times (kills browser/Office chrome).</p>
+              </div>
+              <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={dropGarbage}
+                  disabled={active}
+                  onChange={(e) => setDropGarbage(e.target.checked)}
+                  className="accent-indigo-500"
+                />
+                Drop URLs, icon misreads, and symbol-only lines
+              </label>
             </div>
           </Card>
 

@@ -2811,8 +2811,10 @@ async def live_screen_ws(websocket: WebSocket):
     qp = websocket.query_params
     session_id = qp.get("session") or str(uuid.uuid4())
     source = (qp.get("source") or "browser").lower()
-    confidence = float(qp.get("confidence") or 0.5)
+    confidence = float(qp.get("confidence") or 0.6)
     diff = int(qp.get("diff") or 4)
+    max_repeats = int(qp.get("max_repeats") or 2)
+    drop_garbage = (qp.get("drop_garbage") or "1") != "0"
     monitor = int(qp.get("monitor") or 1)
     fps = float(qp.get("fps") or 1.0)
     fps = max(0.2, min(fps, 5.0))
@@ -2907,6 +2909,8 @@ async def live_screen_ws(websocket: WebSocket):
             transcripts_dir=SCREEN_TRANSCRIPTS_DIR,
             confidence_floor=confidence,
             frame_diff_threshold=diff,
+            max_repeats=max_repeats,
+            drop_garbage=drop_garbage,
         )
         await websocket.send_json({
             "type": "ready",

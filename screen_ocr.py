@@ -28,7 +28,9 @@ import io
 import json
 import logging
 import os
+import re
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -109,6 +111,40 @@ def _line_similar(a: str, b: str, threshold: float) -> bool:
     return SequenceMatcher(None, a, b).ratio() >= threshold
 
 
+_URL_RE = re.compile(r"https?://\S+", re.I)
+_WS_RE = re.compile(r"\s+")
+
+
+def _normalize_for_dedup(text: str) -> str:
+    """Collapse whitespace and lowercase so exact-repeat detection is robust
+    to OCR jitter that flips spacing but keeps the characters."""
+    return _WS_RE.sub(" ", text).strip().lower()
+
+
+def _is_garbage(text: str) -> bool:
+    """Drop lines that aren't worth surfacing - browser/Office chrome misreads,
+    URLs (which are visual noise in OCR), and single-glyph icons that
+    confidently OCR to a single Chinese/symbol character."""
+    s = text.strip()
+    if not s:
+        return True
+    if len(s) < 3:
+        # 1-2 character lines are almost always icon misreads like 'X', '十',
+        # 'W', 'C'. Keep them only if they look like a real token (a digit
+        # paired with a letter, e.g. 'v3').
+        if not (any(c.isalpha() for c in s) and any(c.isdigit() for c in s)):
+            return True
+    # URL-dominated line
+    url_chars = sum(len(m.group(0)) for m in _URL_RE.finditer(s))
+    if url_chars and url_chars / len(s) >= 0.5:
+        return True
+    # Mostly non-alphanumeric: ribbon icons like '三V三三=田' or 'A☆'
+    alnum = sum(c.isalnum() for c in s)
+    if alnum / max(1, len(s)) < 0.4:
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Live screen OCR pipeline
 # ---------------------------------------------------------------------------
@@ -142,10 +178,12 @@ class LiveScreenOCR:
         transcripts_dir: str,
         engine: str = "rapidocr",
         language: Optional[str] = None,
-        confidence_floor: float = 0.5,
+        confidence_floor: float = 0.6,
         frame_diff_threshold: int = 4,
         dedup_similarity: float = 0.85,
-        dedup_window: int = 20,
+        dedup_window: int = 80,
+        max_repeats: int = 2,
+        drop_garbage: bool = True,
         roi: Optional[Tuple[int, int, int, int]] = None,
     ):
         self.session_id = session_id
@@ -158,6 +196,8 @@ class LiveScreenOCR:
         self.frame_diff_threshold = int(frame_diff_threshold)
         self.dedup_similarity = float(dedup_similarity)
         self.dedup_window = int(dedup_window)
+        self.max_repeats = max(1, int(max_repeats))
+        self.drop_garbage = bool(drop_garbage)
         self.roi = roi  # (left, top, right, bottom) in image coords, or None
 
         self.start_time = time.time()
@@ -166,7 +206,17 @@ class LiveScreenOCR:
 
         # Rolling window of recent emitted text for fuzzy dedup
         self._recent_lines: List[str] = []
+        # Session-wide exact-repeat counter (normalized text -> seen count).
+        # Anything that hits self.max_repeats stops being emitted for the rest
+        # of the session, which is what kills the per-page browser/Office
+        # chrome ("File Home Insert...", URL bar, footer, etc.).
+        self._seen_count: Dict[str, int] = defaultdict(int)
         self._all_lines: List[_EmittedLine] = []
+        # Stats for filtered-out categories
+        self.lines_dropped_garbage = 0
+        self.lines_dropped_repeat = 0
+        self.lines_dropped_fuzzy = 0
+        self.lines_dropped_conf = 0
 
         self.txt_path = os.path.join(transcripts_dir, f"{session_id}.txt")
         self.json_path = os.path.join(transcripts_dir, f"{session_id}.json")
@@ -248,9 +298,25 @@ class LiveScreenOCR:
             except Exception:
                 conf = 0.0
             if not text or conf < self.confidence_floor:
+                self.lines_dropped_conf += 1
                 continue
-            if self._is_duplicate(text):
+            if self.drop_garbage and _is_garbage(text):
+                self.lines_dropped_garbage += 1
                 continue
+            norm = _normalize_for_dedup(text)
+            # Exact-repeat cap - kills per-frame chrome (URL bar, ribbon,
+            # tab title, page number) once we've seen it max_repeats times.
+            if self._seen_count[norm] >= self.max_repeats:
+                self._seen_count[norm] += 1  # still count it for stats
+                self.lines_dropped_repeat += 1
+                continue
+            # Fuzzy match against the rolling window catches OCR drift
+            # ("Editot" right after "Editor") and partial scroll re-emits.
+            if any(_line_similar(prev, text, self.dedup_similarity)
+                   for prev in self._recent_lines[-self.dedup_window:]):
+                self.lines_dropped_fuzzy += 1
+                continue
+            self._seen_count[norm] += 1
             line = _EmittedLine(t=now, text=text, conf=conf, bbox=bbox if isinstance(bbox, list) else [])
             self._record(line)
             new_lines.append({"t": line.t, "text": line.text, "conf": line.conf, "bbox": line.bbox})
@@ -270,6 +336,10 @@ class LiveScreenOCR:
                 "frames_ocred": self.frames_ocred,
                 "frames_skipped": self.frames_skipped,
                 "lines_emitted": len(self._all_lines),
+                "lines_dropped_conf": self.lines_dropped_conf,
+                "lines_dropped_garbage": self.lines_dropped_garbage,
+                "lines_dropped_repeat": self.lines_dropped_repeat,
+                "lines_dropped_fuzzy": self.lines_dropped_fuzzy,
             },
         }
 
@@ -280,12 +350,6 @@ class LiveScreenOCR:
         }
 
     # --- internals --------------------------------------------------------
-
-    def _is_duplicate(self, text: str) -> bool:
-        for prev in self._recent_lines[-self.dedup_window:]:
-            if _line_similar(prev, text, self.dedup_similarity):
-                return True
-        return False
 
     def _record(self, line: _EmittedLine) -> None:
         self._all_lines.append(line)

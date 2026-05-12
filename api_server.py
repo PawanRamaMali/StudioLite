@@ -192,6 +192,15 @@ class SFXRequest(BaseModel):
     duration: float = Field(default=2.0, ge=0.2, le=30.0)
 
 
+class RestructureRequest(BaseModel):
+    session_id: str
+    model: str
+    style: str = "cleanup"
+    custom_prompt: Optional[str] = None
+    title: Optional[str] = None
+    temperature: float = Field(default=0.2, ge=0.0, le=1.5)
+
+
 class TrimRequest(BaseModel):
     video_path: str
     start_time: float = Field(..., ge=0)
@@ -2772,6 +2781,87 @@ async def screen_monitors():
     """List monitors available to the server for local screen capture."""
     from screen_ocr import enumerate_monitors
     return {"monitors": enumerate_monitors()}
+
+
+# ---------------------------------------------------------------------------
+# Local LLM post-processing (Restructure with LLM)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/llm/models")
+async def llm_models():
+    """Probe the local Ollama instance and return its installed models +
+    the style presets the UI should expose."""
+    from llm_filter import is_ollama_reachable, list_models, list_styles, OLLAMA_HOST, DEFAULT_MODEL
+    reachable = is_ollama_reachable()
+    return {
+        "available": reachable,
+        "host": OLLAMA_HOST,
+        "default_model": DEFAULT_MODEL,
+        "models": list_models() if reachable else [],
+        "styles": list_styles(),
+    }
+
+
+@app.post("/api/v1/screen/restructure")
+async def screen_restructure(req: RestructureRequest):
+    """Run the saved screen-transcript text through the chosen Ollama model
+    with a style preset (or a custom prompt), then render Markdown / DOCX / PDF."""
+    import asyncio
+    from llm_filter import restructure
+    from doc_writer import markdown_to_docx, markdown_to_pdf
+
+    txt_path = os.path.join(SCREEN_TRANSCRIPTS_DIR, f"{req.session_id}.txt")
+    if not os.path.isfile(txt_path):
+        raise HTTPException(status_code=404, detail=f"session not found: {req.session_id}")
+    with open(txt_path, encoding="utf-8") as f:
+        raw = f.read()
+    if not raw.strip():
+        raise HTTPException(status_code=400, detail="session transcript is empty")
+
+    try:
+        result = await asyncio.to_thread(
+            restructure,
+            raw,
+            model=req.model,
+            style=req.style,
+            custom_prompt=req.custom_prompt,
+            temperature=req.temperature,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    md = result["markdown"]
+    if not md.strip():
+        raise HTTPException(status_code=502, detail="Model returned an empty response.")
+
+    base = os.path.join(SCREEN_TRANSCRIPTS_DIR, f"{req.session_id}.restructured")
+    md_path = base + ".md"
+    docx_path = base + ".docx"
+    pdf_path = base + ".pdf"
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(md)
+
+    title = req.title or f"Restructured: {req.session_id}"
+    await asyncio.to_thread(markdown_to_docx, md, docx_path, title)
+    await asyncio.to_thread(markdown_to_pdf, md, pdf_path, title)
+
+    return {
+        "markdown": md,
+        "stats": {
+            "input_chars": result["input_chars"],
+            "output_chars": result["output_chars"],
+            "elapsed_seconds": result["elapsed"],
+        },
+        "model": result["model"],
+        "style": result["style"],
+        "files": {
+            "md": f"/static/screen_transcripts/{req.session_id}.restructured.md",
+            "docx": f"/static/screen_transcripts/{req.session_id}.restructured.docx",
+            "pdf": f"/static/screen_transcripts/{req.session_id}.restructured.pdf",
+        },
+    }
 
 
 @app.websocket("/api/v1/screen/live")

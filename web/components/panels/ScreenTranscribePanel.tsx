@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import {
   MonitorPlay, ScanText, Square, Download, Loader2, AlertCircle,
-  Copy, Check, Server,
+  Copy, Check, Server, Sparkles, FileText, FileCode2,
 } from "lucide-react";
 
 type Line = { t: number; text: string; conf: number; bbox?: number[][] };
@@ -20,6 +20,16 @@ type ServerMsg =
   | { type: "error"; message: string };
 
 type Monitor = { index: number; label: string; left: number; top: number; width: number; height: number };
+type LLMModel = { name: string; size_gb: number; family?: string; parameter_size?: string; quantization?: string };
+type Style = { id: string; label: string; description: string };
+type LLMCatalog = { available: boolean; host: string; default_model: string; models: LLMModel[]; styles: Style[] };
+type RestructureResult = {
+  markdown: string;
+  stats: { input_chars: number; output_chars: number; elapsed_seconds: number };
+  model: string;
+  style: string;
+  files: { md: string; docx: string; pdf: string };
+};
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const WS_BASE = API_BASE.replace(/^http/, "ws");
@@ -59,6 +69,16 @@ export default function ScreenTranscribePanel() {
   const [framesSkipped, setFramesSkipped] = useState(0);
   const [downloads, setDownloads] = useState<{ txt: string; json: string } | null>(null);
   const [copied, setCopied] = useState<"all" | "last5" | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+
+  // Restructure-with-LLM state
+  const [llmCatalog, setLlmCatalog] = useState<LLMCatalog | null>(null);
+  const [llmModel, setLlmModel] = useState<string>("");
+  const [llmStyle, setLlmStyle] = useState<string>("cleanup");
+  const [customPrompt, setCustomPrompt] = useState<string>("");
+  const [llmBusy, setLlmBusy] = useState(false);
+  const [llmError, setLlmError] = useState<string | null>(null);
+  const [llmResult, setLlmResult] = useState<RestructureResult | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -92,6 +112,53 @@ export default function ScreenTranscribePanel() {
     return () => { cancelled = true; };
   }, []);
 
+  // Load the Ollama catalog as soon as the session completes - cheap, and
+  // shows a useful error if Ollama isn't running before the user clicks.
+  useEffect(() => {
+    if (status !== "complete") return;
+    let cancelled = false;
+    fetch(`${API_BASE}/api/v1/llm/models`)
+      .then((r) => r.json())
+      .then((data: LLMCatalog) => {
+        if (cancelled) return;
+        setLlmCatalog(data);
+        const pref = data.default_model;
+        const pick = data.models.find((m) => m.name === pref) || data.models[0];
+        if (pick) setLlmModel(pick.name);
+      })
+      .catch(() => { /* show 'Ollama unreachable' via llmCatalog === null fallback */ });
+    return () => { cancelled = true; };
+  }, [status]);
+
+  const runRestructure = useCallback(async () => {
+    if (!sessionId || !llmModel) return;
+    setLlmBusy(true);
+    setLlmError(null);
+    setLlmResult(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/screen/restructure`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sessionId,
+          model: llmModel,
+          style: llmStyle,
+          custom_prompt: llmStyle === "custom" ? customPrompt : null,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+      const data: RestructureResult = await res.json();
+      setLlmResult(data);
+    } catch (e) {
+      setLlmError(e instanceof Error ? e.message : "Restructure failed");
+    } finally {
+      setLlmBusy(false);
+    }
+  }, [sessionId, llmModel, llmStyle, customPrompt]);
+
   const cleanup = useCallback(() => {
     if (sendIntervalRef.current !== null) {
       window.clearInterval(sendIntervalRef.current);
@@ -119,6 +186,9 @@ export default function ScreenTranscribePanel() {
 
     try {
       const session = `screen-${Date.now()}`;
+      setSessionId(session);
+      setLlmResult(null);
+      setLlmError(null);
       const qp = new URLSearchParams({
         session,
         source,
@@ -577,6 +647,153 @@ export default function ScreenTranscribePanel() {
                 >
                   <Download className="w-3.5 h-3.5 mr-1.5" /> .json (boxes + conf)
                 </Button>
+              </div>
+            </Card>
+          )}
+
+          {status === "complete" && sessionId && (
+            <Card>
+              <div className="flex items-center justify-between mb-3 gap-2">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-indigo-400" /> Restructure with LLM
+                </CardTitle>
+                {llmCatalog && (
+                  <span className={`text-[10px] ${llmCatalog.available ? "text-green-400" : "text-amber-400"}`}>
+                    {llmCatalog.available
+                      ? `Ollama @ ${llmCatalog.host}`
+                      : `Ollama unreachable @ ${llmCatalog.host}`}
+                  </span>
+                )}
+              </div>
+
+              {!llmCatalog && (
+                <p className="text-xs text-zinc-500">Checking Ollama...</p>
+              )}
+
+              {llmCatalog && !llmCatalog.available && (
+                <div className="text-xs text-amber-300 space-y-2">
+                  <p>Ollama isn&apos;t running. Start it and reload this panel:</p>
+                  <pre className="text-[10px] font-mono bg-zinc-900/60 border border-zinc-800 rounded p-2 overflow-x-auto">ollama serve
+ollama pull llama3.2</pre>
+                </div>
+              )}
+
+              {llmCatalog?.available && llmCatalog.models.length === 0 && (
+                <div className="text-xs text-amber-300 space-y-2">
+                  <p>Ollama is running but has no models installed. Pull one first:</p>
+                  <pre className="text-[10px] font-mono bg-zinc-900/60 border border-zinc-800 rounded p-2 overflow-x-auto">ollama pull llama3.2</pre>
+                </div>
+              )}
+
+              {llmCatalog?.available && llmCatalog.models.length > 0 && (
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-[10px] text-zinc-500 block mb-1">Model</label>
+                    <select
+                      value={llmModel}
+                      disabled={llmBusy}
+                      onChange={(e) => setLlmModel(e.target.value)}
+                      className="w-full bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:ring-2 focus:ring-indigo-500/50 disabled:opacity-50"
+                    >
+                      {llmCatalog.models.map((m) => (
+                        <option key={m.name} value={m.name}>
+                          {m.name}{m.parameter_size ? `  -  ${m.parameter_size}` : ""}{m.quantization ? `  -  ${m.quantization}` : ""}{m.size_gb ? `  -  ${m.size_gb} GB` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] text-zinc-500 block mb-1">Style</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {llmCatalog.styles.map((s) => (
+                        <button
+                          key={s.id}
+                          type="button"
+                          disabled={llmBusy}
+                          onClick={() => setLlmStyle(s.id)}
+                          title={s.description}
+                          className={`text-left px-3 py-2 rounded-lg border transition-all text-xs ${
+                            llmStyle === s.id
+                              ? "bg-indigo-600/15 border-indigo-500/40 text-indigo-200"
+                              : "bg-zinc-800/40 border-zinc-700 text-zinc-300 hover:border-zinc-600"
+                          } ${llmBusy ? "opacity-50 cursor-not-allowed" : ""}`}
+                        >
+                          <p className="font-medium">{s.label}</p>
+                          <p className="text-[10px] text-zinc-500 mt-0.5 leading-snug line-clamp-2">{s.description}</p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {llmStyle === "custom" && (
+                    <div>
+                      <label className="text-[10px] text-zinc-500 block mb-1">Custom system prompt</label>
+                      <textarea
+                        value={customPrompt}
+                        disabled={llmBusy}
+                        rows={5}
+                        onChange={(e) => setCustomPrompt(e.target.value)}
+                        placeholder="You are a helpful editor. Rewrite the input as..."
+                        className="w-full bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 font-mono focus:ring-2 focus:ring-indigo-500/50 disabled:opacity-50"
+                      />
+                      <p className="text-[10px] text-zinc-500 mt-1">This is sent as the system message. The transcript text is the user message.</p>
+                    </div>
+                  )}
+
+                  <Button
+                    className="w-full"
+                    onClick={runRestructure}
+                    disabled={llmBusy || !llmModel || (llmStyle === "custom" && !customPrompt.trim())}
+                  >
+                    {llmBusy ? (
+                      <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Restructuring with {llmModel}...</>
+                    ) : (
+                      <><Sparkles className="w-4 h-4 mr-2" /> Restructure</>
+                    )}
+                  </Button>
+
+                  {llmError && (
+                    <div className="flex items-start gap-2 text-xs text-red-300 bg-red-500/5 border border-red-500/30 rounded-lg p-2">
+                      <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                      <p className="leading-relaxed">{llmError}</p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </Card>
+          )}
+
+          {llmResult && (
+            <Card className="border-indigo-500/20 bg-indigo-500/5">
+              <div className="flex items-center justify-between mb-3 gap-2">
+                <p className="text-indigo-300 text-sm font-medium">Restructured</p>
+                <span className="text-[10px] text-zinc-500 font-mono">
+                  {llmResult.stats.input_chars}c &rarr; {llmResult.stats.output_chars}c in {llmResult.stats.elapsed_seconds.toFixed(1)}s
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-2 mb-3">
+                <Button
+                  variant="secondary" size="sm"
+                  onClick={() => downloadFile(llmResult.files.md, llmResult.files.md.split("/").pop() || "restructured.md")}
+                >
+                  <FileCode2 className="w-3.5 h-3.5 mr-1.5" /> .md
+                </Button>
+                <Button
+                  variant="secondary" size="sm"
+                  onClick={() => downloadFile(llmResult.files.docx, llmResult.files.docx.split("/").pop() || "restructured.docx")}
+                >
+                  <FileText className="w-3.5 h-3.5 mr-1.5" /> .docx
+                </Button>
+                <Button
+                  variant="secondary" size="sm"
+                  onClick={() => downloadFile(llmResult.files.pdf, llmResult.files.pdf.split("/").pop() || "restructured.pdf")}
+                >
+                  <FileText className="w-3.5 h-3.5 mr-1.5" /> .pdf
+                </Button>
+              </div>
+              <div className="bg-zinc-950/70 border border-zinc-800 rounded-lg p-3 max-h-[40vh] overflow-y-auto">
+                <pre className="text-xs text-zinc-300 whitespace-pre-wrap font-mono leading-relaxed">{llmResult.markdown}</pre>
               </div>
             </Card>
           )}

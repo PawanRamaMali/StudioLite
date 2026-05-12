@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import {
   MonitorPlay, ScanText, Square, Download, Loader2, AlertCircle,
-  Copy, Check, Server, Sparkles, FileText, FileCode2,
+  Copy, Check, Server, Sparkles, FileText, FileCode2, RefreshCw, Settings2,
 } from "lucide-react";
 
 type Line = { t: number; text: string; conf: number; bbox?: number[][] };
@@ -22,7 +22,15 @@ type ServerMsg =
 type Monitor = { index: number; label: string; left: number; top: number; width: number; height: number };
 type LLMModel = { name: string; size_gb: number; family?: string; parameter_size?: string; quantization?: string };
 type Style = { id: string; label: string; description: string };
-type LLMCatalog = { available: boolean; host: string; default_model: string; models: LLMModel[]; styles: Style[] };
+type LLMCatalog = {
+  available: boolean;
+  host: string;
+  default_host?: string;
+  default_model: string;
+  models: LLMModel[];
+  styles: Style[];
+  error?: string;
+};
 type RestructureResult = {
   markdown: string;
   stats: { input_chars: number; output_chars: number; elapsed_seconds: number };
@@ -79,6 +87,10 @@ export default function ScreenTranscribePanel() {
   const [llmBusy, setLlmBusy] = useState(false);
   const [llmError, setLlmError] = useState<string | null>(null);
   const [llmResult, setLlmResult] = useState<RestructureResult | null>(null);
+  const [llmRefreshing, setLlmRefreshing] = useState(false);
+  const [llmHost, setLlmHost] = useState("");          // empty -> server default
+  const [llmHostInput, setLlmHostInput] = useState(""); // controlled input
+  const [llmShowAdvanced, setLlmShowAdvanced] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -112,23 +124,45 @@ export default function ScreenTranscribePanel() {
     return () => { cancelled = true; };
   }, []);
 
-  // Load the Ollama catalog as soon as the session completes - cheap, and
-  // shows a useful error if Ollama isn't running before the user clicks.
+  const refreshLlmCatalog = useCallback(async (hostOverride?: string) => {
+    setLlmRefreshing(true);
+    const targetHost = hostOverride ?? llmHost;
+    const url = targetHost
+      ? `${API_BASE}/api/v1/llm/models?host=${encodeURIComponent(targetHost)}`
+      : `${API_BASE}/api/v1/llm/models`;
+    try {
+      const r = await fetch(url, { cache: "no-store" });
+      if (!r.ok) throw new Error(`HTTP ${r.status} - this build may not have the LLM endpoints. Restart the API server.`);
+      const data: LLMCatalog = await r.json();
+      // Reject responses that don't look like a real catalog (e.g., a 404 body
+      // from an older API build that happens to parse as JSON).
+      if (typeof data.host !== "string" || !Array.isArray(data.styles)) {
+        throw new Error("API returned an unexpected response. Restart the API server to pick up the latest build.");
+      }
+      setLlmCatalog(data);
+      const pref = data.default_model;
+      const pick = data.models.find((m) => m.name === pref) || data.models[0];
+      if (pick) setLlmModel(pick.name);
+    } catch (e) {
+      // Set a fallback catalog so the UI always has something to show
+      setLlmCatalog({
+        available: false,
+        host: targetHost || `${API_BASE} (default)`,
+        default_model: "",
+        models: [],
+        styles: [],
+        error: e instanceof Error ? e.message : "fetch failed",
+      });
+    } finally {
+      setLlmRefreshing(false);
+    }
+  }, [llmHost]);
+
+  // Load the Ollama catalog as soon as the session completes
   useEffect(() => {
     if (status !== "complete") return;
-    let cancelled = false;
-    fetch(`${API_BASE}/api/v1/llm/models`)
-      .then((r) => r.json())
-      .then((data: LLMCatalog) => {
-        if (cancelled) return;
-        setLlmCatalog(data);
-        const pref = data.default_model;
-        const pick = data.models.find((m) => m.name === pref) || data.models[0];
-        if (pick) setLlmModel(pick.name);
-      })
-      .catch(() => { /* show 'Ollama unreachable' via llmCatalog === null fallback */ });
-    return () => { cancelled = true; };
-  }, [status]);
+    refreshLlmCatalog();
+  }, [status, refreshLlmCatalog]);
 
   const runRestructure = useCallback(async () => {
     if (!sessionId || !llmModel) return;
@@ -144,6 +178,7 @@ export default function ScreenTranscribePanel() {
           model: llmModel,
           style: llmStyle,
           custom_prompt: llmStyle === "custom" ? customPrompt : null,
+          host: llmHost || null,
         }),
       });
       if (!res.ok) {
@@ -157,7 +192,7 @@ export default function ScreenTranscribePanel() {
     } finally {
       setLlmBusy(false);
     }
-  }, [sessionId, llmModel, llmStyle, customPrompt]);
+  }, [sessionId, llmModel, llmStyle, customPrompt, llmHost]);
 
   const cleanup = useCallback(() => {
     if (sendIntervalRef.current !== null) {
@@ -653,34 +688,107 @@ export default function ScreenTranscribePanel() {
 
           {status === "complete" && sessionId && (
             <Card>
-              <div className="flex items-center justify-between mb-3 gap-2">
+              <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
                 <CardTitle className="text-sm flex items-center gap-2">
                   <Sparkles className="w-4 h-4 text-indigo-400" /> Restructure with LLM
                 </CardTitle>
-                {llmCatalog && (
-                  <span className={`text-[10px] ${llmCatalog.available ? "text-green-400" : "text-amber-400"}`}>
-                    {llmCatalog.available
-                      ? `Ollama @ ${llmCatalog.host}`
-                      : `Ollama unreachable @ ${llmCatalog.host}`}
-                  </span>
-                )}
+                <div className="flex items-center gap-2">
+                  {llmCatalog && (
+                    <span className={`text-[10px] ${llmCatalog.available ? "text-green-400" : "text-amber-400"}`}>
+                      {llmCatalog.available ? "Ollama" : "Ollama unreachable"} @ {llmCatalog.host}
+                    </span>
+                  )}
+                  <Button
+                    variant="secondary" size="sm"
+                    onClick={() => refreshLlmCatalog()}
+                    disabled={llmRefreshing || llmBusy}
+                    title="Re-probe Ollama"
+                  >
+                    {llmRefreshing
+                      ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      : <RefreshCw className="w-3.5 h-3.5" />}
+                  </Button>
+                  <Button
+                    variant="secondary" size="sm"
+                    onClick={() => setLlmShowAdvanced((v) => !v)}
+                    title="Advanced - point at a different Ollama host"
+                  >
+                    <Settings2 className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
               </div>
+
+              {llmShowAdvanced && (
+                <div className="mb-3 p-3 bg-zinc-900/40 border border-zinc-800 rounded-lg space-y-2">
+                  <label className="text-[10px] text-zinc-500 block">Ollama host</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={llmHostInput}
+                      placeholder={llmCatalog?.default_host || "http://localhost:11434"}
+                      onChange={(e) => setLlmHostInput(e.target.value)}
+                      disabled={llmRefreshing || llmBusy}
+                      className="flex-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs font-mono text-zinc-200 focus:ring-2 focus:ring-indigo-500/50 disabled:opacity-50"
+                    />
+                    <Button
+                      variant="secondary" size="sm"
+                      onClick={() => {
+                        const h = llmHostInput.trim();
+                        setLlmHost(h);
+                        refreshLlmCatalog(h);
+                      }}
+                      disabled={llmRefreshing || llmBusy}
+                    >
+                      Apply
+                    </Button>
+                    {llmHost && (
+                      <Button
+                        variant="secondary" size="sm"
+                        onClick={() => {
+                          setLlmHost("");
+                          setLlmHostInput("");
+                          refreshLlmCatalog("");
+                        }}
+                        disabled={llmRefreshing || llmBusy}
+                        title="Reset to server default"
+                      >
+                        Reset
+                      </Button>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-zinc-500 leading-snug">
+                    Override the Ollama URL. Leave blank to use the server&apos;s default
+                    ({llmCatalog?.default_host || "set by OLLAMA_HOST env var, fallback http://localhost:11434"}).
+                  </p>
+                </div>
+              )}
 
               {!llmCatalog && (
                 <p className="text-xs text-zinc-500">Checking Ollama...</p>
               )}
 
-              {llmCatalog && !llmCatalog.available && (
+              {llmCatalog?.error && (
+                <div className="mb-3 text-xs text-red-300 bg-red-500/5 border border-red-500/30 rounded-lg p-2">
+                  <p className="font-medium mb-1">Could not reach the API:</p>
+                  <p className="text-[11px] leading-relaxed">{llmCatalog.error}</p>
+                </div>
+              )}
+
+              {llmCatalog && !llmCatalog.available && !llmCatalog.error && (
                 <div className="text-xs text-amber-300 space-y-2">
-                  <p>Ollama isn&apos;t running. Start it and reload this panel:</p>
+                  <p>Ollama isn&apos;t running at <code className="text-amber-200">{llmCatalog.host}</code>. Start it then click the refresh icon above:</p>
                   <pre className="text-[10px] font-mono bg-zinc-900/60 border border-zinc-800 rounded p-2 overflow-x-auto">ollama serve
 ollama pull llama3.2</pre>
+                  <p className="text-[10px] text-zinc-500">
+                    On Windows, opening the Ollama tray app starts the server. If your Ollama runs elsewhere,
+                    use the gear icon to set a custom host.
+                  </p>
                 </div>
               )}
 
               {llmCatalog?.available && llmCatalog.models.length === 0 && (
                 <div className="text-xs text-amber-300 space-y-2">
-                  <p>Ollama is running but has no models installed. Pull one first:</p>
+                  <p>Ollama is running at <code className="text-amber-200">{llmCatalog.host}</code> but has no models installed. Pull one first, then refresh:</p>
                   <pre className="text-[10px] font-mono bg-zinc-900/60 border border-zinc-800 rounded p-2 overflow-x-auto">ollama pull llama3.2</pre>
                 </div>
               )}

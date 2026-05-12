@@ -114,31 +114,35 @@ def list_styles() -> List[Dict[str, str]]:
 # Ollama plumbing
 # ---------------------------------------------------------------------------
 
-def _client():
+def _resolve_host(host: Optional[str]) -> str:
+    return (host or OLLAMA_HOST).strip().rstrip("/")
+
+
+def _client(host: Optional[str] = None):
     import ollama
-    return ollama.Client(host=OLLAMA_HOST)
+    return ollama.Client(host=_resolve_host(host))
 
 
-def is_ollama_reachable(timeout: float = 1.5) -> bool:
-    """Quick probe so the UI can render a helpful state when Ollama is offline."""
+def is_ollama_reachable(host: Optional[str] = None, timeout: float = 1.5) -> bool:
+    """Quick TCP probe so the UI can render a helpful state when Ollama is offline."""
     import socket
     from urllib.parse import urlparse
-    u = urlparse(OLLAMA_HOST)
-    host = u.hostname or "127.0.0.1"
+    u = urlparse(_resolve_host(host))
+    hostname = u.hostname or "127.0.0.1"
     port = u.port or 11434
     try:
-        with socket.create_connection((host, port), timeout=timeout):
+        with socket.create_connection((hostname, port), timeout=timeout):
             return True
     except OSError:
         return False
 
 
-def list_models() -> List[Dict[str, Any]]:
-    """Return models available on the Ollama host. Empty list if unreachable."""
-    if not is_ollama_reachable():
+def list_models(host: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return models available on the given Ollama host. Empty list if unreachable."""
+    if not is_ollama_reachable(host):
         return []
     try:
-        resp = _client().list()
+        resp = _client(host).list()
     except Exception as e:
         logger.warning(f"ollama list failed: {e}")
         return []
@@ -181,6 +185,7 @@ def restructure(
     custom_prompt: Optional[str] = None,
     temperature: float = 0.2,
     timeout: int = 300,
+    host: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the input through an Ollama model with the chosen style prompt.
 
@@ -194,9 +199,10 @@ def restructure(
             "output_chars": int,
         }
     """
-    if not is_ollama_reachable():
+    resolved_host = _resolve_host(host)
+    if not is_ollama_reachable(resolved_host):
         raise RuntimeError(
-            f"Ollama is not reachable at {OLLAMA_HOST}. "
+            f"Ollama is not reachable at {resolved_host}. "
             "Start it with `ollama serve` or open the Ollama app."
         )
     if style == "custom":
@@ -213,7 +219,7 @@ def restructure(
     if not cleaned_input:
         raise ValueError("Input text is empty after stripping timestamps.")
 
-    client = _client()
+    client = _client(resolved_host)
     started = time.time()
     try:
         resp = client.chat(

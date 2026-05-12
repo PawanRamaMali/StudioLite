@@ -199,6 +199,7 @@ class RestructureRequest(BaseModel):
     custom_prompt: Optional[str] = None
     title: Optional[str] = None
     temperature: float = Field(default=0.2, ge=0.0, le=1.5)
+    host: Optional[str] = None  # override OLLAMA_HOST per request
 
 
 class TrimRequest(BaseModel):
@@ -2788,16 +2789,22 @@ async def screen_monitors():
 # ---------------------------------------------------------------------------
 
 @app.get("/api/v1/llm/models")
-async def llm_models():
-    """Probe the local Ollama instance and return its installed models +
-    the style presets the UI should expose."""
-    from llm_filter import is_ollama_reachable, list_models, list_styles, OLLAMA_HOST, DEFAULT_MODEL
-    reachable = is_ollama_reachable()
+async def llm_models(host: Optional[str] = None):
+    """Probe an Ollama instance and return its installed models +
+    the style presets the UI should expose.
+
+    Query params:
+        host - optional override (default: OLLAMA_HOST env, then http://localhost:11434)
+    """
+    from llm_filter import is_ollama_reachable, list_models, list_styles, OLLAMA_HOST, DEFAULT_MODEL, _resolve_host
+    resolved = _resolve_host(host)
+    reachable = is_ollama_reachable(resolved)
     return {
         "available": reachable,
-        "host": OLLAMA_HOST,
+        "host": resolved,
+        "default_host": OLLAMA_HOST,
         "default_model": DEFAULT_MODEL,
-        "models": list_models() if reachable else [],
+        "models": list_models(resolved) if reachable else [],
         "styles": list_styles(),
     }
 
@@ -2826,6 +2833,7 @@ async def screen_restructure(req: RestructureRequest):
             style=req.style,
             custom_prompt=req.custom_prompt,
             temperature=req.temperature,
+            host=req.host,
         )
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))

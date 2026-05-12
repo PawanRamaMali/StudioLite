@@ -57,6 +57,11 @@ TRANSCRIPTS_DIR = os.path.join(OUTPUT_DIR, "transcripts")
 os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
 app.mount("/static/transcripts", StaticFiles(directory=TRANSCRIPTS_DIR), name="transcripts")
 
+# Live screen-OCR transcripts directory
+SCREEN_TRANSCRIPTS_DIR = os.path.join(OUTPUT_DIR, "screen_transcripts")
+os.makedirs(SCREEN_TRANSCRIPTS_DIR, exist_ok=True)
+app.mount("/static/screen_transcripts", StaticFiles(directory=SCREEN_TRANSCRIPTS_DIR), name="screen_transcripts")
+
 # ---------------------------------------------------------------------------
 # Job tracking
 # ---------------------------------------------------------------------------
@@ -2749,6 +2754,201 @@ async def live_transcribe_ws(websocket: WebSocket):
         if transcriber:
             try:
                 await asyncio.to_thread(transcriber.flush)
+            except Exception:
+                pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Live screen OCR (Screen Transcribe)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/screen/monitors")
+async def screen_monitors():
+    """List monitors available to the server for local screen capture."""
+    from screen_ocr import enumerate_monitors
+    return {"monitors": enumerate_monitors()}
+
+
+@app.websocket("/api/v1/screen/live")
+async def live_screen_ws(websocket: WebSocket):
+    """
+    Streaming screen OCR over WebSocket.
+
+    Query params:
+        session     - client session id (also used for output filenames)
+        source      - "browser" (default) or "local"
+        confidence  - float, OCR confidence floor (default 0.5)
+        diff        - int, perceptual-hash distance below which a frame is
+                      treated as unchanged (default 4)
+        monitor     - int, mss monitor index when source=local (default 1)
+        fps         - float, capture rate when source=local (default 1.0)
+
+    Wire protocol:
+        Client (browser source):
+            binary frames -> JPEG/PNG bytes
+            text "stop"   -> finalize and close
+        Client (local source):
+            no binary frames needed - server samples on its own
+            text "stop"   -> finalize and close
+
+        Server -> client (JSON):
+            {"type":"ready","session":...,"source":...}
+            {"type":"status","stage":"loading_model"|"model_ready",...}
+            {"type":"line","t":..,"text":..,"conf":..,"bbox":..}
+            {"type":"frame","frame_skipped":bool,"reason":..,"phash_diff":..}
+            {"type":"complete","transcripts":{...},"stats":{...}}
+            {"type":"error","message":...}
+    """
+    import asyncio
+    from screen_ocr import LiveScreenOCR, capture_local_jpeg
+
+    await websocket.accept()
+    qp = websocket.query_params
+    session_id = qp.get("session") or str(uuid.uuid4())
+    source = (qp.get("source") or "browser").lower()
+    confidence = float(qp.get("confidence") or 0.5)
+    diff = int(qp.get("diff") or 4)
+    monitor = int(qp.get("monitor") or 1)
+    fps = float(qp.get("fps") or 1.0)
+    fps = max(0.2, min(fps, 5.0))
+
+    ocr: Optional["LiveScreenOCR"] = None
+    stop_event = asyncio.Event()
+    frame_queue: "asyncio.Queue[bytes]" = asyncio.Queue(maxsize=8)
+
+    async def receiver_task():
+        """Pull frames from the WS (browser source) or just watch for the
+        stop signal (local source)."""
+        try:
+            while not stop_event.is_set():
+                msg = await websocket.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    stop_event.set()
+                    break
+                if source == "browser" and msg.get("bytes") is not None:
+                    # Drop oldest if the processor can't keep up - we want the
+                    # most recent screen state, not a backlog of stale frames.
+                    try:
+                        frame_queue.put_nowait(msg["bytes"])
+                    except asyncio.QueueFull:
+                        try:
+                            frame_queue.get_nowait()
+                            frame_queue.put_nowait(msg["bytes"])
+                        except Exception:
+                            pass
+                elif msg.get("text") and msg["text"].strip().lower() == "stop":
+                    stop_event.set()
+                    break
+        except WebSocketDisconnect:
+            stop_event.set()
+
+    async def local_capture_task():
+        """For source=local, sample the screen at `fps` and enqueue JPEGs."""
+        interval = 1.0 / fps
+        while not stop_event.is_set():
+            try:
+                jpeg = await asyncio.to_thread(capture_local_jpeg, monitor, None, 65)
+                try:
+                    frame_queue.put_nowait(jpeg)
+                except asyncio.QueueFull:
+                    try:
+                        frame_queue.get_nowait()
+                        frame_queue.put_nowait(jpeg)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"local screen capture failed: {e}")
+                await websocket.send_json({"type": "error", "message": f"capture failed: {e}"})
+                stop_event.set()
+                return
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    async def processor_task():
+        """Drain the frame queue and OCR each frame in a worker thread."""
+        while not stop_event.is_set() or not frame_queue.empty():
+            try:
+                frame = await asyncio.wait_for(frame_queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            # Drop any older queued frames before OCR'ing - process the freshest one
+            while True:
+                try:
+                    frame = frame_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            result = await asyncio.to_thread(ocr.process_frame, frame)
+            if result.get("frame_skipped"):
+                await websocket.send_json({
+                    "type": "frame",
+                    "frame_skipped": True,
+                    "reason": result.get("reason"),
+                    "phash_diff": result.get("phash_diff"),
+                })
+                continue
+            for line in result.get("new_lines", []):
+                await websocket.send_json({"type": "line", **line})
+            await websocket.send_json({
+                "type": "frame",
+                "frame_skipped": False,
+                "lines": len(result.get("new_lines", [])),
+            })
+
+    try:
+        ocr = LiveScreenOCR(
+            session_id=session_id,
+            transcripts_dir=SCREEN_TRANSCRIPTS_DIR,
+            confidence_floor=confidence,
+            frame_diff_threshold=diff,
+        )
+        await websocket.send_json({
+            "type": "ready",
+            "session": session_id,
+            "source": source,
+            "device": ocr.device,
+        })
+        await websocket.send_json({"type": "status", "stage": "loading_model"})
+        await asyncio.to_thread(ocr.ensure_engine)
+        await websocket.send_json({"type": "status", "stage": "model_ready"})
+
+        tasks = [
+            asyncio.create_task(receiver_task()),
+            asyncio.create_task(processor_task()),
+        ]
+        if source == "local":
+            tasks.append(asyncio.create_task(local_capture_task()))
+        await asyncio.gather(*tasks)
+
+        flush_info = await asyncio.to_thread(ocr.flush)
+        urls = ocr.transcript_urls(base_url="/static/screen_transcripts")
+        await websocket.send_json({
+            "type": "complete",
+            "transcripts": urls,
+            "stats": flush_info.get("stats", {}),
+        })
+
+    except WebSocketDisconnect:
+        if ocr:
+            try:
+                await asyncio.to_thread(ocr.flush)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.exception("Live screen OCR error")
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
+        if ocr:
+            try:
+                await asyncio.to_thread(ocr.flush)
             except Exception:
                 pass
     finally:

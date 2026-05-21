@@ -2691,9 +2691,16 @@ async def live_transcribe_ws(websocket: WebSocket):
                             audio_queue.put_nowait(msg["bytes"])
                         except Exception:
                             pass
-                elif msg.get("text") and msg["text"].strip().lower() == "stop":
-                    stop_event.set()
-                    break
+                elif msg.get("text"):
+                    cmd = msg["text"].strip().lower()
+                    if cmd == "stop":
+                        stop_event.set()
+                        break
+                    elif cmd == "ping":
+                        try:
+                            await websocket.send_json({"type": "pong"})
+                        except Exception:
+                            pass
         except WebSocketDisconnect:
             stop_event.set()
 
@@ -2738,21 +2745,42 @@ async def live_transcribe_ws(websocket: WebSocket):
 
         recv = asyncio.create_task(receiver_task())
         proc = asyncio.create_task(processor_task())
-        await asyncio.gather(recv, proc)
+        client_alive = True
+        try:
+            await asyncio.gather(recv, proc)
+        except WebSocketDisconnect:
+            client_alive = False
+            stop_event.set()
 
-        # Final flush
-        result = await asyncio.to_thread(transcriber.flush)
-        if result:
+        # Final flush, bounded so a stuck decode can't pin the socket.
+        try:
+            result = await asyncio.wait_for(asyncio.to_thread(transcriber.flush), timeout=20.0)
+        except asyncio.TimeoutError:
+            logger.warning("Live transcribe flush timed out; using already-persisted transcript.")
+            result = None
+        except Exception:
+            logger.exception("Live transcribe flush failed")
+            result = None
+
+        if client_alive and result:
             for fs in result.get("final", []):
-                await websocket.send_json({"type": "final", **fs})
+                try:
+                    await websocket.send_json({"type": "final", **fs})
+                except Exception:
+                    client_alive = False
+                    break
 
         urls = transcriber.transcript_urls(base_url="/static/transcripts")
-        await websocket.send_json({"type": "complete", "transcripts": urls})
+        if client_alive:
+            try:
+                await websocket.send_json({"type": "complete", "transcripts": urls})
+            except Exception:
+                pass
 
     except WebSocketDisconnect:
         if transcriber:
             try:
-                await asyncio.to_thread(transcriber.flush)
+                await asyncio.wait_for(asyncio.to_thread(transcriber.flush), timeout=20.0)
             except Exception:
                 pass
     except Exception as e:
@@ -2763,7 +2791,7 @@ async def live_transcribe_ws(websocket: WebSocket):
             pass
         if transcriber:
             try:
-                await asyncio.to_thread(transcriber.flush)
+                await asyncio.wait_for(asyncio.to_thread(transcriber.flush), timeout=20.0)
             except Exception:
                 pass
     finally:
@@ -2941,9 +2969,16 @@ async def live_screen_ws(websocket: WebSocket):
                             frame_queue.put_nowait(msg["bytes"])
                         except Exception:
                             pass
-                elif msg.get("text") and msg["text"].strip().lower() == "stop":
-                    stop_event.set()
-                    break
+                elif msg.get("text"):
+                    cmd = msg["text"].strip().lower()
+                    if cmd == "stop":
+                        stop_event.set()
+                        break
+                    elif cmd == "ping":
+                        try:
+                            await websocket.send_json({"type": "pong"})
+                        except Exception:
+                            pass
         except WebSocketDisconnect:
             stop_event.set()
 

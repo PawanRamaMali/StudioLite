@@ -57,6 +57,7 @@ done
 
 echo "Starting API server  (uvicorn) on http://localhost:8000 ..."
 "$VENV_PY" -u -m uvicorn api_server:app --host 127.0.0.1 --port 8000 \
+    --ws-ping-interval 30 --ws-ping-timeout 90 \
     >"$API_OUT" 2>"$API_ERR" &
 API_PID=$!
 

@@ -15,11 +15,24 @@ type ServerMsg =
   | { type: "status"; stage: "loading_model" | "model_ready"; model?: string }
   | ({ type: "final" | "partial" } & Segment)
   | { type: "complete"; transcripts: { txt: string; srt: string; json: string } }
+  | { type: "pong" }
   | { type: "error"; message: string };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const WS_BASE = API_BASE.replace(/^http/, "ws");
 const SAMPLE_RATE = 16000;
+
+const STOP_TIMEOUT_MS = 15000;
+const PING_INTERVAL_MS = 25000;
+
+function buildFallbackDownloads(session: string) {
+  const base = `/static/transcripts/${session}`;
+  return {
+    txt: `${API_BASE}${base}.txt`,
+    srt: `${API_BASE}${base}.srt`,
+    json: `${API_BASE}${base}.json`,
+  };
+}
 
 const MODELS = ["tiny", "base", "small", "medium", "large-v2", "large-v3"];
 const LANGUAGES: { code: string | ""; label: string }[] = [
@@ -72,6 +85,36 @@ export default function LiveTranscribePanel() {
   const startTsRef = useRef<number>(0);
   const tickRef = useRef<number | null>(null);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const sessionRef = useRef<string>("");
+  const completeRef = useRef<boolean>(false);
+  const pingRef = useRef<number | null>(null);
+  const stopWatchdogRef = useRef<number | null>(null);
+
+  const clearTimers = useCallback(() => {
+    if (pingRef.current !== null) {
+      window.clearInterval(pingRef.current);
+      pingRef.current = null;
+    }
+    if (stopWatchdogRef.current !== null) {
+      window.clearTimeout(stopWatchdogRef.current);
+      stopWatchdogRef.current = null;
+    }
+  }, []);
+
+  const finalizeWithFallback = useCallback((reason?: string) => {
+    if (completeRef.current) return;
+    completeRef.current = true;
+    clearTimers();
+    if (sessionRef.current) {
+      setDownloads(buildFallbackDownloads(sessionRef.current));
+    }
+    setStatus("complete");
+    setPartial(null);
+    if (reason) {
+      setErrorMsg(reason);
+    }
+    try { wsRef.current?.close(); } catch { /* ignore */ }
+  }, [clearTimers]);
 
   // Auto-scroll transcript view
   useEffect(() => {
@@ -83,6 +126,7 @@ export default function LiveTranscribePanel() {
       window.clearInterval(tickRef.current);
       tickRef.current = null;
     }
+    clearTimers();
     try { workletNodeRef.current?.disconnect(); } catch { /* ignore */ }
     workletNodeRef.current = null;
     try { micSrcRef.current?.disconnect(); } catch { /* ignore */ }
@@ -106,6 +150,7 @@ export default function LiveTranscribePanel() {
     setFinals([]);
     setPartial(null);
     setDownloads(null);
+    completeRef.current = false;
     setStatus("connecting");
 
     try {
@@ -147,6 +192,7 @@ export default function LiveTranscribePanel() {
 
       // 3. Open WebSocket
       const session = `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      sessionRef.current = session;
       const params = new URLSearchParams({ session, model });
       if (language) params.set("language", language);
       if (translate) params.set("translate", "1");
@@ -177,6 +223,14 @@ export default function LiveTranscribePanel() {
                   setElapsed((Date.now() - startTsRef.current) / 1000);
                 }, 250);
               }
+              if (pingRef.current === null) {
+                pingRef.current = window.setInterval(() => {
+                  const sock = wsRef.current;
+                  if (sock && sock.readyState === WebSocket.OPEN) {
+                    try { sock.send("ping"); } catch { /* ignore */ }
+                  }
+                }, PING_INTERVAL_MS);
+              }
             }
           } else if (msg.type === "final") {
             setFinals((prev) => [...prev, { start: msg.start, end: msg.end, text: msg.text }]);
@@ -184,6 +238,8 @@ export default function LiveTranscribePanel() {
           } else if (msg.type === "partial") {
             setPartial({ start: msg.start, end: msg.end, text: msg.text });
           } else if (msg.type === "complete") {
+            completeRef.current = true;
+            clearTimers();
             const base = API_BASE;
             setDownloads({
               txt: base + msg.transcripts.txt,
@@ -196,13 +252,28 @@ export default function LiveTranscribePanel() {
             setErrorMsg(msg.message);
             setStatus("error");
           }
+          // pong messages are intentionally ignored
         } catch {
           /* ignore */
         }
       };
+      ws.onerror = () => {
+        // If we already finalized, ignore. Otherwise fall back to the on-disk file.
+        if (!completeRef.current && sessionRef.current) {
+          finalizeWithFallback(
+            "Network/WebSocket error. Recovered transcript from server-side save."
+          );
+        }
+      };
       ws.onclose = () => {
-        if (status === "recording" || status === "stopping" || status === "connecting") {
-          setStatus((s) => (s === "complete" ? "complete" : s === "error" ? "error" : "complete"));
+        if (!completeRef.current) {
+          if (sessionRef.current && (status === "recording" || status === "stopping" || status === "connecting" || status === "loading-model")) {
+            finalizeWithFallback(
+              "Connection closed before the server confirmed save. Showing the transcript that was written to disk."
+            );
+          } else {
+            setStatus((s) => (s === "error" ? "error" : "complete"));
+          }
         }
         cleanup();
       };
@@ -229,7 +300,7 @@ export default function LiveTranscribePanel() {
       setStatus("error");
       cleanup();
     }
-  }, [useMic, useDesktop, model, language, translate, status, cleanup]);
+  }, [useMic, useDesktop, model, language, translate, status, cleanup, clearTimers, finalizeWithFallback]);
 
   const stop = useCallback(() => {
     if (status !== "recording") return;
@@ -240,7 +311,20 @@ export default function LiveTranscribePanel() {
     }
     // Audio capture stops once cleanup runs (on ws close). Trim audio early so server stops getting samples.
     try { workletNodeRef.current?.disconnect(); } catch { /* ignore */ }
-  }, [status]);
+
+    // Watchdog: if the server doesn't confirm save within STOP_TIMEOUT_MS,
+    // fall back to the on-disk transcript so the UI never strands.
+    if (stopWatchdogRef.current !== null) {
+      window.clearTimeout(stopWatchdogRef.current);
+    }
+    stopWatchdogRef.current = window.setTimeout(() => {
+      if (!completeRef.current) {
+        finalizeWithFallback(
+          "Server didn't confirm save in time. Showing the transcript that was written to disk."
+        );
+      }
+    }, STOP_TIMEOUT_MS);
+  }, [status, finalizeWithFallback]);
 
   // Cleanup on unmount
   useEffect(() => () => {

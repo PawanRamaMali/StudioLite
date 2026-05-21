@@ -62,7 +62,7 @@ foreach ($p in 8000, 3000) {
 
 Write-Host 'Starting API server  (uvicorn) on http://localhost:8000 ...'
 $apiProc = Start-Process -FilePath $venvPython `
-    -ArgumentList @('-u', '-m', 'uvicorn', 'api_server:app', '--host', '127.0.0.1', '--port', '8000') `
+    -ArgumentList @('-u', '-m', 'uvicorn', 'api_server:app', '--host', '127.0.0.1', '--port', '8000', '--ws-ping-interval', '30', '--ws-ping-timeout', '90') `
     -WorkingDirectory $root `
     -RedirectStandardOutput $apiOut `
     -RedirectStandardError $apiErr `

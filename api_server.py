@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Dict
 import logging
 import threading
 import uuid
@@ -3093,6 +3093,256 @@ async def live_screen_ws(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Offline video transcription: audio (whisper) + screen OCR, separately
+# ---------------------------------------------------------------------------
+
+def _ffmpeg_extract_frames(video_path: str, frames_dir: str, fps: float, max_width: int = 1280) -> int:
+    """Sample frames from a video at the given fps using ffmpeg.
+
+    Writes frame_000001.jpg, frame_000002.jpg, ... into frames_dir. Scales
+    down so OCR doesn't waste cycles on 4K. Returns the number of frames
+    written. Raises RuntimeError if ffmpeg fails."""
+    import subprocess
+    import glob
+    os.makedirs(frames_dir, exist_ok=True)
+    pattern = os.path.join(frames_dir, "frame_%06d.jpg")
+    vf = f"fps={fps:g},scale='min({max_width},iw)':-2"
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", video_path,
+        "-vf", vf,
+        "-q:v", "4",
+        pattern,
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg frame extraction failed: {proc.stderr.decode('utf-8', 'replace')[:500]}")
+    return len(glob.glob(os.path.join(frames_dir, "frame_*.jpg")))
+
+
+def _video_probe_duration(video_path: str) -> Optional[float]:
+    """Best-effort duration probe via ffprobe."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20,
+        )
+        if out.returncode == 0:
+            return float(out.stdout.decode("utf-8", "replace").strip())
+    except Exception:
+        pass
+    return None
+
+
+def _run_video_transcribe(
+    job_id: str,
+    video_path: str,
+    audio_model: str,
+    language: Optional[str],
+    translate: bool,
+    do_audio: bool,
+    do_screen: bool,
+    fps: float,
+    confidence: float,
+    drop_garbage: bool,
+):
+    """Background worker: produces an audio transcript and/or a screen OCR
+    transcript from a single video file. Both outputs land in the existing
+    static mounts under the session id, so the existing download URLs work."""
+    import json as _json
+    import glob
+    import shutil
+
+    session_id = f"video-{job_id[:8]}"
+    duration = _video_probe_duration(video_path)
+    audio_urls: Dict[str, str] = {}
+    screen_urls: Dict[str, str] = {}
+
+    try:
+        _update_job(job_id, status="running", progress=2, message="Preparing video...")
+
+        # --- Audio leg --------------------------------------------------
+        if do_audio:
+            from transcriber import Transcriber, TranscriptionConfig
+            _update_job(job_id, progress=5, message="Loading whisper model...")
+            cfg = TranscriptionConfig(
+                model_size=audio_model,
+                language=(language or None),
+                translate_to_english=bool(translate),
+            )
+            tx = Transcriber(cfg)
+
+            last_msg = {"v": ""}
+            def _audio_progress(msg: str):
+                # Coarse progress: whisper has no real % until segments come in.
+                last_msg["v"] = msg
+                _update_job(job_id, message=f"Audio: {msg}")
+
+            result = tx.transcribe(video_path, progress_callback=_audio_progress)
+            if not result.get("success"):
+                raise RuntimeError(f"Audio transcription failed: {result.get('error')}")
+
+            segments = result.get("segments") or []
+            text = result.get("text") or ""
+
+            txt_path = os.path.join(TRANSCRIPTS_DIR, f"{session_id}.txt")
+            srt_path = os.path.join(TRANSCRIPTS_DIR, f"{session_id}.srt")
+            json_path = os.path.join(TRANSCRIPTS_DIR, f"{session_id}.json")
+            with open(txt_path, "w", encoding="utf-8") as fh:
+                # One segment per line so the .txt is a readable transcript,
+                # not a single long blob.
+                for seg in segments:
+                    line = (seg.get("text") or "").strip()
+                    if line:
+                        fh.write(line + "\n")
+                if not segments and text:
+                    fh.write(text)
+            with open(srt_path, "w", encoding="utf-8") as fh:
+                fh.write(tx.generate_srt(segments))
+            with open(json_path, "w", encoding="utf-8") as fh:
+                _json.dump({
+                    "session": session_id,
+                    "language": result.get("language"),
+                    "segments": segments,
+                }, fh, indent=2, ensure_ascii=False)
+
+            audio_urls = {
+                "txt": f"/static/transcripts/{session_id}.txt",
+                "srt": f"/static/transcripts/{session_id}.srt",
+                "json": f"/static/transcripts/{session_id}.json",
+            }
+            _update_job(
+                job_id,
+                progress=55 if do_screen else 95,
+                message=f"Audio done: {len(segments)} segment(s).",
+            )
+
+        # --- Screen OCR leg --------------------------------------------
+        if do_screen:
+            from screen_ocr import LiveScreenOCR
+            _update_job(job_id, message="Sampling video frames...")
+
+            frames_dir = os.path.join(UPLOADS_DIR, f"frames_{job_id[:8]}")
+            try:
+                n_frames = _ffmpeg_extract_frames(video_path, frames_dir, fps=fps)
+            except Exception as e:
+                raise RuntimeError(f"Frame sampling failed: {e}")
+
+            if n_frames == 0:
+                _update_job(job_id, message="No frames extracted (silent / unreadable video?).")
+            else:
+                ocr = LiveScreenOCR(
+                    session_id=session_id,
+                    transcripts_dir=SCREEN_TRANSCRIPTS_DIR,
+                    confidence_floor=confidence,
+                    drop_garbage=drop_garbage,
+                )
+                ocr.ensure_engine()
+                _update_job(job_id, message=f"OCRing {n_frames} frames at {fps:g} fps...")
+
+                frame_paths = sorted(glob.glob(os.path.join(frames_dir, "frame_*.jpg")))
+                done = 0
+                base = 55 if do_audio else 5
+                span = (95 - base)
+                for fp in frame_paths:
+                    try:
+                        with open(fp, "rb") as fh:
+                            frame_bytes = fh.read()
+                        ocr.process_frame(frame_bytes)
+                    except Exception as e:
+                        logger.warning(f"frame OCR failed for {os.path.basename(fp)}: {e}")
+                    finally:
+                        try:
+                            os.remove(fp)
+                        except OSError:
+                            pass
+                    done += 1
+                    # Throttle progress updates to ~1/sec worth of frames
+                    if done == 1 or done == n_frames or done % max(1, n_frames // 50) == 0:
+                        pct = base + int(span * (done / max(1, n_frames)))
+                        _update_job(job_id, progress=pct, message=f"OCR: frame {done}/{n_frames}")
+
+                ocr.flush()
+                screen_urls = {
+                    "txt": f"/static/screen_transcripts/{session_id}.txt",
+                    "json": f"/static/screen_transcripts/{session_id}.json",
+                }
+
+            # cleanup frames dir if it still exists
+            try:
+                shutil.rmtree(frames_dir, ignore_errors=True)
+            except OSError:
+                pass
+
+        result_payload = {
+            "session_id": session_id,
+            "duration": duration,
+            "audio_transcripts": audio_urls or None,
+            "screen_transcripts": screen_urls or None,
+        }
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Video transcription complete.",
+            result=result_payload,
+        )
+    except Exception as exc:
+        logger.exception("Video transcription failed")
+        _update_job(job_id, status="failed", error=str(exc), message=f"Video transcribe failed: {exc}")
+    finally:
+        try:
+            if os.path.isfile(video_path):
+                os.remove(video_path)
+        except OSError:
+            pass
+
+
+@app.post("/api/v1/video/transcribe", response_model=JobResponse)
+async def video_transcribe(
+    file: UploadFile = File(...),
+    audio_model: str = "base",
+    language: str = "",
+    translate: bool = False,
+    do_audio: bool = True,
+    do_screen: bool = True,
+    fps: float = 1.0,
+    confidence: float = 0.6,
+    drop_garbage: bool = True,
+):
+    """Run faster-whisper on the audio and RapidOCR on sampled frames of a
+    video, in one job. Each leg produces its own transcript files served
+    via the existing static mounts."""
+    if not (do_audio or do_screen):
+        raise HTTPException(status_code=400, detail="Enable at least one of do_audio / do_screen.")
+    fps = max(0.1, min(float(fps), 10.0))
+    confidence = max(0.0, min(float(confidence), 1.0))
+    lang = (language or "").strip() or None
+
+    saved = _save_upload(file, prefix="vid")
+    job_id = _create_job("video_transcribe", {
+        "filename": file.filename,
+        "do_audio": do_audio,
+        "do_screen": do_screen,
+        "audio_model": audio_model,
+        "language": lang,
+        "translate": translate,
+        "fps": fps,
+        "confidence": confidence,
+    })
+    thread = threading.Thread(
+        target=_run_video_transcribe,
+        args=(job_id, saved, audio_model, lang, translate, do_audio, do_screen,
+              fps, confidence, drop_garbage),
+        daemon=True,
+    )
+    thread.start()
+    return _job_response(job_id)
 
 
 # ---------------------------------------------------------------------------

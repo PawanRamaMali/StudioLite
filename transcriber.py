@@ -14,6 +14,19 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+# Workaround: faster_whisper.utils.disabled_tqdm is a tqdm subclass that never
+# keeps `_lock` set on the class, so tqdm.contrib.concurrent.ensure_lock crashes
+# on its cleanup `del tqdm_class._lock` during huggingface_hub.snapshot_download.
+# Pre-seeding `_lock` makes ensure_lock take the "restore" branch (set_lock(old))
+# instead of attempting the delete.
+try:
+    from faster_whisper.utils import disabled_tqdm as _fw_disabled_tqdm
+    from tqdm.std import TqdmDefaultWriteLock as _TqdmDefaultWriteLock
+    if getattr(_fw_disabled_tqdm, "_lock", None) is None:
+        _fw_disabled_tqdm._lock = _TqdmDefaultWriteLock()
+except Exception:
+    pass
+
 # Supported languages (ISO 639-1 codes)
 LANGUAGES = {
     "Auto-detect": None,

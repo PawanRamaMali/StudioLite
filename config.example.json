@@ -32,7 +32,7 @@
   "image_provider": "nanobanana2",
   "fooocus_api_url": "http://127.0.0.1:8888",
   "fooocus_style": "Fooocus V2",
-  "font": "bold_font.ttf",
+  "font": "Anton-Regular.ttf",
   "imagemagick_path": "Path to magick.exe or on linux/macOS just /usr/bin/convert",
   "script_sentence_length": 4
 }

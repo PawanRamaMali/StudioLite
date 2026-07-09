@@ -3921,7 +3921,7 @@ elif tool == "Settings":
             c_sentences = st.slider("Default Script Sentences", 2, 12, cfg.get("script_sentence_length", 4))
             c_threads = st.slider("MoviePy Threads", 1, 16, cfg.get("threads", 2))
         with cc9:
-            c_font = st.text_input("Font", value=cfg.get("font", "bold_font.ttf"))
+            c_font = st.text_input("Font", value=cfg.get("font", "Anton-Regular.ttf"))
             c_magick = st.text_input("ImageMagick Path", value=cfg.get("imagemagick_path", "/usr/bin/convert"))
 
     # General Settings

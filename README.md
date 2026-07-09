@@ -1,6 +1,33 @@
 # StudioLite
 
-A lightweight, web-based video editor and AI video generation studio built with Streamlit and FFmpeg. Edit videos directly in your browser with no installation required (beyond Python dependencies).
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Next.js 16](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
+[![Runs locally](https://img.shields.io/badge/models-local%20%2F%20offline-brightgreen.svg)](#getting-started)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
+
+**StudioLite** is a local-first, open-source AI media studio. Generate and edit
+video, create multi-scene AI movies, produce short-form reels, generate and
+retouch images, transcribe audio / video / screen, and publish — all running on
+**your own machine** with local models. No cloud account required.
+
+It ships with **two front-ends** that share the same Python engines:
+
+- **Next.js** (modern) — a fast, focused UI for creative/GPU workflows: video
+  generation, Story Mode, Images Studio, Characters, and the transcription suite.
+- **Streamlit** (legacy) — the complete ~20-tool toolbox.
+
+## Screenshots
+
+| Video Generator | Story Mode |
+|:---:|:---:|
+| ![Video Generator](docs/screenshots/01-video-generator.png) | ![Story Mode](docs/screenshots/02-story-mode.png) |
+| **Images Studio** | **Characters** |
+| ![Images Studio](docs/screenshots/03-images-studio.png) | ![Characters](docs/screenshots/04-characters.png) |
+| **Audio Studio** | **Video Transcribe** |
+| ![Audio Studio](docs/screenshots/05-audio-studio.png) | ![Video Transcribe](docs/screenshots/06-video-transcribe.png) |
+| **Live Transcribe** | **Settings** |
+| ![Live Transcribe](docs/screenshots/07-live-transcribe.png) | ![Settings](docs/screenshots/08-settings.png) |
 
 ## Features
 
@@ -13,7 +40,11 @@ A lightweight, web-based video editor and AI video generation studio built with 
 | **Merge Videos** | Combine multiple videos into one |
 | **Extract Frame** | Export single frames as PNG images |
 | **Export Video** | Convert format (MP4, WebM, AVI, MOV, MKV), quality, and resolution |
-| **Transcribe** | Extract text from audio/video or microphone recording using WhisperX (SRT, VTT, JSON, TSV) |
+| **Transcribe** | Extract text from audio/video or microphone recording using WhisperX / faster-whisper (SRT, VTT, JSON, TSV) |
+| **Live Transcribe** | Real-time speech-to-text from your microphone or desktop audio in the browser |
+| **Screen Transcribe** | Continuous on-screen OCR (RapidOCR) with optional LLM clean-up into Markdown / DOCX / PDF |
+| **Video Transcribe** | Offline audio transcription plus screen-OCR for uploaded video files |
+| **Images Studio** | Local SDXL image generation, editing, variation, upscaling, and background removal |
 | **View & Publish** | Preview video and upload directly to YouTube via OAuth 2.0 |
 | **ReelForge** | AI-powered short video generation (LLM script + image gen + TTS + subtitles + background music) |
 | **Video Generator** | Real AI video generation using diffusion models (Wan 2.1/2.2, HunyuanVideo, LTX-Video, CogVideoX) |
@@ -307,7 +338,7 @@ All settings are stored in `config.json`. Here's the complete configuration refe
   "background_music_volume": 0.15,
 
   "threads": 2,
-  "font": "bold_font.ttf",
+  "font": "Anton-Regular.ttf",
   "imagemagick_path": "/usr/bin/convert",
   "script_sentence_length": 4
 }
@@ -340,7 +371,7 @@ All settings are stored in `config.json`. Here's the complete configuration refe
 | **Video Settings** ||||
 | `default_aspect_ratio` | string | `"9:16"` | Default video format |
 | `threads` | int | `2` | MoviePy encoding threads |
-| `font` | string | `"bold_font.ttf"` | Font file for subtitles |
+| `font` | string | `"Anton-Regular.ttf"` | Font file for subtitles (any `.ttf` in `fonts/`) |
 
 ---
 
@@ -348,13 +379,18 @@ All settings are stored in `config.json`. Here's the complete configuration refe
 
 ```
 StudioLite/
-├── app.py                      # Streamlit web interface
+├── app.py                      # Streamlit web interface (full toolbox)
+├── api_server.py               # FastAPI backend for the Next.js UI
 ├── reelforge.py                # ReelForge AI video generation engine
 ├── videogen.py                 # Video Generator (diffusion-based video gen)
+├── scene_generator.py          # Story Mode multi-scene movie engine
+├── imagegen.py                 # SDXL image generation / edit / upscale
 ├── remover.py                  # Video/image/PDF watermark removal
-├── transcriber.py              # WhisperX speech-to-text
+├── transcriber.py              # WhisperX / faster-whisper speech-to-text
+├── screen_ocr.py               # Live on-screen OCR (Screen Transcribe)
+├── llm_filter.py               # LLM post-processing of transcripts
 ├── youtube_uploader.py         # YouTube OAuth 2.0 upload
-├── config.json                 # Application configuration
+├── config.example.json         # Config template (copy to config.json)
 ├── requirements.txt            # Python dependencies
 ├── check_models.py             # Model download status checker
 │
@@ -363,16 +399,21 @@ StudioLite/
 │   ├── utils.py                # Utility functions
 │   ├── audio_mixer.py          # Background music mixer with auto-ducking
 │   ├── llm_provider.py         # LLM abstraction (llama.cpp/Ollama)
-│   │
-│   └── classes/
-│       ├── Tts.py              # KittenTTS wrapper
-│       ├── PiperTts.py         # Piper TTS wrapper (neural voices)
-│       └── TtsFactory.py       # TTS engine factory
+│   └── classes/                # TTS wrappers (Piper, KittenTTS) + factory
 │
-├── models/                     # GGUF & SDXL models directory
-├── fonts/                      # Font files for subtitles
-└── music/                      # Background music files (.mp3, .wav)
+├── web/                        # Next.js front-end (App Router + Tailwind)
+│   ├── app/                    # Pages & layout
+│   ├── components/panels/      # One component per tool panel
+│   └── lib/                    # API client + Zustand store
+│
+├── docs/screenshots/           # README screenshots
+├── fonts/                      # Subtitle fonts (Anton, OFL 1.1)
+├── models/                     # GGUF & SDXL models (git-ignored)
+└── music/                      # Background music files (git-ignored)
 ```
+
+> **Configuration:** copy `config.example.json` to `config.json` (git-ignored)
+> and edit it. `config.json`, `models/`, and API keys are never committed.
 
 ---
 
@@ -380,7 +421,7 @@ StudioLite/
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.10+
 - FFmpeg installed on your system
 - NVIDIA GPU with CUDA (recommended for SDXL image generation)
 
@@ -569,19 +610,50 @@ result = rf_generate_full(
 
 ---
 
-## License
-
-MIT License - see [LICENSE](LICENSE) for details.
-
 ## Contributing
 
-Pull requests are welcome. For major changes, please open an issue first.
+Pull requests are welcome! For major changes, please open an issue first to
+discuss what you would like to change. Good first areas: closing the Next.js /
+Streamlit feature gap, additional export formats, and documentation.
+
+---
+
+## License
+
+StudioLite is released under the **MIT License** — see [LICENSE](LICENSE).
+
+### Licensing notes for third-party components
+
+This project depends on several third-party libraries, models, and tools. They
+are installed by you (via `pip` / `npm` / model downloads) and are **not**
+redistributed in this repository, except for the bundled subtitle font. A full
+breakdown lives in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Highlights:
+
+- **PyMuPDF** (PDF watermark removal) is **AGPL-3.0**. Using it as a dependency
+  does not change StudioLite's MIT license, but if you deploy StudioLite as a
+  network service, AGPL requires offering users the corresponding source. Omit
+  this dependency if you do not need PDF processing.
+- **FFmpeg** (required, installed separately) is LGPL/GPL depending on the build.
+- **AI model weights** (Wan, HunyuanVideo, LTX-Video, CogVideoX, SDXL, Whisper,
+  LLMs) each carry their **own** licenses — some restrict commercial use. You are
+  responsible for complying with the license of any model you download.
+- The bundled subtitle font **Anton** (`fonts/Anton-Regular.ttf`) is licensed
+  under the **SIL Open Font License 1.1** (see `fonts/Anton-OFL.txt`).
 
 ---
 
 ## Credits
 
-- [Piper TTS](https://github.com/rhasspy/piper) - Neural text-to-speech
-- [Stable Diffusion XL](https://stability.ai/stable-diffusion) - Image generation
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) - Efficient LLM inference
-- [WhisperX](https://github.com/m-bain/whisperX) - Speech recognition
+Built on the shoulders of excellent open-source projects:
+
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) / [WhisperX](https://github.com/m-bain/whisperX) — Speech recognition
+- [RapidOCR](https://github.com/RapidAI/RapidOCR) — On-screen OCR
+- [Diffusers](https://github.com/huggingface/diffusers) — Video & image diffusion pipelines
+- [Stable Diffusion XL](https://stability.ai/stable-diffusion) — Image generation
+- [Piper TTS](https://github.com/rhasspy/piper) — Neural text-to-speech
+- [KittenTTS](https://github.com/KittenML/KittenTTS) — Lightweight text-to-speech
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) / [Ollama](https://github.com/ollama/ollama) — Local LLM inference
+- [Streamlit](https://streamlit.io/) & [Next.js](https://nextjs.org/) — Front-ends
+- [Anton](https://github.com/googlefonts/AntonFont) by Vernon Adams — Subtitle font (OFL 1.1)
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the complete list.

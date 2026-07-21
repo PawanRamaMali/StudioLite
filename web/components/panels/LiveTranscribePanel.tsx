@@ -25,6 +25,42 @@ const SAMPLE_RATE = 16000;
 const STOP_TIMEOUT_MS = 15000;
 const PING_INTERVAL_MS = 25000;
 
+/**
+ * Turn the raw getUserMedia / getDisplayMedia exceptions into actionable text.
+ * The browser messages ("Permission denied by user") don't tell the user how to
+ * recover, so we map the DOMException name to a concrete next step.
+ */
+function describeStartError(e: unknown, useMic: boolean, useDesktop: boolean): string {
+  const name = (e && typeof e === "object" && "name" in e) ? String((e as { name: unknown }).name) : "";
+  const raw = e instanceof Error ? e.message : "Failed to start";
+  const src = useMic && useDesktop ? "microphone / desktop audio" : useDesktop ? "desktop audio" : "microphone";
+
+  switch (name) {
+    case "NotAllowedError":
+    case "PermissionDeniedError":
+      return (
+        `${src} access was blocked. Click the tune/lock icon at the left of Chrome's address bar, ` +
+        `set Microphone (and Screen share) to "Allow", then reload and try again. ` +
+        `Also check Windows Settings › Privacy & security › Microphone is on for Chrome.`
+      );
+    case "NotFoundError":
+    case "DevicesNotFoundError":
+      return "No microphone was found. Plug in or enable a mic (Windows Settings › Sound › Input), then retry.";
+    case "NotReadableError":
+      return "The microphone is in use by another app (Zoom, Teams, OBS...). Close it and retry.";
+    case "OverconstrainedError":
+      return "The selected audio device can't meet the requested settings. Try a different input device.";
+    case "AbortError":
+      return "The audio capture request was dismissed. Click Start again and accept the prompt.";
+    default:
+      // getDisplayMedia is only offered over a secure context.
+      if (typeof window !== "undefined" && !window.isSecureContext) {
+        return "Audio capture needs a secure context. Open the app via http://localhost or http://127.0.0.1 (not a LAN IP).";
+      }
+      return raw;
+  }
+}
+
 function buildFallbackDownloads(session: string) {
   const base = `/static/transcripts/${session}`;
   return {
@@ -75,6 +111,14 @@ export default function LiveTranscribePanel() {
   const [downloads, setDownloads] = useState<{ txt: string; srt: string; json: string } | null>(null);
   const [copied, setCopied] = useState<"all" | "last5" | null>(null);
 
+  // Mic device selection + live input-level meter, so the user can pick the
+  // right input and confirm it's actually picking up sound before recording.
+  const [inputDevices, setInputDevices] = useState<MediaDeviceInfo[]>([]);
+  const [micDeviceId, setMicDeviceId] = useState<string>("");
+  const [metering, setMetering] = useState(false);
+  const [micLevel, setMicLevel] = useState(0); // RMS, ~0..0.3 for speech
+  const [micPeak, setMicPeak] = useState(0);   // decaying peak hold
+
   const wsRef = useRef<WebSocket | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
@@ -89,6 +133,10 @@ export default function LiveTranscribePanel() {
   const completeRef = useRef<boolean>(false);
   const pingRef = useRef<number | null>(null);
   const stopWatchdogRef = useRef<number | null>(null);
+  const meterStreamRef = useRef<MediaStream | null>(null);
+  const meterCtxRef = useRef<AudioContext | null>(null);
+  const meterRafRef = useRef<number | null>(null);
+  const micPeakRef = useRef<number>(0);
 
   const clearTimers = useCallback(() => {
     if (pingRef.current !== null) {
@@ -100,6 +148,85 @@ export default function LiveTranscribePanel() {
       stopWatchdogRef.current = null;
     }
   }, []);
+
+  const refreshInputDevices = useCallback(async () => {
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices();
+      setInputDevices(all.filter((d) => d.kind === "audioinput"));
+    } catch { /* ignore */ }
+  }, []);
+
+  const stopMeter = useCallback(() => {
+    if (meterRafRef.current !== null) {
+      cancelAnimationFrame(meterRafRef.current);
+      meterRafRef.current = null;
+    }
+    meterStreamRef.current?.getTracks().forEach((t) => t.stop());
+    meterStreamRef.current = null;
+    meterCtxRef.current?.close().catch(() => { /* ignore */ });
+    meterCtxRef.current = null;
+    micPeakRef.current = 0;
+    setMicLevel(0);
+    setMicPeak(0);
+    setMetering(false);
+  }, []);
+
+  const startMeter = useCallback(async () => {
+    // Tear down any previous meter first (e.g. device switch).
+    if (meterRafRef.current !== null) { cancelAnimationFrame(meterRafRef.current); meterRafRef.current = null; }
+    meterStreamRef.current?.getTracks().forEach((t) => t.stop());
+    meterCtxRef.current?.close().catch(() => { /* ignore */ });
+    setErrorMsg(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: micDeviceId ? { deviceId: { exact: micDeviceId } } : true,
+        video: false,
+      });
+      meterStreamRef.current = stream;
+      // Labels are only populated once a stream has been granted.
+      refreshInputDevices();
+      const ctx = new AudioContext();
+      meterCtxRef.current = ctx;
+      const src = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      src.connect(analyser);
+      const buf = new Uint8Array(analyser.fftSize);
+      setMetering(true);
+      const loop = () => {
+        analyser.getByteTimeDomainData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) {
+          const v = (buf[i] - 128) / 128;
+          sum += v * v;
+        }
+        const rms = Math.sqrt(sum / buf.length);
+        micPeakRef.current = Math.max(rms, micPeakRef.current * 0.92);
+        setMicLevel(rms);
+        setMicPeak(micPeakRef.current);
+        meterRafRef.current = requestAnimationFrame(loop);
+      };
+      loop();
+    } catch (e) {
+      setErrorMsg(describeStartError(e, true, false));
+      setMetering(false);
+    }
+  }, [micDeviceId, refreshInputDevices]);
+
+  const toggleMeter = useCallback(() => {
+    if (metering) stopMeter();
+    else startMeter();
+  }, [metering, startMeter, stopMeter]);
+
+  // Populate the device list on mount and whenever devices change.
+  useEffect(() => {
+    refreshInputDevices();
+    const md = navigator.mediaDevices;
+    if (md && "addEventListener" in md) {
+      md.addEventListener("devicechange", refreshInputDevices);
+      return () => md.removeEventListener("devicechange", refreshInputDevices);
+    }
+  }, [refreshInputDevices]);
 
   const finalizeWithFallback = useCallback((reason?: string) => {
     if (completeRef.current) return;
@@ -152,12 +279,18 @@ export default function LiveTranscribePanel() {
     setDownloads(null);
     completeRef.current = false;
     setStatus("connecting");
+    stopMeter(); // free the device before the real capture opens it
 
     try {
       // 1. Capture streams
       if (useMic) {
         micStreamRef.current = await navigator.mediaDevices.getUserMedia({
-          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            ...(micDeviceId ? { deviceId: { exact: micDeviceId } } : {}),
+          },
           video: false,
         });
       }
@@ -295,12 +428,11 @@ export default function LiveTranscribePanel() {
       // Status now driven by server messages (loading_model -> model_ready).
       // Once model_ready arrives we start the timer.
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "Failed to start";
-      setErrorMsg(msg);
+      setErrorMsg(describeStartError(e, useMic, useDesktop));
       setStatus("error");
       cleanup();
     }
-  }, [useMic, useDesktop, model, language, translate, status, cleanup, clearTimers, finalizeWithFallback]);
+  }, [useMic, useDesktop, model, language, translate, status, micDeviceId, cleanup, clearTimers, finalizeWithFallback, stopMeter]);
 
   const stop = useCallback(() => {
     if (status !== "recording") return;
@@ -330,7 +462,8 @@ export default function LiveTranscribePanel() {
   useEffect(() => () => {
     try { wsRef.current?.close(); } catch { /* ignore */ }
     cleanup();
-  }, [cleanup]);
+    stopMeter();
+  }, [cleanup, stopMeter]);
 
   const copyText = useCallback(async (text: string, kind: "all" | "last5") => {
     if (!text) return;
@@ -410,6 +543,61 @@ export default function LiveTranscribePanel() {
                 disabled={recording || busy}
               />
             </div>
+            {useMic && (
+              <div className="mt-3 pt-3 border-t border-zinc-800 space-y-2">
+                <label className="text-[10px] uppercase tracking-wide text-zinc-500">Input device</label>
+                <select
+                  value={micDeviceId}
+                  disabled={recording || busy}
+                  onChange={(e) => {
+                    setMicDeviceId(e.target.value);
+                    if (metering) startMeter(); // re-open meter on the newly chosen device
+                  }}
+                  className="w-full bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:ring-2 focus:ring-indigo-500/50 disabled:opacity-50"
+                >
+                  <option value="">System default</option>
+                  {inputDevices.map((d, i) => (
+                    <option key={d.deviceId || i} value={d.deviceId}>
+                      {d.label || `Microphone ${i + 1}`}
+                    </option>
+                  ))}
+                </select>
+
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={toggleMeter}
+                    disabled={recording || busy}
+                    title="Open the mic and watch the level — confirm it picks up your voice before recording"
+                  >
+                    <Mic className="w-3.5 h-3.5 mr-1.5" />
+                    {metering ? "Stop test" : "Test mic"}
+                  </Button>
+                  <div className="relative flex-1 h-2.5 bg-zinc-800 rounded-full overflow-hidden">
+                    {/* good-range guide marker */}
+                    <div className="absolute inset-y-0 left-[8%] right-[30%] bg-green-500/10" />
+                    <div
+                      className="h-full rounded-full transition-[width] duration-75"
+                      style={{
+                        width: `${Math.min(100, micPeak * 300)}%`,
+                        background:
+                          micPeak * 300 < 8 ? "#71717a" : micPeak * 300 > 85 ? "#f59e0b" : "#22c55e",
+                      }}
+                    />
+                  </div>
+                </div>
+                {metering && (
+                  <p className="text-[10px] text-zinc-500 leading-relaxed">
+                    {micPeak * 300 < 8
+                      ? "Barely any signal — speak up, pick another device above, or raise the level in Windows Sound settings."
+                      : micPeak * 300 > 85
+                      ? "Loud — the mic is working (watch for clipping)."
+                      : "Good — the mic is picking up your voice. You can Start now."}
+                  </p>
+                )}
+              </div>
+            )}
             {useDesktop && (
               <p className="text-[10px] text-amber-400/80 mt-3 leading-relaxed">
                 When prompted, choose a screen/tab and tick <strong>&ldquo;Share audio&rdquo;</strong>. Firefox/Safari may not capture system audio.

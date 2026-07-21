@@ -114,6 +114,112 @@ export const isolateVoice = (file: File) => uploadAudio<Job>("/api/v1/audio/isol
 export const normalizeAudio = (file: File, target_db: number) =>
   uploadAudio<Job>(`/api/v1/audio/normalize?target_db=${target_db}`, file);
 
+// Video edit utilities
+export interface EditUploadResponse {
+  video_path: string;
+  filename: string;
+  size_bytes: number;
+}
+
+export interface EditAudioUploadResponse {
+  audio_path: string;
+  filename: string;
+  size_bytes: number;
+}
+
+export async function uploadEditVideo(file: File): Promise<EditUploadResponse> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch(`${API_BASE}/api/v1/edit/upload`, { method: "POST", body: fd });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `Upload failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function uploadEditAudio(file: File): Promise<EditAudioUploadResponse> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch(`${API_BASE}/api/v1/edit/upload-audio`, { method: "POST", body: fd });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `Upload failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export const extractVideoAudio = (params: { video_path: string; format: "wav" | "mp3" }) =>
+  apiFetch<Job>("/api/v1/edit/extract-audio", { method: "POST", body: JSON.stringify(params) });
+
+export const removeVideoAudio = (params: { video_path: string }) =>
+  apiFetch<Job>("/api/v1/edit/remove-audio", { method: "POST", body: JSON.stringify(params) });
+
+export const compressVideo = (params: { video_path: string; preset: "high" | "medium" | "low" }) =>
+  apiFetch<Job>("/api/v1/edit/compress", { method: "POST", body: JSON.stringify(params) });
+
+export const rotateFlipVideo = (params: {
+  video_path: string;
+  rotate: 0 | 90 | 180 | 270;
+  flip: "none" | "horizontal" | "vertical";
+}) => apiFetch<Job>("/api/v1/edit/rotate-flip", { method: "POST", body: JSON.stringify(params) });
+
+export const reverseVideo = (params: { video_path: string; include_audio: boolean }) =>
+  apiFetch<Job>("/api/v1/edit/reverse", { method: "POST", body: JSON.stringify(params) });
+
+export const loopVideo = (params: { video_path: string; count: number }) =>
+  apiFetch<Job>("/api/v1/edit/loop", { method: "POST", body: JSON.stringify(params) });
+
+export const stabilizeVideo = (params: { video_path: string; shakiness: number; accuracy: number }) =>
+  apiFetch<Job>("/api/v1/edit/stabilize", { method: "POST", body: JSON.stringify(params) });
+
+export const colorCorrectVideo = (params: {
+  video_path: string;
+  brightness: number;
+  contrast: number;
+  saturation: number;
+  hue: number;
+}) => apiFetch<Job>("/api/v1/edit/color-correction", { method: "POST", body: JSON.stringify(params) });
+
+export const regionEffectVideo = (params: {
+  video_path: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  mode: "blur" | "pixelate";
+  strength: number;
+}) => apiFetch<Job>("/api/v1/edit/region-effect", { method: "POST", body: JSON.stringify(params) });
+
+export const pictureInPictureVideo = (params: {
+  video_path: string;
+  overlay_path: string;
+  position: "top_left" | "top_right" | "bottom_left" | "bottom_right" | "center";
+  size_percent: number;
+  margin: number;
+}) => apiFetch<Job>("/api/v1/edit/picture-in-picture", { method: "POST", body: JSON.stringify(params) });
+
+export const backgroundMusicVideo = (params: {
+  video_path: string;
+  audio_path: string;
+  music_volume: number;
+  video_volume: number;
+}) => apiFetch<Job>("/api/v1/edit/background-music", { method: "POST", body: JSON.stringify(params) });
+
+export const speedVideo = (params: { video_path: string; speed: number; keep_audio: boolean }) =>
+  apiFetch<Job>("/api/v1/edit/speed", { method: "POST", body: JSON.stringify(params) });
+
+export const gifVideo = (params: {
+  video_path: string;
+  start_time: number;
+  duration: number;
+  fps: number;
+  width: number;
+}) => apiFetch<Job>("/api/v1/edit/gif", { method: "POST", body: JSON.stringify(params) });
+
+export const thumbnailVideo = (params: { video_path: string; timestamp: number; width: number }) =>
+  apiFetch<Job>("/api/v1/edit/thumbnail", { method: "POST", body: JSON.stringify(params) });
+
 // Characters
 export const generateCharacterPortrait = (params: {
   name: string;

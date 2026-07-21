@@ -220,6 +220,95 @@ class UpscaleRequest(BaseModel):
     preset: str = "quality_2x"
 
 
+class ExtractAudioRequest(BaseModel):
+    video_path: str
+    format: str = "wav"  # wav | mp3
+
+
+class VideoPathRequest(BaseModel):
+    video_path: str
+
+
+class CompressRequest(BaseModel):
+    video_path: str
+    preset: str = "medium"  # high | medium | low
+
+
+class RotateFlipRequest(BaseModel):
+    video_path: str
+    rotate: int = 0  # 0 | 90 | 180 | 270
+    flip: str = "none"  # none | horizontal | vertical
+
+
+class ReverseRequest(BaseModel):
+    video_path: str
+    include_audio: bool = False
+
+
+class LoopRequest(BaseModel):
+    video_path: str
+    count: int = Field(default=2, ge=2, le=20)
+
+
+class StabilizeRequest(BaseModel):
+    video_path: str
+    shakiness: int = Field(default=5, ge=1, le=10)
+    accuracy: int = Field(default=9, ge=1, le=15)
+
+
+class ColorCorrectionRequest(BaseModel):
+    video_path: str
+    brightness: float = Field(default=0.0, ge=-1.0, le=1.0)
+    contrast: float = Field(default=1.0, ge=0.0, le=3.0)
+    saturation: float = Field(default=1.0, ge=0.0, le=3.0)
+    hue: float = Field(default=0.0, ge=-180.0, le=180.0)
+
+
+class RegionEffectRequest(BaseModel):
+    video_path: str
+    x: int = Field(default=0, ge=0)
+    y: int = Field(default=0, ge=0)
+    width: int = Field(default=200, ge=1)
+    height: int = Field(default=120, ge=1)
+    mode: str = "blur"  # blur | pixelate
+    strength: int = Field(default=12, ge=2, le=80)
+
+
+class PictureInPictureRequest(BaseModel):
+    video_path: str
+    overlay_path: str
+    position: str = "bottom_right"  # top_left | top_right | bottom_left | bottom_right | center
+    size_percent: int = Field(default=25, ge=10, le=80)
+    margin: int = Field(default=24, ge=0, le=200)
+
+
+class BackgroundMusicRequest(BaseModel):
+    video_path: str
+    audio_path: str
+    music_volume: float = Field(default=0.35, ge=0.0, le=2.0)
+    video_volume: float = Field(default=1.0, ge=0.0, le=2.0)
+
+
+class SpeedRequest(BaseModel):
+    video_path: str
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    keep_audio: bool = True
+
+
+class GifRequest(BaseModel):
+    video_path: str
+    start_time: float = Field(default=0.0, ge=0.0)
+    duration: float = Field(default=3.0, gt=0.0, le=30.0)
+    fps: int = Field(default=12, ge=4, le=30)
+    width: int = Field(default=480, ge=120, le=1280)
+
+
+class ThumbnailRequest(BaseModel):
+    video_path: str
+    timestamp: float = Field(default=0.0, ge=0.0)
+    width: int = Field(default=1280, ge=120, le=3840)
+
+
 # --- Image Studio request models ---
 
 class ImageGenerateRequest(BaseModel):
@@ -1314,6 +1403,455 @@ def _run_upscale(job_id: str, req: UpscaleRequest):
         )
 
 
+def _run_ffmpeg(cmd: list[str]) -> None:
+    import subprocess
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "unknown ffmpeg error").strip()
+        raise RuntimeError(detail.splitlines()[-1] if detail else "unknown ffmpeg error")
+
+
+def _require_video_path(video_path: str) -> None:
+    if not os.path.isfile(video_path):
+        raise FileNotFoundError(f"Video not found: {video_path}")
+
+
+def _probe_has_audio(path: str) -> bool:
+    import subprocess
+
+    proc = subprocess.run([
+        "ffprobe", "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=index",
+        "-of", "csv=p=0",
+        path,
+    ], capture_output=True, text=True)
+    return proc.returncode == 0 and bool(proc.stdout.strip())
+
+
+def _atempo_chain(speed: float) -> str:
+    parts = []
+    remaining = speed
+    while remaining > 2.0:
+        parts.append("atempo=2.0")
+        remaining /= 2.0
+    while remaining < 0.5:
+        parts.append("atempo=0.5")
+        remaining /= 0.5
+    parts.append(f"atempo={remaining:.4f}")
+    return ",".join(parts)
+
+
+def _run_extract_audio(job_id: str, req: ExtractAudioRequest):
+    try:
+        _update_job(job_id, status="running", progress=10, message="Extracting audio...")
+        _require_video_path(req.video_path)
+        fmt = req.format.lower().strip()
+        if fmt not in {"wav", "mp3"}:
+            raise ValueError("format must be wav or mp3")
+
+        output_path = os.path.join(OUTPUT_DIR, f"audio_{job_id}.{fmt}")
+        cmd = ["ffmpeg", "-y", "-i", req.video_path, "-vn"]
+        if fmt == "mp3":
+            cmd += ["-codec:a", "libmp3lame", "-q:a", "2"]
+        else:
+            cmd += ["-acodec", "pcm_s16le"]
+        cmd.append(output_path)
+        _run_ffmpeg(cmd)
+
+        if not os.path.exists(output_path) or os.path.getsize(output_path) <= 100:
+            raise RuntimeError("No audio track was extracted from this video")
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Audio extracted.",
+            result={"audio_path": output_path, "format": fmt},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Audio extraction failed: {exc}")
+
+
+def _run_remove_audio(job_id: str, req: VideoPathRequest):
+    try:
+        _update_job(job_id, status="running", progress=10, message="Removing audio...")
+        _require_video_path(req.video_path)
+        output_path = os.path.join(OUTPUT_DIR, f"muted_{job_id}.mp4")
+        _run_ffmpeg(["ffmpeg", "-y", "-i", req.video_path, "-c:v", "copy", "-an", output_path])
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Audio removed.",
+            result={"video_path": output_path},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Remove audio failed: {exc}")
+
+
+def _run_compress(job_id: str, req: CompressRequest):
+    try:
+        _update_job(job_id, status="running", progress=10, message="Compressing video...")
+        _require_video_path(req.video_path)
+        crf_by_preset = {"high": "23", "medium": "28", "low": "32"}
+        preset = req.preset.lower().strip()
+        if preset not in crf_by_preset:
+            raise ValueError("preset must be high, medium, or low")
+
+        output_path = os.path.join(OUTPUT_DIR, f"compressed_{job_id}.mp4")
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-i", req.video_path,
+            "-c:v", "libx264", "-preset", "medium", "-crf", crf_by_preset[preset],
+            "-c:a", "aac", "-b:a", "128k",
+            output_path,
+        ])
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Compression complete.",
+            result={"video_path": output_path, "preset": preset},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Compression failed: {exc}")
+
+
+def _run_rotate_flip(job_id: str, req: RotateFlipRequest):
+    try:
+        _update_job(job_id, status="running", progress=10, message="Transforming video...")
+        _require_video_path(req.video_path)
+        if req.rotate not in {0, 90, 180, 270}:
+            raise ValueError("rotate must be one of 0, 90, 180, 270")
+        flip = req.flip.lower().strip()
+        if flip not in {"none", "horizontal", "vertical"}:
+            raise ValueError("flip must be none, horizontal, or vertical")
+
+        filters = []
+        if req.rotate == 90:
+            filters.append("transpose=1")
+        elif req.rotate == 180:
+            filters.append("transpose=1,transpose=1")
+        elif req.rotate == 270:
+            filters.append("transpose=2")
+        if flip == "horizontal":
+            filters.append("hflip")
+        elif flip == "vertical":
+            filters.append("vflip")
+
+        output_path = os.path.join(OUTPUT_DIR, f"transformed_{job_id}.mp4")
+        cmd = ["ffmpeg", "-y", "-i", req.video_path]
+        if filters:
+            cmd += ["-vf", ",".join(filters), "-c:v", "libx264", "-preset", "fast", "-crf", "18"]
+        else:
+            cmd += ["-c:v", "copy"]
+        cmd += ["-c:a", "copy", output_path]
+        _run_ffmpeg(cmd)
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Transform complete.",
+            result={"video_path": output_path, "rotate": req.rotate, "flip": flip},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Transform failed: {exc}")
+
+
+def _run_reverse(job_id: str, req: ReverseRequest):
+    try:
+        _update_job(job_id, status="running", progress=10, message="Reversing video...")
+        _require_video_path(req.video_path)
+        output_path = os.path.join(OUTPUT_DIR, f"reversed_{job_id}.mp4")
+        filter_complex = "[0:v]reverse[v];[0:a]areverse[a]" if req.include_audio else "[0:v]reverse[v]"
+        cmd = ["ffmpeg", "-y", "-i", req.video_path, "-filter_complex", filter_complex, "-map", "[v]"]
+        if req.include_audio:
+            cmd += ["-map", "[a]"]
+        else:
+            cmd += ["-an"]
+        cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18", "-c:a", "aac", output_path]
+        _run_ffmpeg(cmd)
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Reverse complete.",
+            result={"video_path": output_path, "include_audio": req.include_audio},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Reverse failed: {exc}")
+
+
+def _run_loop(job_id: str, req: LoopRequest):
+    try:
+        _update_job(job_id, status="running", progress=10, message=f"Looping video {req.count} times...")
+        _require_video_path(req.video_path)
+        output_path = os.path.join(OUTPUT_DIR, f"looped_{job_id}.mp4")
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-stream_loop", str(req.count - 1), "-i", req.video_path,
+            "-c", "copy", output_path,
+        ])
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Loop complete.",
+            result={"video_path": output_path, "count": req.count},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Loop failed: {exc}")
+
+
+def _run_stabilize(job_id: str, req: StabilizeRequest):
+    try:
+        _update_job(job_id, status="running", progress=10, message="Analyzing camera motion...")
+        _require_video_path(req.video_path)
+        transforms = f"stabilize_{job_id}.trf"
+        output_path = os.path.join(OUTPUT_DIR, f"stabilized_{job_id}.mp4")
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-i", req.video_path,
+            "-vf", f"vidstabdetect=shakiness={req.shakiness}:accuracy={req.accuracy}:result={transforms}",
+            "-f", "null", os.devnull,
+        ])
+        _update_job(job_id, progress=55, message="Applying stabilization...")
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-i", req.video_path,
+            "-vf", f"vidstabtransform=input={transforms}:zoom=5:smoothing=30,unsharp=5:5:0.8:3:3:0.4",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-c:a", "copy", output_path,
+        ])
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Stabilization complete.",
+            result={"video_path": output_path, "shakiness": req.shakiness, "accuracy": req.accuracy},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Stabilization failed: {exc}")
+
+
+def _run_color_correction(job_id: str, req: ColorCorrectionRequest):
+    try:
+        _update_job(job_id, status="running", progress=10, message="Applying color correction...")
+        _require_video_path(req.video_path)
+        output_path = os.path.join(OUTPUT_DIR, f"color_{job_id}.mp4")
+        vf = (
+            f"eq=brightness={req.brightness}:contrast={req.contrast}:saturation={req.saturation},"
+            f"hue=h={req.hue}"
+        )
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-i", req.video_path,
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-c:a", "copy", output_path,
+        ])
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Color correction complete.",
+            result={"video_path": output_path},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Color correction failed: {exc}")
+
+
+def _run_region_effect(job_id: str, req: RegionEffectRequest):
+    try:
+        _update_job(job_id, status="running", progress=10, message="Applying region effect...")
+        _require_video_path(req.video_path)
+        mode = req.mode.lower().strip()
+        if mode not in {"blur", "pixelate"}:
+            raise ValueError("mode must be blur or pixelate")
+
+        output_path = os.path.join(OUTPUT_DIR, f"region_{mode}_{job_id}.mp4")
+        crop = f"crop={req.width}:{req.height}:{req.x}:{req.y}"
+        if mode == "blur":
+            effect = f"{crop},gblur=sigma={req.strength}"
+        else:
+            block = max(4, min(req.strength, 80))
+            effect = f"{crop},scale=iw/{block}:ih/{block},scale={req.width}:{req.height}:flags=neighbor"
+        filter_complex = f"[0:v]split[base][tmp];[tmp]{effect}[fg];[base][fg]overlay={req.x}:{req.y}[v]"
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-i", req.video_path,
+            "-filter_complex", filter_complex,
+            "-map", "[v]", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-c:a", "copy", output_path,
+        ])
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Region effect complete.",
+            result={"video_path": output_path, "mode": mode},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Region effect failed: {exc}")
+
+
+def _run_picture_in_picture(job_id: str, req: PictureInPictureRequest):
+    try:
+        _update_job(job_id, status="running", progress=10, message="Compositing picture-in-picture...")
+        _require_video_path(req.video_path)
+        _require_video_path(req.overlay_path)
+        positions = {
+            "top_left": f"{req.margin}:{req.margin}",
+            "top_right": f"main_w-overlay_w-{req.margin}:{req.margin}",
+            "bottom_left": f"{req.margin}:main_h-overlay_h-{req.margin}",
+            "bottom_right": f"main_w-overlay_w-{req.margin}:main_h-overlay_h-{req.margin}",
+            "center": "(main_w-overlay_w)/2:(main_h-overlay_h)/2",
+        }
+        position = req.position.lower().strip()
+        if position not in positions:
+            raise ValueError("position must be top_left, top_right, bottom_left, bottom_right, or center")
+
+        output_path = os.path.join(OUTPUT_DIR, f"pip_{job_id}.mp4")
+        scale_expr = f"[1:v][0:v]scale2ref=w=main_w*{req.size_percent}/100:h=-1[ov][base]"
+        filter_complex = f"{scale_expr};[base][ov]overlay={positions[position]}[v]"
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-i", req.video_path, "-i", req.overlay_path,
+            "-filter_complex", filter_complex,
+            "-map", "[v]", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-c:a", "copy", "-shortest", output_path,
+        ])
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Picture-in-picture complete.",
+            result={"video_path": output_path, "position": position, "size_percent": req.size_percent},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Picture-in-picture failed: {exc}")
+
+
+def _run_background_music(job_id: str, req: BackgroundMusicRequest):
+    try:
+        _update_job(job_id, status="running", progress=10, message="Adding background music...")
+        _require_video_path(req.video_path)
+        if not os.path.isfile(req.audio_path):
+            raise FileNotFoundError(f"Audio not found: {req.audio_path}")
+
+        output_path = os.path.join(OUTPUT_DIR, f"music_{job_id}.mp4")
+        if _probe_has_audio(req.video_path):
+            filter_complex = (
+                f"[0:a]volume={req.video_volume}[a0];"
+                f"[1:a]volume={req.music_volume}[a1];"
+                "[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a]"
+            )
+            cmd = [
+                "ffmpeg", "-y", "-i", req.video_path, "-stream_loop", "-1", "-i", req.audio_path,
+                "-filter_complex", filter_complex,
+                "-map", "0:v", "-map", "[a]",
+                "-c:v", "copy", "-c:a", "aac", "-shortest", output_path,
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y", "-i", req.video_path, "-stream_loop", "-1", "-i", req.audio_path,
+                "-map", "0:v", "-map", "1:a",
+                "-filter:a", f"volume={req.music_volume}",
+                "-c:v", "copy", "-c:a", "aac", "-shortest", output_path,
+            ]
+        _run_ffmpeg(cmd)
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Background music added.",
+            result={"video_path": output_path},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Background music failed: {exc}")
+
+
+def _run_speed(job_id: str, req: SpeedRequest):
+    try:
+        _update_job(job_id, status="running", progress=10, message=f"Changing speed to {req.speed}x...")
+        _require_video_path(req.video_path)
+        output_path = os.path.join(OUTPUT_DIR, f"speed_{job_id}.mp4")
+        has_audio = req.keep_audio and _probe_has_audio(req.video_path)
+        if has_audio:
+            filter_complex = f"[0:v]setpts=PTS/{req.speed}[v];[0:a]{_atempo_chain(req.speed)}[a]"
+            cmd = [
+                "ffmpeg", "-y", "-i", req.video_path,
+                "-filter_complex", filter_complex,
+                "-map", "[v]", "-map", "[a]",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                "-c:a", "aac", output_path,
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y", "-i", req.video_path,
+                "-vf", f"setpts=PTS/{req.speed}",
+                "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                output_path,
+            ]
+        _run_ffmpeg(cmd)
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Speed change complete.",
+            result={"video_path": output_path, "speed": req.speed, "keep_audio": req.keep_audio},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Speed change failed: {exc}")
+
+
+def _run_gif(job_id: str, req: GifRequest):
+    try:
+        _update_job(job_id, status="running", progress=10, message="Creating GIF...")
+        _require_video_path(req.video_path)
+        output_path = os.path.join(OUTPUT_DIR, f"gif_{job_id}.gif")
+        filter_complex = (
+            f"fps={req.fps},scale={req.width}:-1:flags=lanczos,"
+            "split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"
+        )
+        _run_ffmpeg([
+            "ffmpeg", "-y",
+            "-ss", str(req.start_time), "-t", str(req.duration),
+            "-i", req.video_path,
+            "-filter_complex", filter_complex,
+            output_path,
+        ])
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="GIF complete.",
+            result={"image_path": output_path, "start_time": req.start_time, "duration": req.duration},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"GIF creation failed: {exc}")
+
+
+def _run_thumbnail(job_id: str, req: ThumbnailRequest):
+    try:
+        _update_job(job_id, status="running", progress=10, message="Extracting thumbnail...")
+        _require_video_path(req.video_path)
+        output_path = os.path.join(OUTPUT_DIR, f"thumbnail_{job_id}.png")
+        _run_ffmpeg([
+            "ffmpeg", "-y",
+            "-ss", str(req.timestamp),
+            "-i", req.video_path,
+            "-frames:v", "1",
+            "-vf", f"scale={req.width}:-1",
+            output_path,
+        ])
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Thumbnail extracted.",
+            result={"image_path": output_path, "timestamp": req.timestamp},
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Thumbnail extraction failed: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Image Studio runners (background workers)
 # ---------------------------------------------------------------------------
@@ -1791,11 +2329,21 @@ async def download_result(job_id: str):
 
     # Determine file path from result
     result = job["result"]
-    file_path = result.get("video_path") or result.get("audio_path")
+    file_path = result.get("video_path") or result.get("audio_path") or result.get("image_path")
     if not file_path or not os.path.isfile(file_path):
         raise HTTPException(status_code=404, detail="Result file not found on disk")
 
-    media_type = "video/mp4" if file_path.endswith(".mp4") else "audio/wav"
+    lower_path = file_path.lower()
+    if lower_path.endswith(".mp4"):
+        media_type = "video/mp4"
+    elif lower_path.endswith(".gif"):
+        media_type = "image/gif"
+    elif lower_path.endswith(".png"):
+        media_type = "image/png"
+    elif lower_path.endswith(".mp3"):
+        media_type = "audio/mpeg"
+    else:
+        media_type = "audio/wav"
     return FileResponse(
         path=file_path,
         media_type=media_type,
@@ -1850,6 +2398,34 @@ def _save_upload(file: UploadFile, prefix: str) -> str:
             f.write(chunk)
     file.file.close()
     return dest
+
+
+@app.post("/api/v1/edit/upload")
+async def edit_upload(file: UploadFile = File(...)):
+    """Upload a video for edit utility endpoints."""
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in {".mp4", ".mov", ".avi", ".mkv", ".webm"}:
+        raise HTTPException(status_code=400, detail="Upload a video file: mp4, mov, avi, mkv, or webm")
+    saved = _save_upload(file, prefix="edit")
+    return {
+        "video_path": saved,
+        "filename": os.path.basename(saved),
+        "size_bytes": os.path.getsize(saved),
+    }
+
+
+@app.post("/api/v1/edit/upload-audio")
+async def edit_upload_audio(file: UploadFile = File(...)):
+    """Upload an audio file for edit utility endpoints."""
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}:
+        raise HTTPException(status_code=400, detail="Upload an audio file: mp3, wav, m4a, aac, flac, or ogg")
+    saved = _save_upload(file, prefix="edit_audio")
+    return {
+        "audio_path": saved,
+        "filename": os.path.basename(saved),
+        "size_bytes": os.path.getsize(saved),
+    }
 
 
 def _run_isolate(job_id: str, input_path: str):
@@ -1994,6 +2570,164 @@ async def upscale_video(req: UpscaleRequest, background_tasks: BackgroundTasks):
 
     job_id = _create_job("upscale", req.model_dump())
     thread = threading.Thread(target=_run_upscale, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/extract-audio", response_model=JobResponse)
+async def edit_extract_audio(req: ExtractAudioRequest):
+    """Extract a video's audio track as WAV or MP3."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    job_id = _create_job("extract_audio", req.model_dump())
+    thread = threading.Thread(target=_run_extract_audio, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/remove-audio", response_model=JobResponse)
+async def edit_remove_audio(req: VideoPathRequest):
+    """Remove the audio track from a video."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    job_id = _create_job("remove_audio", req.model_dump())
+    thread = threading.Thread(target=_run_remove_audio, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/compress", response_model=JobResponse)
+async def edit_compress(req: CompressRequest):
+    """Compress video using a quality preset."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    job_id = _create_job("compress", req.model_dump())
+    thread = threading.Thread(target=_run_compress, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/rotate-flip", response_model=JobResponse)
+async def edit_rotate_flip(req: RotateFlipRequest):
+    """Rotate and/or flip video orientation."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    job_id = _create_job("rotate_flip", req.model_dump())
+    thread = threading.Thread(target=_run_rotate_flip, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/reverse", response_model=JobResponse)
+async def edit_reverse(req: ReverseRequest):
+    """Reverse video playback, optionally including audio."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    job_id = _create_job("reverse", req.model_dump())
+    thread = threading.Thread(target=_run_reverse, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/loop", response_model=JobResponse)
+async def edit_loop(req: LoopRequest):
+    """Loop a video multiple times."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    job_id = _create_job("loop", req.model_dump())
+    thread = threading.Thread(target=_run_loop, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/stabilize", response_model=JobResponse)
+async def edit_stabilize(req: StabilizeRequest):
+    """Stabilize shaky footage using ffmpeg vidstab."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    job_id = _create_job("stabilize", req.model_dump())
+    thread = threading.Thread(target=_run_stabilize, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/color-correction", response_model=JobResponse)
+async def edit_color_correction(req: ColorCorrectionRequest):
+    """Adjust brightness, contrast, saturation, and hue."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    job_id = _create_job("color_correction", req.model_dump())
+    thread = threading.Thread(target=_run_color_correction, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/region-effect", response_model=JobResponse)
+async def edit_region_effect(req: RegionEffectRequest):
+    """Blur or pixelate a rectangular video region."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    job_id = _create_job("region_effect", req.model_dump())
+    thread = threading.Thread(target=_run_region_effect, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/picture-in-picture", response_model=JobResponse)
+async def edit_picture_in_picture(req: PictureInPictureRequest):
+    """Overlay one video on another."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    if not os.path.isfile(req.overlay_path):
+        raise HTTPException(status_code=422, detail=f"Overlay video file not found: {req.overlay_path}")
+    job_id = _create_job("picture_in_picture", req.model_dump())
+    thread = threading.Thread(target=_run_picture_in_picture, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/background-music", response_model=JobResponse)
+async def edit_background_music(req: BackgroundMusicRequest):
+    """Mix or add background music to a video."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    if not os.path.isfile(req.audio_path):
+        raise HTTPException(status_code=422, detail=f"Audio file not found: {req.audio_path}")
+    job_id = _create_job("background_music", req.model_dump())
+    thread = threading.Thread(target=_run_background_music, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/speed", response_model=JobResponse)
+async def edit_speed(req: SpeedRequest):
+    """Change video playback speed."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    job_id = _create_job("speed", req.model_dump())
+    thread = threading.Thread(target=_run_speed, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/gif", response_model=JobResponse)
+async def edit_gif(req: GifRequest):
+    """Convert a video segment to an animated GIF."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    job_id = _create_job("gif", req.model_dump())
+    thread = threading.Thread(target=_run_gif, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/thumbnail", response_model=JobResponse)
+async def edit_thumbnail(req: ThumbnailRequest):
+    """Extract a PNG thumbnail from a video timestamp."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    job_id = _create_job("thumbnail", req.model_dump())
+    thread = threading.Thread(target=_run_thumbnail, args=(job_id, req), daemon=True)
     thread.start()
     return _job_response(job_id)
 

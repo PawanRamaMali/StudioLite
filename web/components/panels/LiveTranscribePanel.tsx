@@ -6,10 +6,11 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import {
   Mic, MonitorSpeaker, Radio, Square, Download, Loader2, AlertCircle, Languages,
-  Copy, Check,
+  Copy, Check, Scissors,
 } from "lucide-react";
 
 type Segment = { start: number; end: number; text: string };
+type Block = { id: string; segments: Segment[] };
 type ServerMsg =
   | { type: "ready"; session: string; device: string }
   | { type: "status"; stage: "loading_model" | "model_ready"; model?: string }
@@ -108,8 +109,9 @@ export default function LiveTranscribePanel() {
   const [elapsed, setElapsed] = useState(0);
   const [finals, setFinals] = useState<Segment[]>([]);
   const [partial, setPartial] = useState<Segment | null>(null);
+  const [blocks, setBlocks] = useState<Block[]>([]);
   const [downloads, setDownloads] = useState<{ txt: string; srt: string; json: string } | null>(null);
-  const [copied, setCopied] = useState<"all" | "last5" | null>(null);
+  const [copied, setCopied] = useState<"all" | "last5" | "split" | `block-${string}` | null>(null);
 
   // Mic device selection + live input-level meter, so the user can pick the
   // right input and confirm it's actually picking up sound before recording.
@@ -276,6 +278,7 @@ export default function LiveTranscribePanel() {
     setErrorMsg(null);
     setFinals([]);
     setPartial(null);
+    setBlocks([]);
     setDownloads(null);
     completeRef.current = false;
     setStatus("connecting");
@@ -313,6 +316,14 @@ export default function LiveTranscribePanel() {
       const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
       audioCtxRef.current = ctx;
       await ctx.audioWorklet.addModule("/pcm-worklet.js");
+      // After the getUserMedia prompt resolves the click gesture is often
+      // considered "consumed", so Chrome opens the AudioContext in "suspended"
+      // state. The worklet then never runs and the first Start reliably fails
+      // while the second (with permissions already granted) works. Explicit
+      // resume here is the fix.
+      if (ctx.state === "suspended") {
+        try { await ctx.resume(); } catch { /* ignore — worklet still connects */ }
+      }
 
       const workletNode = new AudioWorkletNode(ctx, "pcm-processor", {
         numberOfInputs: 1,
@@ -323,21 +334,44 @@ export default function LiveTranscribePanel() {
       });
       workletNodeRef.current = workletNode;
 
-      // 3. Open WebSocket
+      // 3. Open WebSocket, with one retry — the very first connect after
+      // cold-start sometimes fires `onerror` before the server finishes
+      // registering the route, and the second attempt then works instantly.
       const session = `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       sessionRef.current = session;
       const params = new URLSearchParams({ session, model });
       if (language) params.set("language", language);
       if (translate) params.set("translate", "1");
-      const ws = new WebSocket(`${WS_BASE}/api/v1/transcribe/live?${params.toString()}`);
-      ws.binaryType = "arraybuffer";
-      wsRef.current = ws;
+      const wsUrl = `${WS_BASE}/api/v1/transcribe/live?${params.toString()}`;
 
-      await new Promise<void>((resolve, reject) => {
-        const to = window.setTimeout(() => reject(new Error("WebSocket connect timeout")), 8000);
-        ws.onopen = () => { window.clearTimeout(to); resolve(); };
-        ws.onerror = () => { window.clearTimeout(to); reject(new Error("WebSocket connection failed")); };
+      const openWs = () => new Promise<WebSocket>((resolve, reject) => {
+        const sock = new WebSocket(wsUrl);
+        sock.binaryType = "arraybuffer";
+        const to = window.setTimeout(() => {
+          try { sock.close(); } catch { /* ignore */ }
+          reject(new Error("WebSocket connect timeout"));
+        }, 8000);
+        sock.onopen = () => { window.clearTimeout(to); resolve(sock); };
+        sock.onerror = () => {
+          window.clearTimeout(to);
+          try { sock.close(); } catch { /* ignore */ }
+          reject(new Error("WebSocket connection failed"));
+        };
       });
+
+      let ws: WebSocket;
+      try {
+        ws = await openWs();
+      } catch (firstErr) {
+        // Brief backoff then a single retry.
+        await new Promise((r) => window.setTimeout(r, 400));
+        try {
+          ws = await openWs();
+        } catch {
+          throw firstErr;
+        }
+      }
+      wsRef.current = ws;
 
       ws.onmessage = (ev) => {
         try {
@@ -465,7 +499,7 @@ export default function LiveTranscribePanel() {
     stopMeter();
   }, [cleanup, stopMeter]);
 
-  const copyText = useCallback(async (text: string, kind: "all" | "last5") => {
+  const copyText = useCallback(async (text: string, kind: "all" | "last5" | `block-${string}`) => {
     if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
@@ -483,6 +517,18 @@ export default function LiveTranscribePanel() {
       document.body.removeChild(ta);
     }
   }, []);
+
+  // Snapshot the current live text into a fresh block, then reset the live
+  // area so subsequent captions accumulate from this point onward.
+  const splitBlock = useCallback(() => {
+    if (finals.length === 0) return;
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    setBlocks((prev) => [...prev, { id, segments: finals }]);
+    setFinals([]);
+    setPartial(null);
+    setCopied("split");
+    window.setTimeout(() => setCopied((c) => (c === "split" ? null : c)), 1200);
+  }, [finals]);
 
   const allText = finals.map((s) => s.text).join(" ");
   const last5Text = finals.slice(-5).map((s) => s.text).join(" ");
@@ -680,6 +726,47 @@ export default function LiveTranscribePanel() {
 
         {/* Right column: live output */}
         <div className="lg:col-span-2 space-y-4">
+          {blocks.map((b, bi) => {
+            const first = b.segments[0];
+            const last = b.segments[b.segments.length - 1];
+            const range = first && last ? `${fmtClock(first.start)} – ${fmtClock(last.end)}` : "";
+            const blockText = b.segments.map((s) => s.text).join(" ");
+            const kind: `block-${string}` = `block-${b.id}`;
+            return (
+              <Card key={b.id}>
+                <div className="flex items-center justify-between mb-2 gap-3 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <Scissors className="w-3.5 h-3.5 text-indigo-400" />
+                    <CardTitle className="text-sm">Block {bi + 1}</CardTitle>
+                    <span className="text-[10px] font-mono text-zinc-500">{range}</span>
+                    <span className="text-[10px] text-zinc-500">
+                      · {b.segments.length} segment{b.segments.length === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => copyText(blockText, kind)}
+                    title="Copy this block without timestamps"
+                  >
+                    {copied === kind ? (
+                      <><Check className="w-3.5 h-3.5 mr-1.5 text-green-400" /> Copied</>
+                    ) : (
+                      <><Copy className="w-3.5 h-3.5 mr-1.5" /> Copy</>
+                    )}
+                  </Button>
+                </div>
+                <div className="bg-zinc-950/40 border border-zinc-800 rounded-lg p-3 max-h-[220px] overflow-y-auto space-y-1">
+                  {b.segments.map((s, i) => (
+                    <p key={i} className="text-sm text-zinc-300 leading-relaxed">
+                      <span className="text-[10px] font-mono text-zinc-600 mr-2">[{fmtClock(s.start)}]</span>
+                      {s.text}
+                    </p>
+                  ))}
+                </div>
+              </Card>
+            );
+          })}
           <Card className="min-h-[420px] flex flex-col">
             <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
               <div className="flex items-center gap-2">
@@ -696,6 +783,19 @@ export default function LiveTranscribePanel() {
                 </span>
               </div>
               <div className="flex items-center gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={splitBlock}
+                  disabled={finals.length === 0 || !active}
+                  title="Move the current live text into a fresh block above. New captions will accumulate in a clean area from now on."
+                >
+                  {copied === "split" ? (
+                    <><Check className="w-3.5 h-3.5 mr-1.5 text-green-400" /> Split</>
+                  ) : (
+                    <><Scissors className="w-3.5 h-3.5 mr-1.5" /> Split</>
+                  )}
+                </Button>
                 <Button
                   variant="secondary"
                   size="sm"

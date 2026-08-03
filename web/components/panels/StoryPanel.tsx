@@ -10,7 +10,7 @@ import {
   UserCircle, Upload, Shield, ImageIcon, X, Copy, Check, Eye,
   Pause, SkipForward, SkipBack, Volume2, FileText, Film,
 } from "lucide-react";
-import { generateStory, getJob, getDownloadUrl, getPortraitUrl } from "@/lib/api";
+import { generateStory, getJob, getDownloadUrl, getPortraitUrl, downloadBlob } from "@/lib/api";
 
 interface Scene {
   id: string;
@@ -1361,9 +1361,9 @@ export default function StoryPanel() {
                       }`}>
                       <FileText className="w-3 h-3" /> Script View
                     </button>
-                    <a href={getDownloadUrl(resultJobId)} download>
-                      <Button size="sm" variant="secondary"><Download className="w-3 h-3 mr-1" /> Download</Button>
-                    </a>
+                    <Button size="sm" variant="secondary" onClick={() => {
+                      downloadBlob(getDownloadUrl(resultJobId), `${resultJobId}.mp4`).catch(() => {});
+                    }}><Download className="w-3 h-3 mr-1" /> Download</Button>
                   </div>
                 </div>
 

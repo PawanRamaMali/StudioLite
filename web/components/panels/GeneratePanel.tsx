@@ -5,7 +5,7 @@ import { Card, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Sparkles, Play, Loader2, Download, Camera, Film, Zap } from "lucide-react";
-import { generateText2Video, getJob, getDownloadUrl } from "@/lib/api";
+import { generateText2Video, getJob, getDownloadUrl, downloadBlob } from "@/lib/api";
 
 const SAMPLE_PROMPTS = [
   { label: "Cinematic Nature", prompt: "A majestic eagle soaring through dramatic mountain landscape at golden hour, snow-capped peaks, volumetric clouds, cinematic tracking shot, warm sunlight on detailed feathers, 4K quality" },
@@ -293,11 +293,11 @@ export default function GeneratePanel() {
               <div className="w-full">
                 <video src={getDownloadUrl(resultJobId)} controls autoPlay loop muted
                   className="w-full rounded-lg border border-zinc-700" />
-                <a href={getDownloadUrl(resultJobId)} download className="block mt-3">
-                  <Button variant="secondary" className="w-full">
-                    <Download className="w-4 h-4 mr-2" /> Download MP4
-                  </Button>
-                </a>
+                <Button variant="secondary" className="w-full mt-3" onClick={() => {
+                  downloadBlob(getDownloadUrl(resultJobId), `${resultJobId}.mp4`).catch(() => {});
+                }}>
+                  <Download className="w-4 h-4 mr-2" /> Download MP4
+                </Button>
                 <p className="text-xs text-zinc-500 mt-2 text-center">Job: {resultJobId}</p>
               </div>
             ) : (

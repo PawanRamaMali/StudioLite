@@ -107,6 +107,10 @@ def install_hint() -> str:
             steps.append(f'Create symlink: ln -s "{LATENTSYNC_WEIGHTS}" "{ckpt_link}"')
     if not steps:
         return "LatentSync is set up correctly."
+    # NOTE: don't pip-install third_party/LatentSync/requirements.txt into the
+    # main venv — it pins torch==2.5.1+cu121 which conflicts with our own torch
+    # and hard-fails on CPU-only machines. LatentSync runs fine against the
+    # torch already in the main venv.
     return "LatentSync setup incomplete:\n  - " + "\n  - ".join(steps)
 
 

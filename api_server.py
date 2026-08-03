@@ -2006,13 +2006,17 @@ def _compute_features(has_cuda: bool) -> dict:
     Only features that can be genuinely blocked by hardware or missing weights
     appear here — CPU-safe features (transcription, TTS, audio studio, video
     editor, LLM, cloud image providers) are always available and not listed.
+
+    ``local_sdxl`` and ``local_character_portrait`` are available on CPU too
+    (SDXL falls back to fp32 CPU inference — ~5-15 min per 1024px image) so
+    the frontend should surface a "slow on CPU" hint rather than gating them.
     """
     features = {
         "video_generation": False,
         "qwen_edit": False,
         "lipsync": False,
-        "local_sdxl": has_cuda,
-        "local_character_portrait": has_cuda,
+        "local_sdxl": True,
+        "local_character_portrait": True,
     }
     try:
         import scene_generator as _sg
@@ -4138,14 +4142,22 @@ def _ensure_ffmpeg_on_path():
     import shutil
     if shutil.which("ffmpeg") and shutil.which("ffprobe"):
         return
-    candidates = [
-        r"C:\Program Files\WinGet\Links",
-        r"C:\Program Files\Gyan.FFmpeg\bin",
-        r"C:\ffmpeg\bin",
-        r"C:\ProgramData\chocolatey\bin",
-    ]
+    if os.name == "nt":
+        candidates = [
+            r"C:\Program Files\WinGet\Links",
+            r"C:\Program Files\Gyan.FFmpeg\bin",
+            r"C:\ffmpeg\bin",
+            r"C:\ProgramData\chocolatey\bin",
+        ]
+        exe = "ffmpeg.exe"
+    else:
+        candidates = [
+            "/usr/bin", "/usr/local/bin", "/snap/bin",
+            "/opt/homebrew/bin", os.path.expanduser("~/.local/bin"),
+        ]
+        exe = "ffmpeg"
     for c in candidates:
-        if os.path.isfile(os.path.join(c, "ffmpeg.exe")):
+        if os.path.isfile(os.path.join(c, exe)):
             os.environ["PATH"] = c + os.pathsep + os.environ.get("PATH", "")
             return
 

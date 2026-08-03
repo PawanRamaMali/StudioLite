@@ -189,25 +189,25 @@ export default function CharactersPanel() {
         </p>
       </div>
 
-      {gpuChecked && !hasGpu ? (
-        <div className="mb-4 flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm">
-          <Cpu className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+      {gpuChecked && !hasGpu && (
+        <div className="mb-4 flex items-start gap-3 rounded-lg border border-yellow-500/30 bg-yellow-500/5 p-4 text-sm">
+          <Cpu className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
           <div>
-            <p className="font-medium text-amber-300">Character portrait generation requires an NVIDIA GPU.</p>
-            <p className="text-amber-200/80 mt-1">
-              Portraits are rendered locally via SDXL, which needs a CUDA device. You can still draft characters here
-              and reuse them once GPU support is available (or configure a cloud image provider in Settings).
+            <p className="font-medium text-yellow-300">Slow on CPU — portrait generation will take 5-15 minutes per view.</p>
+            <p className="text-yellow-200/80 mt-1">
+              No NVIDIA GPU detected, so SDXL runs in fp32 on your CPU. For a character with 2 views expect ~15-30 minutes total.
+              A GPU would bring this under a minute.
             </p>
           </div>
         </div>
-      ) : (
-        <div className="mb-4 px-4 py-2.5 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center gap-2">
-          <Camera className="w-4 h-4 text-indigo-400 flex-shrink-0" />
-          <p className="text-xs text-indigo-300">
-            Characters are generated as actual images (front, side, 3/4 views) using SDXL, then registered with IP-Adapter for face/appearance consistency across all scenes.
-          </p>
-        </div>
       )}
+
+      <div className="mb-4 px-4 py-2.5 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center gap-2">
+        <Camera className="w-4 h-4 text-indigo-400 flex-shrink-0" />
+        <p className="text-xs text-indigo-300">
+          Characters are generated as actual images (front, side, 3/4 views) using SDXL, then registered with IP-Adapter for face/appearance consistency across all scenes.
+        </p>
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left column - Create form */}
@@ -315,12 +315,9 @@ export default function CharactersPanel() {
               </div>
 
               <Button className="w-full" onClick={addAndGenerate}
-                disabled={!name.trim() || !desc.trim() || !hasGpu}>
-                {!hasGpu ? (
-                  <><Cpu className="w-3.5 h-3.5 mr-1.5" /> Requires NVIDIA GPU</>
-                ) : (
-                  <><Sparkles className="w-3.5 h-3.5 mr-1.5" /> Generate Character</>
-                )}
+                disabled={!name.trim() || !desc.trim()}>
+                <Sparkles className="w-3.5 h-3.5 mr-1.5" />
+                {!hasGpu ? "Generate Character (slow on CPU)" : "Generate Character"}
               </Button>
             </div>
           </Card>
@@ -402,7 +399,7 @@ export default function CharactersPanel() {
 
                   {/* Actions */}
                   <div className="flex gap-2 mt-3 pt-3 border-t border-zinc-800 flex-wrap">
-                    <Button size="sm" variant="secondary" onClick={() => regeneratePortraits(char)} disabled={char.generating || !hasGpu}>
+                    <Button size="sm" variant="secondary" onClick={() => regeneratePortraits(char)} disabled={char.generating}>
                       <RefreshCw className={`w-3 h-3 mr-1 ${char.generating ? "animate-spin" : ""}`} /> Regenerate
                     </Button>
                     <Button size="sm" variant="ghost" onClick={() => {

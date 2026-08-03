@@ -28,7 +28,7 @@ const NAV_ITEMS: { id: string; label: string; icon: typeof Video; group: string;
   { id: "screen-transcribe", label: "Screen Transcribe", icon: ScanText, group: "Tools" },
   { id: "video-transcribe", label: "Video Transcribe", icon: FileVideo, group: "Tools" },
   { id: "upscale", label: "Upscale Video", icon: ArrowUpCircle, group: "Tools" },
-  { id: "characters", label: "Characters", icon: Users, group: "Assets", gpuRequired: true },
+  { id: "characters", label: "Characters", icon: Users, group: "Assets" },
   { id: "keyframes", label: "Keyframes", icon: KeyRound, group: "Assets" },
   { id: "jobs", label: "Jobs", icon: Briefcase, group: "System" },
   { id: "settings", label: "Settings", icon: Settings, group: "System" },

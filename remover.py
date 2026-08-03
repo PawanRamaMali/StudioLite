@@ -17,15 +17,18 @@ import ffmpeg
 import tempfile
 import shutil
 
-# Add ffmpeg to PATH if installed via winget
-_ffmpeg_winget_path = os.path.expanduser("~/AppData/Local/Microsoft/WinGet/Packages")
-for _dir in os.listdir(_ffmpeg_winget_path) if os.path.isdir(_ffmpeg_winget_path) else []:
-    if "FFmpeg" in _dir:
-        _bin_path = os.path.join(_ffmpeg_winget_path, _dir)
-        for _root, _dirs, _files in os.walk(_bin_path):
-            if "ffmpeg.exe" in _files:
-                os.environ["PATH"] = _root + os.pathsep + os.environ.get("PATH", "")
-                break
+# Add ffmpeg to PATH if installed via winget (Windows only).
+# On Linux/macOS, ffmpeg is expected to be on $PATH already (apt install ffmpeg
+# / brew install ffmpeg).
+if os.name == "nt":
+    _ffmpeg_winget_path = os.path.expanduser("~/AppData/Local/Microsoft/WinGet/Packages")
+    for _dir in os.listdir(_ffmpeg_winget_path) if os.path.isdir(_ffmpeg_winget_path) else []:
+        if "FFmpeg" in _dir:
+            _bin_path = os.path.join(_ffmpeg_winget_path, _dir)
+            for _root, _dirs, _files in os.walk(_bin_path):
+                if "ffmpeg.exe" in _files:
+                    os.environ["PATH"] = _root + os.pathsep + os.environ.get("PATH", "")
+                    break
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

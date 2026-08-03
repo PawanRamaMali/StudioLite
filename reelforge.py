@@ -443,15 +443,30 @@ def rf_load_sdxl_pipeline(model_name=None):
                 local_model = os.path.join(models_dir, f)
                 break
 
+    # On CUDA we use fp16 (fast, memory-efficient). On CPU we fall back to fp32
+    # because most CPU kernels don't support fp16 and would raise. CPU inference
+    # is 5-15 min per 1024px image but at least the pipeline works end-to-end.
+    has_cuda = torch.cuda.is_available()
+    dtype = torch.float16 if has_cuda else torch.float32
+    device = "cuda" if has_cuda else "cpu"
+
     if local_model:
-        _sdxl_pipe = StableDiffusionXLPipeline.from_single_file(local_model, torch_dtype=torch.float16)
+        _sdxl_pipe = StableDiffusionXLPipeline.from_single_file(local_model, torch_dtype=dtype)
     else:
         from diffusers import AutoPipelineForText2Image
-        _sdxl_pipe = AutoPipelineForText2Image.from_pretrained(
-            "stabilityai/sdxl-turbo", torch_dtype=torch.float16, variant="fp16"
-        )
+        if has_cuda:
+            _sdxl_pipe = AutoPipelineForText2Image.from_pretrained(
+                "stabilityai/sdxl-turbo", torch_dtype=dtype, variant="fp16",
+            )
+        else:
+            # variant="fp16" downloads the fp16 shards, which are useless on CPU
+            # and half the size — but the pipeline would still convert them to
+            # fp32 at load time. Skip variant so we pull the fp32 shards directly.
+            _sdxl_pipe = AutoPipelineForText2Image.from_pretrained(
+                "stabilityai/sdxl-turbo", torch_dtype=dtype,
+            )
 
-    _sdxl_pipe = _sdxl_pipe.to("cuda")
+    _sdxl_pipe = _sdxl_pipe.to(device)
     _sdxl_pipe.set_progress_bar_config(disable=True)
     _sdxl_loaded_model = model_name
 

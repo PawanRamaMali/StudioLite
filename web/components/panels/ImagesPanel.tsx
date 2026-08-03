@@ -5,12 +5,12 @@ import { Card, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import {
   Image as ImageIcon, Wand2, Sparkles, Upload, Layers, ArrowUpCircle,
-  Eraser, Copy, Download, Loader2, RefreshCw, Dice5,
+  Eraser, Copy, Download, Loader2, RefreshCw, Dice5, Cpu,
 } from "lucide-react";
 import {
   getImagesCatalog, enhancePrompt, generateImage, editImage, variationImage,
   upscaleImage, removeBgImage, getJob, getImagesHistory, uploadImage, getImageUrl,
-  downloadBlob,
+  downloadBlob, getSystemStatus, type SystemStatus,
 } from "@/lib/api";
 
 type Mode = "generate" | "edit" | "variation" | "upscale" | "removebg";
@@ -79,8 +79,11 @@ export default function ImagesPanel() {
 
   // Gallery
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [sysStatus, setSysStatus] = useState<SystemStatus | null>(null);
+  const hasGpu = sysStatus?.capabilities?.cuda ?? true;
+  const gpuChecked = sysStatus !== null;
 
-  // Load catalog + history on mount
+  // Load catalog + history + capabilities on mount
   useEffect(() => {
     getImagesCatalog().then(c => {
       setCatalog(c);
@@ -90,6 +93,7 @@ export default function ImagesPanel() {
         setNegativePrompt(c.default_negatives[style] || c.default_negatives._base || "");
       }
     }).catch(() => setCatalog(null));
+    getSystemStatus().then(setSysStatus).catch(() => setSysStatus(null));
     refreshHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -298,6 +302,18 @@ export default function ImagesPanel() {
           Generate, edit, vary, upscale and clean up images — local SDXL{catalog?.providers?.find(p => p.id === "fooocus") ? ", Fooocus" : ""}{catalog?.providers?.find(p => p.id === "nanobanana2") ? ", Gemini" : ""}.
         </p>
       </div>
+
+      {gpuChecked && !hasGpu && (
+        <div className="mb-6 flex items-start gap-3 rounded-lg border border-yellow-500/30 bg-yellow-500/5 p-4 text-sm">
+          <Cpu className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="font-medium text-yellow-300">Local SDXL runs on CPU — expect 5-15 min per image.</p>
+            <p className="text-yellow-200/80 mt-1">
+              No NVIDIA GPU detected, so SDXL falls back to fp32 CPU inference. Basic T2I, Img2Img, Inpaint and Variation all still work; the Qwen edit technique is unavailable. Upscaling with Lanczos and background removal are fast either way. Configure Fooocus or Gemini in Settings for cloud-hosted generation.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Mode tabs */}
       <div className="grid grid-cols-5 gap-2 mb-6">

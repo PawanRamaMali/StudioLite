@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import {
-  Video, Wand2, BookOpen, Scissors, Music, ArrowUpCircle,
+  Home, Video, Wand2, BookOpen, Scissors, Music, ArrowUpCircle,
   Users, KeyRound, Briefcase, Settings, ChevronLeft, ChevronRight,
   Sparkles, Image as ImageIcon, Radio, ScanText, FileVideo, Cpu,
 } from "lucide-react";
@@ -19,6 +19,7 @@ interface SidebarProps {
 // gpuRequired: tab won't work without a CUDA GPU today. Still clickable so
 // users see the feature; the panel itself renders an explanatory state.
 const NAV_ITEMS: { id: string; label: string; icon: typeof Video; group: string; gpuRequired?: boolean }[] = [
+  { id: "home", label: "Home", icon: Home, group: "Start" },
   { id: "generate", label: "Video Generator", icon: Video, group: "Create", gpuRequired: true },
   { id: "story", label: "Story Mode", icon: BookOpen, group: "Create", gpuRequired: true },
   { id: "images", label: "Images Studio", icon: ImageIcon, group: "Create" },

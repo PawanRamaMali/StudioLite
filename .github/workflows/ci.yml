@@ -70,9 +70,12 @@ jobs:
         run: |
           set -e
           python -m pip install --upgrade pip
-          # --dry-run resolves the full graph without downloading the world.
-          # It catches wheel-availability regressions on either OS.
-          pip install --dry-run -r requirements-${{ matrix.build }}.txt -r requirements.txt
+          # Mirror the README install path: torch overlay FIRST (its --index-url
+          # points at the CPU/CUDA-specific wheel index), then the base
+          # requirements against pypi. Merging both into one `pip install` would
+          # apply the torch index to every package and fail on pymupdf etc.
+          pip install --dry-run -r requirements-${{ matrix.build }}.txt
+          pip install --dry-run -r requirements.txt
 
   frontend-typecheck:
     name: Frontend typecheck

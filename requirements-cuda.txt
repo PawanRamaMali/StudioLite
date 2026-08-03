@@ -1,0 +1,8 @@
+# CUDA torch wheels (default PyPI index — Linux/Windows pull the CUDA build).
+# Install BEFORE requirements.txt to lock the torch version before transitive
+# resolution.
+#
+#   pip install -r requirements-cuda.txt
+#   pip install -r requirements.txt
+torch>=2.0.0
+torchaudio>=2.0.0

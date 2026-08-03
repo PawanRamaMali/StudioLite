@@ -422,37 +422,79 @@ StudioLite/
 ### Prerequisites
 
 - Python 3.10+
-- FFmpeg installed on your system
-- NVIDIA GPU with CUDA (recommended for SDXL image generation)
+- FFmpeg on your system PATH
+- **Optional but strongly recommended:** NVIDIA GPU with CUDA drivers
+
+StudioLite runs on Windows and Ubuntu Linux, with or without an NVIDIA GPU.
+Without a GPU, all CPU-safe features (Audio Studio, Transcription, Video
+Editor, LLM, Doc Writer, Live/Screen/Video Transcribe) work at full speed,
+Images Studio and Character Portraits work but slowly (~5-15 min per image
+on CPU), and video generation / Qwen edit / LatentSync are disabled with a
+clear in-app explanation.
+
+### System dependencies
+
+**Ubuntu / Debian**
+```bash
+sudo apt update
+sudo apt install -y ffmpeg imagemagick python3-venv python3-dev build-essential
+```
+
+**Windows**
+```powershell
+winget install Gyan.FFmpeg
+winget install ImageMagick.ImageMagick   # only if you use MoviePy TextClip
+```
 
 ### Installation
 
 ```bash
-# Clone the repository
+# Clone
 git clone https://github.com/PawanRamaMali/StudioLite.git
 cd StudioLite
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+# Create the venv
+python3 -m venv venv                                # Windows: python -m venv venv
+source venv/bin/activate                            # Windows: .\venv\Scripts\Activate.ps1
 
-# Install dependencies
+# Install torch first (the right build for your hardware), then the rest
+pip install -r requirements-cuda.txt   # NVIDIA GPU:  pulls default (CUDA) torch
+# --- OR ---
+pip install -r requirements-cpu.txt    # CPU only:    pulls torch from the CPU index
 pip install -r requirements.txt
 
-# For CUDA GPU support (recommended):
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-# For llama.cpp with GPU acceleration:
+# For llama.cpp with GPU acceleration (optional):
 CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python --force-reinstall --no-cache-dir
 ```
 
 ### Running the App
 
+**Next.js UI (recommended for creative workflows)**
 ```bash
-streamlit run app.py
+./launch.sh                                          # Linux/macOS
+.\launch.ps1                                         # Windows
+```
+The launcher starts the FastAPI backend on :8000 and the Next.js dev server
+on :3000, waits for both, then opens http://localhost:3000 in your browser.
+
+**Streamlit UI (full toolbox)**
+```bash
+streamlit run app.py                                 # http://localhost:8501
 ```
 
-Open http://localhost:8501 in your browser.
+### LatentSync (optional, GPU only)
+
+Story Mode's lip-sync uses [LatentSync 1.6](https://github.com/bytedance/LatentSync)
+via subprocess. If you want it:
+
+1. Clone: `git clone https://github.com/bytedance/LatentSync.git third_party/LatentSync`
+2. Download the weights from HuggingFace into `.models/latentsync-16/`
+3. The app auto-creates the `third_party/LatentSync/checkpoints` link on first launch
+   (symlink on Linux/macOS, junction on Windows) — no manual `mklink`/`ln -s` needed
+
+Do **not** `pip install -r third_party/LatentSync/requirements.txt` — its pin on
+`torch==2.5.1+cu121` conflicts with the main venv's torch and breaks CPU installs.
+LatentSync runs against whatever torch is already in your venv.
 
 ---
 

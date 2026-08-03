@@ -8,8 +8,10 @@ streamlit>=1.28.0
 google-api-python-client>=2.100.0
 google-auth-oauthlib>=1.1.0
 google-auth-httplib2>=0.1.1
-torch>=2.0.0
-torchaudio>=2.0.0
+# torch + torchaudio are installed separately — pick the right build for your
+# hardware first, then install this file:
+#   GPU:  pip install -r requirements-cuda.txt && pip install -r requirements.txt
+#   CPU:  pip install -r requirements-cpu.txt  && pip install -r requirements.txt
 whisperx>=3.1.0
 audio-recorder-streamlit>=0.0.8
 

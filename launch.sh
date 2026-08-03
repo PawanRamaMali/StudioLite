@@ -20,7 +20,15 @@ WEB_ERR="$LOG_DIR/web.err.log"
 VENV_PY="$ROOT/venv/bin/python"
 if [[ ! -x "$VENV_PY" ]]; then
     echo "venv missing at $VENV_PY" >&2
-    echo "Run: python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt" >&2
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        echo "NVIDIA GPU detected. Run:" >&2
+        echo "  python3 -m venv venv && source venv/bin/activate" >&2
+        echo "  pip install -r requirements-cuda.txt && pip install -r requirements.txt" >&2
+    else
+        echo "No NVIDIA GPU detected — installing CPU-only torch wheels:" >&2
+        echo "  python3 -m venv venv && source venv/bin/activate" >&2
+        echo "  pip install -r requirements-cpu.txt && pip install -r requirements.txt" >&2
+    fi
     read -r -p "Press Enter to close..." _
     exit 1
 fi

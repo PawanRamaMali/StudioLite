@@ -3326,7 +3326,7 @@ async def set_env_var(key: str, value: str):
     env_file = os.path.join(ROOT_DIR, ".env")
     env_lines = []
     if os.path.exists(env_file):
-        with open(env_file, "r") as f:
+        with open(env_file, "r", encoding="utf-8") as f:
             env_lines = f.readlines()
     # Update or add the key
     found = False
@@ -3337,7 +3337,7 @@ async def set_env_var(key: str, value: str):
             break
     if not found:
         env_lines.append(f"{key.strip()}={value}\n")
-    with open(env_file, "w") as f:
+    with open(env_file, "w", encoding="utf-8") as f:
         f.writelines(env_lines)
     return {"status": "ok", "key": key.strip(), "persisted": True}
 
@@ -3350,10 +3350,10 @@ async def delete_env_var(key: str):
     # Remove from .env file
     env_file = os.path.join(ROOT_DIR, ".env")
     if os.path.exists(env_file):
-        with open(env_file, "r") as f:
+        with open(env_file, "r", encoding="utf-8") as f:
             lines = f.readlines()
         lines = [l for l in lines if not l.strip().startswith(f"{key}=")]
-        with open(env_file, "w") as f:
+        with open(env_file, "w", encoding="utf-8") as f:
             f.writelines(lines)
     return {"status": "ok", "key": key, "deleted": True}
 
@@ -3402,7 +3402,7 @@ async def test_hf_token(token: str):
         env_file = os.path.join(ROOT_DIR, ".env")
         env_lines = []
         if os.path.exists(env_file):
-            with open(env_file, "r") as f:
+            with open(env_file, "r", encoding="utf-8") as f:
                 env_lines = f.readlines()
         found = False
         for i, line in enumerate(env_lines):
@@ -3412,7 +3412,7 @@ async def test_hf_token(token: str):
                 break
         if not found:
             env_lines.append(f"HF_TOKEN={token}\n")
-        with open(env_file, "w") as f:
+        with open(env_file, "w", encoding="utf-8") as f:
             f.writelines(env_lines)
         return {"status": "ok", "user": info.get("name", "unknown"), "message": f"Token valid. Authenticated as {info.get('name', 'unknown')}."}
     except Exception as e:
@@ -4167,7 +4167,7 @@ _ensure_ffmpeg_on_path()
 # Load .env file on startup
 _env_file = os.path.join(ROOT_DIR, ".env")
 if os.path.exists(_env_file):
-    with open(_env_file, "r") as _f:
+    with open(_env_file, "r", encoding="utf-8") as _f:
         for _line in _f:
             _line = _line.strip()
             if _line and not _line.startswith("#") and "=" in _line:

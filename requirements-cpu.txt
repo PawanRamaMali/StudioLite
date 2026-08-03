@@ -1,0 +1,9 @@
+# CPU-only torch wheels (~200 MB instead of ~2 GB CUDA build).
+# Install BEFORE requirements.txt so downstream packages (whisperx, diffusers,
+# transformers) don't pull in the default CUDA build as a transitive dep.
+#
+#   pip install -r requirements-cpu.txt
+#   pip install -r requirements.txt
+--index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0
+torchaudio>=2.0.0

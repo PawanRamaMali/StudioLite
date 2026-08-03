@@ -23,7 +23,16 @@ foreach ($f in $apiOut, $apiErr, $webOut, $webErr) {
 $venvPython = Join-Path $root 'venv\Scripts\python.exe'
 if (-not (Test-Path $venvPython)) {
     Write-Host "venv missing at $venvPython" -ForegroundColor Red
-    Write-Host "Run: python -m venv venv ; .\venv\Scripts\Activate.ps1 ; pip install -r requirements.txt" -ForegroundColor Yellow
+    $hasGpu = $null -ne (Get-Command nvidia-smi -ErrorAction SilentlyContinue)
+    if ($hasGpu) {
+        Write-Host "NVIDIA GPU detected. Run:" -ForegroundColor Yellow
+        Write-Host "  python -m venv venv ; .\venv\Scripts\Activate.ps1" -ForegroundColor Yellow
+        Write-Host "  pip install -r requirements-cuda.txt ; pip install -r requirements.txt" -ForegroundColor Yellow
+    } else {
+        Write-Host "No NVIDIA GPU detected - installing CPU-only torch wheels:" -ForegroundColor Yellow
+        Write-Host "  python -m venv venv ; .\venv\Scripts\Activate.ps1" -ForegroundColor Yellow
+        Write-Host "  pip install -r requirements-cpu.txt ; pip install -r requirements.txt" -ForegroundColor Yellow
+    }
     Read-Host "Press Enter to close"
     exit 1
 }

@@ -332,7 +332,7 @@ export default function StoryPanel() {
     setCharacters(characters.filter((c) => c.id !== id));
   };
 
-  const useCharTemplate = (t: typeof CHARACTER_TEMPLATES[0]) => {
+  const applyCharTemplate = (t: typeof CHARACTER_TEMPLATES[0]) => {
     setCharName(t.name);
     setCharRole(t.role);
     setCharAppearance(t.appearance);
@@ -746,7 +746,7 @@ export default function StoryPanel() {
                   <label className="text-[10px] text-zinc-500 uppercase font-semibold mb-1.5 block">Quick Templates</label>
                   <div className="flex flex-wrap gap-1.5">
                     {CHARACTER_TEMPLATES.map((t) => (
-                      <button key={t.name} onClick={() => useCharTemplate(t)}
+                      <button key={t.name} onClick={() => applyCharTemplate(t)}
                         className="px-2 py-1 rounded-full text-[10px] bg-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 transition-all">
                         {t.name}
                       </button>
@@ -1185,7 +1185,7 @@ export default function StoryPanel() {
               <div className="text-center">
                 <BookOpen className="w-10 h-10 text-zinc-700 mx-auto mb-3" />
                 <p className="text-zinc-400 text-sm">No scenes yet</p>
-                <p className="text-zinc-600 text-xs mt-1">Pick a story idea, add characters, then click "AI Generate Script"</p>
+                <p className="text-zinc-600 text-xs mt-1">Pick a story idea, add characters, then click &quot;AI Generate Script&quot;</p>
               </div>
             </Card>
           )}

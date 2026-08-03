@@ -174,7 +174,7 @@ export default function CharactersPanel() {
     setTimeout(() => setCopied(null), 2000);
   };
 
-  const useTemplate = (t: typeof TEMPLATE_CHARACTERS[0]) => {
+  const applyTemplate = (t: typeof TEMPLATE_CHARACTERS[0]) => {
     setName(t.name);
     setDesc(t.desc);
     setVisual(t.visual);
@@ -217,7 +217,7 @@ export default function CharactersPanel() {
             <CardTitle className="text-sm mb-2">Quick Templates</CardTitle>
             <div className="space-y-1.5">
               {TEMPLATE_CHARACTERS.map((t) => (
-                <button key={t.name} onClick={() => useTemplate(t)}
+                <button key={t.name} onClick={() => applyTemplate(t)}
                   className="w-full text-left px-2.5 py-2 rounded-lg text-xs hover:bg-zinc-800 transition-colors border border-transparent hover:border-zinc-700">
                   <span className="font-medium text-zinc-200">{t.name}</span>
                   <span className="text-zinc-500 ml-1.5">{t.desc}</span>

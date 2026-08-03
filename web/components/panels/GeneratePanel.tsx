@@ -334,7 +334,7 @@ export default function GeneratePanel() {
             <h4 className="text-sm font-medium text-zinc-300 mb-3">Tips for Better Results</h4>
             <ul className="text-xs text-zinc-500 space-y-2">
               <li className="flex gap-2"><span className="text-indigo-400">1.</span> Be specific about camera movement and lighting</li>
-              <li className="flex gap-2"><span className="text-indigo-400">2.</span> Include style keywords: "cinematic, 4K, dramatic"</li>
+              <li className="flex gap-2"><span className="text-indigo-400">2.</span> Include style keywords: &quot;cinematic, 4K, dramatic&quot;</li>
               <li className="flex gap-2"><span className="text-indigo-400">3.</span> Wan 1.3B works best for 8-12GB GPUs</li>
               <li className="flex gap-2"><span className="text-indigo-400">4.</span> More frames = longer video but slower generation</li>
               <li className="flex gap-2"><span className="text-indigo-400">5.</span> Use Style presets to enhance your prompts automatically</li>

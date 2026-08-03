@@ -2179,8 +2179,9 @@ async def model_inventory():
     """Live installation status of every model in the registry.
 
     Returns per-model: {key, name, installed, vram_min, engine, modes, quality,
-    speed, built_in}. Backed by model_hub.get_model_status which probes the
-    HuggingFace cache + local model dirs on disk each call.
+    speed, built_in, active_job}. active_job is the job_id of an in-flight
+    download for that model, if any. Backed by model_hub.get_model_status
+    which probes the HuggingFace cache + local model dirs on disk each call.
     """
     try:
         import model_hub as _mh
@@ -2188,12 +2189,108 @@ async def model_inventory():
     except Exception as e:
         logger.error("model_hub.get_model_status failed: %s", e)
         models = []
+
+    with _jobs_lock:
+        active = {
+            j["params"].get("model_key"): jid
+            for jid, j in jobs.items()
+            if j.get("kind") == "model_download"
+            and j["status"] in ("queued", "running")
+            and j.get("params", {}).get("model_key")
+        }
+    for m in models:
+        m["active_job"] = active.get(m["key"])
+
     installed = sum(1 for m in models if m.get("installed"))
     return {
         "models": models,
         "installed_count": installed,
         "total_count": len(models),
     }
+
+
+def _run_model_download(job_id: str, model_key: str):
+    """Background worker for a model download."""
+    try:
+        import model_hub as _mh
+    except Exception as e:
+        _update_job(job_id, status="failed", error=f"model_hub import failed: {e}")
+        return
+
+    _update_job(job_id, status="running", message="Preparing download…")
+
+    def _cb(pct: int, message: str):
+        update = {"message": message}
+        if pct >= 0:
+            update["progress"] = pct
+        _update_job(job_id, **update)
+
+    try:
+        result = _mh.download_model(model_key, progress_callback=_cb)
+    except Exception as e:
+        logger.exception("Model download failed: %s", model_key)
+        _update_job(job_id, status="failed", error=str(e))
+        return
+
+    _update_job(
+        job_id,
+        status="completed",
+        progress=100,
+        message="Download complete.",
+        result=result,
+    )
+
+
+@app.post("/api/v1/models/{model_key}/download", response_model=JobResponse)
+async def download_model_endpoint(model_key: str, background_tasks: BackgroundTasks):
+    """Start a background download job for one model.
+
+    Idempotent-ish: if the model is already installed, returns a completed
+    job immediately without touching the network. If another download job
+    for the same key is already in flight, returns that existing job's id
+    instead of starting a duplicate.
+    """
+    try:
+        import model_hub as _mh
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"model_hub not available: {e}")
+
+    if model_key not in _mh.MODEL_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Unknown model: {model_key}")
+
+    # Dedup: reuse in-flight job for the same key.
+    with _jobs_lock:
+        for jid, j in jobs.items():
+            if (
+                j.get("kind") == "model_download"
+                and j["status"] in ("queued", "running")
+                and j.get("params", {}).get("model_key") == model_key
+            ):
+                return _job_response(jid)
+
+    job_id = _create_job("model_download", {"model_key": model_key})
+    thread = threading.Thread(target=_run_model_download, args=(job_id, model_key), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.delete("/api/v1/models/{model_key}")
+async def delete_model_endpoint(model_key: str):
+    """Delete a model's cached weights to reclaim disk space.
+    Uses the HF cache's official revision-deletion API so shared blobs
+    aren't nuked.
+    """
+    try:
+        import model_hub as _mh
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"model_hub not available: {e}")
+    if model_key not in _mh.MODEL_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Unknown model: {model_key}")
+    try:
+        return _mh.delete_model(model_key)
+    except Exception as e:
+        logger.exception("Model delete failed: %s", model_key)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/v1/generate/text2video", response_model=JobResponse)

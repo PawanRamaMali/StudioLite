@@ -64,10 +64,20 @@ export interface ModelInventoryItem {
   quality: string;
   speed: string;
   built_in: boolean;
+  active_job: string | null;
 }
 export const getModelInventory = () =>
   apiFetch<{ models: ModelInventoryItem[]; installed_count: number; total_count: number }>(
     "/api/v1/models/inventory"
+  );
+
+export const downloadModel = (modelKey: string) =>
+  apiFetch<Job>(`/api/v1/models/${encodeURIComponent(modelKey)}/download`, { method: "POST" });
+
+export const deleteModel = (modelKey: string) =>
+  apiFetch<{ key: string; hf_id: string; freed_bytes: number; found: boolean }>(
+    `/api/v1/models/${encodeURIComponent(modelKey)}`,
+    { method: "DELETE" }
   );
 
 // Jobs

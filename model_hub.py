@@ -246,6 +246,134 @@ def get_model_status() -> list:
     return results
 
 
+def _cache_size_bytes(hf_id: str) -> int:
+    """Sum size of all files under the HF cache for this repo. Approximate."""
+    hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+    model_dir = os.path.join(hf_home, "hub", f"models--{hf_id.replace('/', '--')}")
+    if not os.path.isdir(model_dir):
+        return 0
+    total = 0
+    for root, _dirs, files in os.walk(model_dir):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def download_model(model_key: str, progress_callback=None) -> dict:
+    """Download a model's weights via huggingface_hub.snapshot_download.
+
+    Progress callback signature: ``cb(pct: int, message: str)``. Since HF's
+    downloader does not expose a total-size hint we can't emit a real
+    percentage; we periodically probe the on-disk cache and report bytes
+    downloaded until snapshot_download returns.
+
+    Returns ``{"key", "hf_id", "path", "size_bytes"}`` on success.
+    Raises RuntimeError with a human message on any failure.
+    """
+    model = MODEL_REGISTRY.get(model_key)
+    if not model:
+        raise RuntimeError(f"Unknown model: {model_key}")
+    hf_id = model.get("hf_id", "")
+    if not hf_id:
+        raise RuntimeError(f"Model {model_key} has no hf_id — can't download.")
+    if check_model_installed(model_key):
+        return {
+            "key": model_key,
+            "hf_id": hf_id,
+            "path": None,
+            "size_bytes": _cache_size_bytes(hf_id),
+            "already_installed": True,
+        }
+
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as e:
+        raise RuntimeError(f"huggingface_hub not installed: {e}") from e
+
+    # HF snapshot_download blocks. To emit progress we start a watcher thread
+    # that polls the on-disk cache size while the download runs.
+    import threading
+    stop_flag = threading.Event()
+
+    def _watcher():
+        start = 0
+        while not stop_flag.wait(2.0):
+            size = _cache_size_bytes(hf_id)
+            if size != start:
+                start = size
+                mb = size / (1024 * 1024)
+                if progress_callback:
+                    progress_callback(-1, f"Downloading… {mb:,.0f} MB so far")
+
+    if progress_callback:
+        progress_callback(0, f"Starting download of {hf_id}…")
+
+    watcher = threading.Thread(target=_watcher, daemon=True)
+    watcher.start()
+
+    try:
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        path = snapshot_download(
+            repo_id=hf_id,
+            token=token,
+            resume_download=True,
+        )
+    except Exception as e:
+        stop_flag.set()
+        raise RuntimeError(f"Download failed: {e}") from e
+    finally:
+        stop_flag.set()
+
+    size = _cache_size_bytes(hf_id)
+    if progress_callback:
+        progress_callback(100, f"Downloaded {size / (1024*1024*1024):.2f} GB")
+
+    return {
+        "key": model_key,
+        "hf_id": hf_id,
+        "path": path,
+        "size_bytes": size,
+        "already_installed": False,
+    }
+
+
+def delete_model(model_key: str) -> dict:
+    """Remove a model's weights from the HF cache. Uses the official
+    scan_cache_dir + delete_revisions() API so shared blobs aren't nuked.
+    Returns ``{"key", "hf_id", "freed_bytes"}``.
+    """
+    model = MODEL_REGISTRY.get(model_key)
+    if not model:
+        raise RuntimeError(f"Unknown model: {model_key}")
+    hf_id = model.get("hf_id", "")
+    if not hf_id:
+        raise RuntimeError(f"Model {model_key} has no hf_id — can't delete.")
+
+    try:
+        from huggingface_hub import scan_cache_dir
+    except ImportError as e:
+        raise RuntimeError(f"huggingface_hub not installed: {e}") from e
+
+    cache_info = scan_cache_dir()
+    freed = 0
+    revisions = []
+    for repo in cache_info.repos:
+        if repo.repo_id == hf_id:
+            for rev in repo.revisions:
+                revisions.append(rev.commit_hash)
+                freed += rev.size_on_disk
+
+    if not revisions:
+        return {"key": model_key, "hf_id": hf_id, "freed_bytes": 0, "found": False}
+
+    strategy = cache_info.delete_revisions(*revisions)
+    strategy.execute()
+    return {"key": model_key, "hf_id": hf_id, "freed_bytes": freed, "found": True}
+
+
 def get_recommended_model(vram_gb: float, mode: str = "text2video") -> Optional[str]:
     """Get the best recommended model for the user's VRAM and use case."""
     candidates = get_models_for_vram(vram_gb)

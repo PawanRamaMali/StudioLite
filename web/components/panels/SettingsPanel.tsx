@@ -6,9 +6,12 @@ import { Badge } from "@/components/ui/Badge";
 import {
   Settings, Cpu, HardDrive, Wifi, Check, X, Activity,
   Key, Plus, Trash2, Save, RefreshCw, FileText, AlertTriangle,
-  Loader2,
+  Loader2, Download,
 } from "lucide-react";
-import { getSystemStatus, SystemStatus, getModelInventory, type ModelInventoryItem } from "@/lib/api";
+import {
+  getSystemStatus, SystemStatus, getModelInventory, type ModelInventoryItem,
+  downloadModel, deleteModel, getJob, type Job,
+} from "@/lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -21,6 +24,11 @@ export default function SettingsPanel() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"system" | "env" | "logs">("system");
   const [models, setModels] = useState<ModelInventoryItem[]>([]);
+  // Per-model download state, keyed by model.key.
+  // job: the live Job (progress/message/status). error: last error message.
+  const [downloadJobs, setDownloadJobs] = useState<Record<string, Job>>({});
+  const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({});
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
 
   // Env vars
   const [envVars, setEnvVars] = useState<EnvVar[]>([]);
@@ -39,6 +47,29 @@ export default function SettingsPanel() {
   const [jobLogs, setJobLogs] = useState<JobLog[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
 
+  const refreshModels = useCallback(async () => {
+    try {
+      const d = await getModelInventory();
+      setModels(d.models);
+      // If the server tells us there's an active_job for a model, hydrate our
+      // local job map so a page refresh mid-download resumes progress display.
+      setDownloadJobs((prev) => {
+        const next = { ...prev };
+        for (const m of d.models) {
+          if (m.active_job && !next[m.key]) {
+            next[m.key] = {
+              job_id: m.active_job, status: "running", progress: 0,
+              message: "Reconnecting…", created_at: Date.now() / 1000, elapsed: 0,
+            };
+          }
+        }
+        return next;
+      });
+    } catch {
+      setModels([]);
+    }
+  }, []);
+
   // Fetch system status + model inventory
   useEffect(() => {
     setLoading(true);
@@ -46,10 +77,56 @@ export default function SettingsPanel() {
       .then((s) => { setStatus(s); setApiConnected(true); })
       .catch(() => setApiConnected(false))
       .finally(() => setLoading(false));
-    getModelInventory()
-      .then((d) => setModels(d.models))
-      .catch(() => setModels([]));
-  }, []);
+    refreshModels();
+  }, [refreshModels]);
+
+  // Poll every in-flight download job every 2s.
+  useEffect(() => {
+    const active = Object.entries(downloadJobs).filter(
+      ([, j]) => j.status === "queued" || j.status === "running"
+    );
+    if (active.length === 0) return;
+    const t = setInterval(async () => {
+      for (const [key, job] of active) {
+        try {
+          const updated = await getJob(job.job_id);
+          setDownloadJobs((prev) => ({ ...prev, [key]: updated }));
+          if (updated.status === "completed" || updated.status === "failed") {
+            if (updated.status === "failed" && updated.error) {
+              setDownloadErrors((prev) => ({ ...prev, [key]: updated.error! }));
+            }
+            refreshModels();
+          }
+        } catch {
+          // network blip — try next tick
+        }
+      }
+    }, 2000);
+    return () => clearInterval(t);
+  }, [downloadJobs, refreshModels]);
+
+  const handleDownload = async (key: string) => {
+    setDownloadErrors((prev) => { const n = { ...prev }; delete n[key]; return n; });
+    try {
+      const job = await downloadModel(key);
+      setDownloadJobs((prev) => ({ ...prev, [key]: job }));
+    } catch (e) {
+      setDownloadErrors((prev) => ({ ...prev, [key]: (e as Error).message || "Failed to start download" }));
+    }
+  };
+
+  const handleDelete = async (key: string, name: string) => {
+    if (!window.confirm(`Delete ${name} from disk? Weights will need to be re-downloaded to use this model again.`)) return;
+    setDeletingKey(key);
+    try {
+      await deleteModel(key);
+      await refreshModels();
+    } catch (e) {
+      setDownloadErrors((prev) => ({ ...prev, [key]: (e as Error).message || "Delete failed" }));
+    } finally {
+      setDeletingKey(null);
+    }
+  };
 
   // Fetch env vars
   const fetchEnv = useCallback(async () => {
@@ -189,35 +266,74 @@ export default function SettingsPanel() {
                     <th className="pb-2 text-xs text-zinc-500 font-medium text-left">Quality</th>
                     <th className="pb-2 text-xs text-zinc-500 font-medium text-left">Speed</th>
                     <th className="pb-2 text-xs text-zinc-500 font-medium text-left">Status</th>
+                    <th className="pb-2 text-xs text-zinc-500 font-medium text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody>
                   {models.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="py-4 text-center text-xs text-zinc-500">
+                      <td colSpan={6} className="py-4 text-center text-xs text-zinc-500">
                         Loading model inventory…
                       </td>
                     </tr>
                   ) : (
-                    models.map((m) => (
-                      <tr key={m.key} className="border-b border-zinc-800/30 hover:bg-zinc-800/20">
-                        <td className="py-2.5 font-medium text-zinc-200 text-xs">{m.name}</td>
-                        <td className="py-2.5 text-zinc-400 text-xs">{m.vram_min}GB+</td>
-                        <td className="py-2.5"><Badge className="text-[10px]">{m.quality || "—"}</Badge></td>
-                        <td className="py-2.5">
-                          <Badge variant={m.speed === "fast" ? "success" : "default"} className="text-[10px]">
-                            {m.speed || "—"}
-                          </Badge>
-                        </td>
-                        <td className="py-2.5">
-                          {m.installed ? (
-                            <span className="flex items-center gap-1 text-green-400 text-xs"><Check className="w-3 h-3" /> Ready</span>
-                          ) : (
-                            <span className="flex items-center gap-1 text-zinc-600 text-xs"><X className="w-3 h-3" /> Not downloaded</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))
+                    models.map((m) => {
+                      const job = downloadJobs[m.key];
+                      const inFlight = job && (job.status === "queued" || job.status === "running");
+                      const err = downloadErrors[m.key];
+                      return (
+                        <tr key={m.key} className="border-b border-zinc-800/30 hover:bg-zinc-800/20 align-top">
+                          <td className="py-2.5 font-medium text-zinc-200 text-xs">
+                            {m.name}
+                            {err && (
+                              <div className="text-[10px] text-red-400 mt-1 flex items-start gap-1">
+                                <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" /> {err}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-2.5 text-zinc-400 text-xs">{m.vram_min}GB+</td>
+                          <td className="py-2.5"><Badge className="text-[10px]">{m.quality || "—"}</Badge></td>
+                          <td className="py-2.5">
+                            <Badge variant={m.speed === "fast" ? "success" : "default"} className="text-[10px]">
+                              {m.speed || "—"}
+                            </Badge>
+                          </td>
+                          <td className="py-2.5">
+                            {inFlight ? (
+                              <span className="flex items-center gap-1 text-indigo-400 text-xs">
+                                <Loader2 className="w-3 h-3 animate-spin" /> {job.message || "Downloading…"}
+                              </span>
+                            ) : m.installed ? (
+                              <span className="flex items-center gap-1 text-green-400 text-xs"><Check className="w-3 h-3" /> Ready</span>
+                            ) : (
+                              <span className="flex items-center gap-1 text-zinc-600 text-xs"><X className="w-3 h-3" /> Not downloaded</span>
+                            )}
+                          </td>
+                          <td className="py-2.5 text-right">
+                            {inFlight ? (
+                              <span className="text-[10px] text-zinc-500">running…</span>
+                            ) : m.installed ? (
+                              <Button
+                                size="sm" variant="ghost"
+                                onClick={() => handleDelete(m.key, m.name)}
+                                disabled={deletingKey === m.key}
+                                title="Delete cached weights"
+                              >
+                                {deletingKey === m.key ? (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <Trash2 className="w-3 h-3" />
+                                )}
+                              </Button>
+                            ) : (
+                              <Button size="sm" variant="secondary" onClick={() => handleDownload(m.key)}>
+                                <Download className="w-3 h-3 mr-1" /> Download
+                              </Button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>

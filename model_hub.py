@@ -262,13 +262,52 @@ def _cache_size_bytes(hf_id: str) -> int:
     return total
 
 
+# Cache HfApi.model_info results in-process. Keys are hf_id strings, values are
+# the summed byte count. Populated by estimate_download_size, read by the
+# endpoint (for disk precheck) and by download_model (for real % progress).
+_SIZE_CACHE: dict = {}
+
+
+def estimate_download_size(model_key: str) -> int:
+    """Return the total on-disk bytes a full download of this model will need.
+
+    Hits HfApi.model_info(files_metadata=True) once per key (results cached in
+    process) and sums the sibling file sizes. Returns 0 if the model has no
+    hf_id, if huggingface_hub isn't importable, or if the metadata call fails
+    (network, gated repo, rate limit) — callers should treat 0 as "unknown"
+    and fall back to size-agnostic behavior rather than blocking on it.
+    """
+    model = MODEL_REGISTRY.get(model_key)
+    if not model:
+        return 0
+    hf_id = model.get("hf_id", "")
+    if not hf_id:
+        return 0
+    if hf_id in _SIZE_CACHE:
+        return _SIZE_CACHE[hf_id]
+    try:
+        from huggingface_hub import HfApi
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        info = HfApi().model_info(hf_id, files_metadata=True, token=token)
+        total = 0
+        for sib in getattr(info, "siblings", []) or []:
+            sz = getattr(sib, "size", None)
+            if isinstance(sz, int) and sz > 0:
+                total += sz
+    except Exception:
+        total = 0
+    _SIZE_CACHE[hf_id] = total
+    return total
+
+
 def download_model(model_key: str, progress_callback=None) -> dict:
     """Download a model's weights via huggingface_hub.snapshot_download.
 
-    Progress callback signature: ``cb(pct: int, message: str)``. Since HF's
-    downloader does not expose a total-size hint we can't emit a real
-    percentage; we periodically probe the on-disk cache and report bytes
-    downloaded until snapshot_download returns.
+    Progress callback signature: ``cb(pct: int, message: str)``. When we know
+    the total size (see estimate_download_size), the watcher thread emits a
+    real percentage capped at 99 during transfer; the final 100 fires after
+    snapshot_download returns. If size is unknown, falls back to a bytes-
+    downloaded counter.
 
     Returns ``{"key", "hf_id", "path", "size_bytes"}`` on success.
     Raises RuntimeError with a human message on any failure.
@@ -293,23 +332,38 @@ def download_model(model_key: str, progress_callback=None) -> dict:
     except ImportError as e:
         raise RuntimeError(f"huggingface_hub not installed: {e}") from e
 
+    total_bytes = estimate_download_size(model_key)  # 0 if unknown
+
     # HF snapshot_download blocks. To emit progress we start a watcher thread
     # that polls the on-disk cache size while the download runs.
     import threading
     stop_flag = threading.Event()
 
     def _watcher():
-        start = 0
+        last = -1
         while not stop_flag.wait(2.0):
             size = _cache_size_bytes(hf_id)
-            if size != start:
-                start = size
+            if size == last:
+                continue
+            last = size
+            if not progress_callback:
+                continue
+            if total_bytes > 0:
+                # Cap at 99 so the final 100 comes from the post-download call.
+                pct = min(99, int(size / total_bytes * 100))
+                gb_done = size / (1024 * 1024 * 1024)
+                gb_total = total_bytes / (1024 * 1024 * 1024)
+                progress_callback(pct, f"Downloading… {gb_done:.2f} / {gb_total:.2f} GB")
+            else:
                 mb = size / (1024 * 1024)
-                if progress_callback:
-                    progress_callback(-1, f"Downloading… {mb:,.0f} MB so far")
+                progress_callback(-1, f"Downloading… {mb:,.0f} MB so far")
 
     if progress_callback:
-        progress_callback(0, f"Starting download of {hf_id}…")
+        if total_bytes > 0:
+            gb = total_bytes / (1024 * 1024 * 1024)
+            progress_callback(0, f"Starting download of {hf_id} ({gb:.2f} GB)…")
+        else:
+            progress_callback(0, f"Starting download of {hf_id}…")
 
     watcher = threading.Thread(target=_watcher, daemon=True)
     watcher.start()

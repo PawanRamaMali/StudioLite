@@ -2248,7 +2248,9 @@ async def download_model_endpoint(model_key: str, background_tasks: BackgroundTa
     Idempotent-ish: if the model is already installed, returns a completed
     job immediately without touching the network. If another download job
     for the same key is already in flight, returns that existing job's id
-    instead of starting a duplicate.
+    instead of starting a duplicate. Pre-flight checks free disk space
+    against HF-reported total when available so a 28 GB pull on 5 GB free
+    fails fast with a clear message instead of mid-download with an OSError.
     """
     try:
         import model_hub as _mh
@@ -2267,6 +2269,29 @@ async def download_model_endpoint(model_key: str, background_tasks: BackgroundTa
                 and j.get("params", {}).get("model_key") == model_key
             ):
                 return _job_response(jid)
+
+    # Disk precheck. estimate_download_size returns 0 on any failure
+    # (network / gated / rate-limit) — treat 0 as "unknown" and skip the
+    # check rather than blocking a legitimate download on a metadata error.
+    needed = _mh.estimate_download_size(model_key)
+    if needed > 0:
+        import shutil
+        hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+        target = hf_home if os.path.isdir(hf_home) else os.path.expanduser("~")
+        try:
+            free = shutil.disk_usage(target).free
+        except OSError:
+            free = None
+        if free is not None and free < needed * 1.1:
+            need_gb = needed / (1024 ** 3)
+            free_gb = free / (1024 ** 3)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Insufficient disk space: need ~{need_gb:.1f} GB "
+                    f"(+10% headroom), only {free_gb:.1f} GB free at {target}."
+                ),
+            )
 
     job_id = _create_job("model_download", {"model_key": model_key})
     thread = threading.Thread(target=_run_model_download, args=(job_id, model_key), daemon=True)

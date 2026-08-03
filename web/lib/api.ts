@@ -53,6 +53,23 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 export const getSystemStatus = () => apiFetch<SystemStatus>("/api/v1/system/status");
 export const getEngines = () => apiFetch<Record<string, unknown>>("/api/v1/system/engines");
 
+// Models
+export interface ModelInventoryItem {
+  key: string;
+  name: string;
+  installed: boolean;
+  vram_min: number;
+  engine: string;
+  modes: string[];
+  quality: string;
+  speed: string;
+  built_in: boolean;
+}
+export const getModelInventory = () =>
+  apiFetch<{ models: ModelInventoryItem[]; installed_count: number; total_count: number }>(
+    "/api/v1/models/inventory"
+  );
+
 // Jobs
 export const getJob = (id: string) => apiFetch<Job>(`/api/v1/jobs/${id}`);
 export const listJobs = (limit = 20) => apiFetch<Job[]>(`/api/v1/jobs?limit=${limit}`);

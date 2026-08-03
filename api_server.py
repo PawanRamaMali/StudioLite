@@ -2166,6 +2166,28 @@ async def list_engines():
     }
 
 
+@app.get("/api/v1/models/inventory")
+async def model_inventory():
+    """Live installation status of every model in the registry.
+
+    Returns per-model: {key, name, installed, vram_min, engine, modes, quality,
+    speed, built_in}. Backed by model_hub.get_model_status which probes the
+    HuggingFace cache + local model dirs on disk each call.
+    """
+    try:
+        import model_hub as _mh
+        models = _mh.get_model_status()
+    except Exception as e:
+        logger.error("model_hub.get_model_status failed: %s", e)
+        models = []
+    installed = sum(1 for m in models if m.get("installed"))
+    return {
+        "models": models,
+        "installed_count": installed,
+        "total_count": len(models),
+    }
+
+
 @app.post("/api/v1/generate/text2video", response_model=JobResponse)
 async def generate_text2video(req: TextToVideoRequest, background_tasks: BackgroundTasks):
     """Start a text-to-video generation job."""

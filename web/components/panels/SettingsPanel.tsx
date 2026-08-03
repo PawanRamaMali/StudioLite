@@ -8,18 +8,9 @@ import {
   Key, Plus, Trash2, Save, RefreshCw, FileText, AlertTriangle,
   Loader2,
 } from "lucide-react";
-import { getSystemStatus, SystemStatus } from "@/lib/api";
+import { getSystemStatus, SystemStatus, getModelInventory, type ModelInventoryItem } from "@/lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
-const MODELS = [
-  { name: "Wan 2.1 (1.3B)", vram: "8GB+", quality: "Good", speed: "Medium", installed: true },
-  { name: "Wan VACE 1.3B (I2V)", vram: "8GB+", quality: "Good", speed: "Medium", installed: false },
-  { name: "Wan 2.1 (14B)", vram: "16GB+", quality: "Excellent", speed: "Slow", installed: false },
-  { name: "LTX-Video", vram: "8GB+", quality: "Good", speed: "Fast", installed: false },
-  { name: "CogVideoX (2B)", vram: "8GB+", quality: "Good", speed: "Fast", installed: false },
-  { name: "SDXL Turbo (Images)", vram: "4GB+", quality: "Good", speed: "Fast", installed: true },
-];
 
 interface EnvVar { key: string; value: string; }
 interface JobLog { job_id: string; kind: string; status: string; progress: number; message: string; error: string | null; elapsed: number; }
@@ -29,6 +20,7 @@ export default function SettingsPanel() {
   const [apiConnected, setApiConnected] = useState(false);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"system" | "env" | "logs">("system");
+  const [models, setModels] = useState<ModelInventoryItem[]>([]);
 
   // Env vars
   const [envVars, setEnvVars] = useState<EnvVar[]>([]);
@@ -47,13 +39,16 @@ export default function SettingsPanel() {
   const [jobLogs, setJobLogs] = useState<JobLog[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
 
-  // Fetch system status
+  // Fetch system status + model inventory
   useEffect(() => {
     setLoading(true);
     getSystemStatus()
       .then((s) => { setStatus(s); setApiConnected(true); })
       .catch(() => setApiConnected(false))
       .finally(() => setLoading(false));
+    getModelInventory()
+      .then((d) => setModels(d.models))
+      .catch(() => setModels([]));
   }, []);
 
   // Fetch env vars
@@ -197,21 +192,33 @@ export default function SettingsPanel() {
                   </tr>
                 </thead>
                 <tbody>
-                  {MODELS.map((m) => (
-                    <tr key={m.name} className="border-b border-zinc-800/30 hover:bg-zinc-800/20">
-                      <td className="py-2.5 font-medium text-zinc-200 text-xs">{m.name}</td>
-                      <td className="py-2.5 text-zinc-400 text-xs">{m.vram}</td>
-                      <td className="py-2.5"><Badge className="text-[10px]">{m.quality}</Badge></td>
-                      <td className="py-2.5"><Badge variant={m.speed === "Fast" ? "success" : "default"} className="text-[10px]">{m.speed}</Badge></td>
-                      <td className="py-2.5">
-                        {m.installed ? (
-                          <span className="flex items-center gap-1 text-green-400 text-xs"><Check className="w-3 h-3" /> Ready</span>
-                        ) : (
-                          <span className="flex items-center gap-1 text-zinc-600 text-xs"><X className="w-3 h-3" /> Not downloaded</span>
-                        )}
+                  {models.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="py-4 text-center text-xs text-zinc-500">
+                        Loading model inventory…
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    models.map((m) => (
+                      <tr key={m.key} className="border-b border-zinc-800/30 hover:bg-zinc-800/20">
+                        <td className="py-2.5 font-medium text-zinc-200 text-xs">{m.name}</td>
+                        <td className="py-2.5 text-zinc-400 text-xs">{m.vram_min}GB+</td>
+                        <td className="py-2.5"><Badge className="text-[10px]">{m.quality || "—"}</Badge></td>
+                        <td className="py-2.5">
+                          <Badge variant={m.speed === "fast" ? "success" : "default"} className="text-[10px]">
+                            {m.speed || "—"}
+                          </Badge>
+                        </td>
+                        <td className="py-2.5">
+                          {m.installed ? (
+                            <span className="flex items-center gap-1 text-green-400 text-xs"><Check className="w-3 h-3" /> Ready</span>
+                          ) : (
+                            <span className="flex items-center gap-1 text-zinc-600 text-xs"><X className="w-3 h-3" /> Not downloaded</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>

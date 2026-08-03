@@ -482,6 +482,28 @@ on :3000, waits for both, then opens http://localhost:3000 in your browser.
 streamlit run app.py                                 # http://localhost:8501
 ```
 
+### Docker
+
+Pre-baked images for both CPU and NVIDIA GPU setups. Compose profiles pick the right one:
+
+```bash
+docker compose --profile cuda up          # NVIDIA GPU (needs nvidia-container-toolkit)
+docker compose --profile cpu  up          # CPU only
+
+# Or build & run directly:
+docker build -f Dockerfile.cuda -t studiolite:cuda .
+docker run --gpus all -p 8000:8000 -p 3000:3000 \
+           -v $PWD/.models:/app/.models \
+           -v $PWD/.mp:/app/.mp \
+           studiolite:cuda
+```
+
+Model weights live in host-side bind mounts (`.models/`, `.mp/`, `outputs/`,
+`models/`), so they download once and survive container rebuilds. Set
+`HF_TOKEN` in a `.env` file next to `docker-compose.yml` if you need gated
+HuggingFace repos. The container exposes the FastAPI backend on `:8000` and
+the Next.js production build on `:3000`.
+
 ### LatentSync (optional, GPU only)
 
 Story Mode's lip-sync uses [LatentSync 1.6](https://github.com/bytedance/LatentSync)

@@ -1,0 +1,36 @@
+# Keep the build context small.
+# Model weights and cached outputs are enormous and get mounted at runtime.
+.models/
+.mp/
+outputs/
+models/
+piper_models/
+Songs/
+third_party/
+
+# Version control + editor cruft
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+*.log
+
+# Local dev artifacts
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.env.local
+config.json
+
+# Frontend build cache (rebuilt inside the image)
+web/node_modules/
+web/.next/
+web/out/
+web/coverage/
+
+# Docs and screenshots (huge PNGs — no reason to send them into the image)
+docs/screenshots/

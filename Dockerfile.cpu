@@ -1,0 +1,52 @@
+# StudioLite — CPU-only image
+# Base: python:3.11-slim on Debian (~150 MB base).
+# Ships everything CPU-safe: Audio Studio, Transcription, Video Editor, LLM
+# (via Ollama sidecar or configured URL), Doc Writer, live/screen/video
+# transcribe. Local SDXL runs on CPU but is very slow (~5-15 min per image).
+# Video generation, Qwen edit, and LatentSync are visibly disabled in the UI.
+#
+# Build:
+#   docker build -f Dockerfile.cpu -t studiolite:cpu .
+# Run:
+#   docker run -p 8000:8000 -p 3000:3000 \
+#              -v $PWD/.models:/app/.models \
+#              -v $PWD/.mp:/app/.mp \
+#              studiolite:cpu
+
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    NEXT_TELEMETRY_DISABLED=1 \
+    NODE_ENV=production
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg imagemagick git curl ca-certificates build-essential \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# CPU torch wheels first (~200 MB vs ~2 GB CUDA build), then the rest.
+COPY requirements.txt requirements-cpu.txt ./
+RUN pip install --no-cache-dir -r requirements-cpu.txt \
+    && pip install --no-cache-dir -r requirements.txt
+
+# Frontend build.
+COPY web/package.json web/package-lock.json ./web/
+RUN cd web && npm ci
+COPY web ./web
+RUN cd web && npm run build
+
+COPY . .
+
+VOLUME ["/app/.models", "/app/.mp", "/app/outputs", "/app/models"]
+
+EXPOSE 8000 3000
+
+# next start defaults to binding localhost; -H 0.0.0.0 makes it reachable from
+# outside the container.
+CMD ["bash", "-c", "python api_server.py & cd web && npx next start -H 0.0.0.0 -p 3000"]

@@ -1,0 +1,56 @@
+# StudioLite — docker-compose for local development.
+#
+# Pick one:
+#   docker compose --profile cuda up      # NVIDIA GPU (needs nvidia-container-toolkit)
+#   docker compose --profile cpu  up      # CPU only
+#
+# Both profiles publish port 3000 (Next.js) and 8000 (FastAPI), and share the
+# same host-side bind mounts so models download once and survive container
+# rebuilds. Set HF_TOKEN in a .env file next to this docker-compose.yml if you
+# want the container to be able to download gated HuggingFace weights.
+
+services:
+  studiolite-cuda:
+    profiles: [cuda]
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    image: studiolite:cuda
+    ports:
+      - "3000:3000"
+      - "8000:8000"
+    volumes:
+      - ./.models:/app/.models
+      - ./.mp:/app/.mp
+      - ./outputs:/app/outputs
+      - ./models:/app/models
+      - ./config.json:/app/config.json:ro
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  studiolite-cpu:
+    profiles: [cpu]
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    image: studiolite:cpu
+    ports:
+      - "3000:3000"
+      - "8000:8000"
+    volumes:
+      - ./.models:/app/.models
+      - ./.mp:/app/.mp
+      - ./outputs:/app/outputs
+      - ./models:/app/models
+      - ./config.json:/app/config.json:ro
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    restart: unless-stopped

@@ -1,0 +1,58 @@
+# StudioLite — CUDA image
+# Base: NVIDIA CUDA 12.1 runtime on Ubuntu 22.04 (~2.5 GB base).
+# Ships everything to run local AI models against an NVIDIA GPU. Requires
+# --gpus all at docker run time (nvidia-container-toolkit on the host).
+#
+# Build:
+#   docker build -f Dockerfile.cuda -t studiolite:cuda .
+# Run:
+#   docker run --gpus all -p 8000:8000 -p 3000:3000 \
+#              -v $PWD/.models:/app/.models \
+#              -v $PWD/.mp:/app/.mp \
+#              studiolite:cuda
+
+FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    NEXT_TELEMETRY_DISABLED=1 \
+    NODE_ENV=production
+
+# System deps: Python, ffmpeg, imagemagick, git (for optional LatentSync clone),
+# curl (for NodeSource), build tools (some pip wheels need them on Ubuntu).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-venv python3-pip \
+        ffmpeg imagemagick git curl ca-certificates build-essential \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python3 \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Python deps first — cache layer if requirements files don't change.
+COPY requirements.txt requirements-cuda.txt ./
+RUN pip install --no-cache-dir -r requirements-cuda.txt \
+    && pip install --no-cache-dir -r requirements.txt
+
+# Frontend build (needs source before install so package.json is present).
+COPY web/package.json web/package-lock.json ./web/
+RUN cd web && npm ci
+COPY web ./web
+RUN cd web && npm run build
+
+# App source
+COPY . .
+
+# Models and outputs live in mounted volumes so they survive container rebuilds.
+VOLUME ["/app/.models", "/app/.mp", "/app/outputs", "/app/models"]
+
+EXPOSE 8000 3000
+
+# Launcher: FastAPI on :8000 and Next.js production server on :3000.
+# next start defaults to binding localhost; -H 0.0.0.0 makes it reachable from
+# outside the container.
+CMD ["bash", "-c", "python api_server.py & cd web && npx next start -H 0.0.0.0 -p 3000"]

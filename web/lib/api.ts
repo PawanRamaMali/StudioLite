@@ -15,13 +15,26 @@ export interface SystemStatus {
   status: string;
   gpu: {
     available: boolean;
-    gpu_name: string;
-    total_vram_gb: number;
-    free_vram_gb: number;
-    cuda_version: string;
+    gpu_name?: string;
+    total_vram_gb?: number;
+    free_vram_gb?: number;
+    cuda_version?: string;
+    message?: string;
+  };
+  capabilities: {
+    cuda: boolean;
+    platform: "windows" | "linux" | "darwin" | string;
+    features: {
+      video_generation: boolean;
+      qwen_edit: boolean;
+      lipsync: boolean;
+      local_sdxl: boolean;
+      local_character_portrait: boolean;
+    };
   };
   active_jobs: number;
   total_jobs: number;
+  output_dir?: string;
 }
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {

@@ -4,8 +4,8 @@ import { useState, useRef, useEffect } from "react";
 import { Card, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
-import { Sparkles, Play, Loader2, Download, Camera, Film, Zap } from "lucide-react";
-import { generateText2Video, getJob, getDownloadUrl, downloadBlob } from "@/lib/api";
+import { Sparkles, Play, Loader2, Download, Camera, Film, Zap, Cpu } from "lucide-react";
+import { generateText2Video, getJob, getDownloadUrl, downloadBlob, getSystemStatus, type SystemStatus } from "@/lib/api";
 
 const SAMPLE_PROMPTS = [
   { label: "Cinematic Nature", prompt: "A majestic eagle soaring through dramatic mountain landscape at golden hour, snow-capped peaks, volumetric clouds, cinematic tracking shot, warm sunlight on detailed feathers, 4K quality" },
@@ -71,12 +71,16 @@ export default function GeneratePanel() {
   const [statusMsg, setStatusMsg] = useState("");
   const [resultJobId, setResultJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [sysStatus, setSysStatus] = useState<SystemStatus | null>(null);
   const pollRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Cleanup polling on unmount
   useEffect(() => {
+    getSystemStatus().then(setSysStatus).catch(() => setSysStatus(null));
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, []);
+
+  const hasGpu = sysStatus?.capabilities?.cuda ?? true;
+  const gpuChecked = sysStatus !== null;
 
   const handleGenerate = async () => {
     if (!prompt.trim()) return;
@@ -135,6 +139,20 @@ export default function GeneratePanel() {
         <h1 className="text-3xl font-bold gradient-text">Video Generator</h1>
         <p className="text-zinc-400 mt-1">Generate videos from text using state-of-the-art diffusion models</p>
       </div>
+
+      {gpuChecked && !hasGpu && (
+        <div className="mb-6 flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm">
+          <Cpu className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="font-medium text-amber-300">Video generation requires an NVIDIA GPU.</p>
+            <p className="text-amber-200/80 mt-1">
+              LTX, HunyuanVideo, and Wan all use quantized weights with CPU offload, which needs a CUDA device.
+              You can still browse the settings and prompts here, but you can&apos;t start a job on this machine.
+              CPU-safe alternatives available today: Images Studio, Audio Studio, Transcription, and the Video Editor.
+            </p>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left: Controls */}
@@ -255,7 +273,7 @@ export default function GeneratePanel() {
           </Card>
 
           {/* Generate Button */}
-          <Button onClick={handleGenerate} disabled={generating || !prompt.trim()} size="lg" className="w-full">
+          <Button onClick={handleGenerate} disabled={generating || !prompt.trim() || !hasGpu} size="lg" className="w-full">
             {generating ? (
               <><Loader2 className="w-5 h-5 mr-2 animate-spin" /> Generating... {progress}%</>
             ) : (

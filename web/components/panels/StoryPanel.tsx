@@ -10,7 +10,8 @@ import {
   UserCircle, Upload, Shield, ImageIcon, X, Copy, Check, Eye,
   Pause, SkipForward, SkipBack, Volume2, FileText, Film,
 } from "lucide-react";
-import { generateStory, getJob, getDownloadUrl, getPortraitUrl, downloadBlob } from "@/lib/api";
+import { generateStory, getJob, getDownloadUrl, getPortraitUrl, downloadBlob, getSystemStatus, type SystemStatus } from "@/lib/api";
+import { Cpu } from "lucide-react";
 
 interface Scene {
   id: string;
@@ -93,7 +94,7 @@ export default function StoryPanel() {
   const [ipAdapterStrength, setIpAdapterStrength] = useState(0.6);
   const [registeredPortraits, setRegisteredPortraits] = useState<{filename: string; url: string; view: string}[]>([]);
 
-  // Fetch available video engines + lip-sync status from backend
+  // Fetch available video engines + lip-sync status + capabilities from backend
   useEffect(() => {
     const fetchEngines = async () => {
       try {
@@ -109,6 +110,7 @@ export default function StoryPanel() {
       }
     };
     fetchEngines();
+    getSystemStatus().then(setSysStatus).catch(() => setSysStatus(null));
   }, []);
 
   // Fetch registered character portraits from backend
@@ -155,6 +157,9 @@ export default function StoryPanel() {
   const [enableLipSync, setEnableLipSync] = useState(false);
   const [availableEngines, setAvailableEngines] = useState<Array<{ id: string; name: string; available: boolean; tier?: string; description?: string }>>([]);
   const [lipSyncAvailable, setLipSyncAvailable] = useState<boolean>(false);
+  const [sysStatus, setSysStatus] = useState<SystemStatus | null>(null);
+  const hasGpu = sysStatus?.capabilities?.cuda ?? true;
+  const gpuChecked = sysStatus !== null;
 
   // Loading states
   const [scriptLoading, setScriptLoading] = useState(false);
@@ -583,6 +588,19 @@ export default function StoryPanel() {
         <h1 className="text-3xl font-bold gradient-text">Story Mode</h1>
         <p className="text-zinc-400 mt-1">Create multi-scene AI movies with characters, narration, and transitions</p>
       </div>
+
+      {gpuChecked && !hasGpu && (
+        <div className="mb-6 flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm">
+          <Cpu className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="font-medium text-amber-300">Story Mode requires an NVIDIA GPU to render scenes.</p>
+            <p className="text-amber-200/80 mt-1">
+              The script writer, character notes, and scene planner still work — you can draft a full script here — but
+              actually rendering scene video needs a CUDA GPU. Try Images Studio or Audio Studio for CPU-friendly output.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Workflow steps indicator */}
       <div className="flex items-center gap-1 mb-6 overflow-x-auto pb-2">
@@ -1319,9 +1337,11 @@ export default function StoryPanel() {
           {/* Generate Movie */}
           {scenes.length >= 2 && (
             <>
-              <Button size="lg" className="w-full" onClick={handleGenerateMovie} disabled={generating}>
+              <Button size="lg" className="w-full" onClick={handleGenerateMovie} disabled={generating || !hasGpu}>
                 {generating ? (
                   <><Loader2 className="w-5 h-5 mr-2 animate-spin" /> Generating... {genProgress}%</>
+                ) : !hasGpu ? (
+                  <><Cpu className="w-5 h-5 mr-2" /> Requires NVIDIA GPU</>
                 ) : (
                   <><Play className="w-5 h-5 mr-2" /> Generate Movie ({scenes.length} scenes, {totalDuration}s, {qualityPreset}){enableUpscale ? " + Upscale" : ""}</>
                 )}

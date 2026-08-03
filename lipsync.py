@@ -30,23 +30,65 @@ WHISPER_TINY = os.path.join(LATENTSYNC_WEIGHTS, "whisper", "tiny.pt")
 DEFAULT_CONFIG = "configs/unet/stage2_512.yaml"  # relative to LATENTSYNC_REPO
 
 
-def available() -> bool:
-    """True iff LatentSync source + weights are all present and the checkpoint
-    junction (``third_party/LatentSync/checkpoints``) resolves to our weights.
+def _has_cuda() -> bool:
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
+
+def _try_link_checkpoints() -> None:
+    """Best-effort auto-create the ``third_party/LatentSync/checkpoints`` link.
+
+    On Linux/macOS uses a real symlink (no privileges required). On Windows
+    tries a directory junction via ``mklink /J`` (no dev-mode needed for
+    junctions to shared paths, unlike symbolic links). Silent on failure —
+    ``available()`` will still return False and ``install_hint()`` surfaces
+    the manual step.
     """
+    if not os.path.isdir(LATENTSYNC_REPO) or not os.path.isdir(LATENTSYNC_WEIGHTS):
+        return
+    link = os.path.join(LATENTSYNC_REPO, "checkpoints")
+    if os.path.exists(link):
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", link, LATENTSYNC_WEIGHTS],
+                check=False, capture_output=True,
+            )
+        else:
+            os.symlink(LATENTSYNC_WEIGHTS, link, target_is_directory=True)
+    except Exception:
+        pass
+
+
+def available() -> bool:
+    """True iff LatentSync source + weights are all present, the checkpoint
+    link resolves to our weights, and a CUDA GPU is present.
+
+    LatentSync's bundled inference script hardcodes ``device="cuda"`` so it
+    cannot run without a GPU regardless of what we pass in.
+    """
+    if not _has_cuda():
+        return False
     if not os.path.isdir(LATENTSYNC_REPO):
         return False
     if not os.path.isfile(UNET_CKPT) or not os.path.isfile(WHISPER_TINY):
         return False
     if not os.path.isfile(os.path.join(LATENTSYNC_REPO, "scripts", "inference.py")):
         return False
-    # The junction must exist so LatentSync's relative 'checkpoints/' paths resolve.
     ckpt_link = os.path.join(LATENTSYNC_REPO, "checkpoints", "latentsync_unet.pt")
+    if not os.path.isfile(ckpt_link):
+        _try_link_checkpoints()
     return os.path.isfile(ckpt_link)
 
 
 def install_hint() -> str:
     steps = []
+    if not _has_cuda():
+        steps.append("LatentSync requires an NVIDIA GPU with CUDA drivers.")
     if not os.path.isdir(LATENTSYNC_REPO):
         steps.append(
             "Clone the repo: git clone https://github.com/bytedance/LatentSync.git "
@@ -59,9 +101,10 @@ def install_hint() -> str:
         )
     ckpt_link = os.path.join(LATENTSYNC_REPO, "checkpoints")
     if os.path.isdir(LATENTSYNC_REPO) and not os.path.exists(ckpt_link):
-        steps.append(
-            f"Create junction: cmd /c mklink /J {ckpt_link} {LATENTSYNC_WEIGHTS}"
-        )
+        if os.name == "nt":
+            steps.append(f'Create junction: cmd /c mklink /J "{ckpt_link}" "{LATENTSYNC_WEIGHTS}"')
+        else:
+            steps.append(f'Create symlink: ln -s "{LATENTSYNC_WEIGHTS}" "{ckpt_link}"')
     if not steps:
         return "LatentSync is set up correctly."
     return "LatentSync setup incomplete:\n  - " + "\n  - ".join(steps)

@@ -2000,9 +2000,42 @@ def _run_image_remove_bg(job_id: str, req: ImageBgRemoveRequest):
 # Endpoints
 # ---------------------------------------------------------------------------
 
+def _compute_features(has_cuda: bool) -> dict:
+    """Return the feature-availability map the frontend uses to gate UI tiles.
+
+    Only features that can be genuinely blocked by hardware or missing weights
+    appear here — CPU-safe features (transcription, TTS, audio studio, video
+    editor, LLM, cloud image providers) are always available and not listed.
+    """
+    features = {
+        "video_generation": False,
+        "qwen_edit": False,
+        "lipsync": False,
+        "local_sdxl": has_cuda,
+        "local_character_portrait": has_cuda,
+    }
+    try:
+        import scene_generator as _sg
+        features["video_generation"] = any(e["available"] for e in _sg.list_available_engines())
+    except Exception:
+        pass
+    try:
+        import imagegen as _ig
+        features["qwen_edit"] = _ig.qwen_edit_available()
+    except Exception:
+        pass
+    try:
+        import lipsync as _ls
+        features["lipsync"] = _ls.available()
+    except Exception:
+        pass
+    return features
+
+
 @app.get("/api/v1/system/status")
 async def system_status():
-    """Get system status: GPU, VRAM, loaded models."""
+    """Get system status: GPU, VRAM, loaded models, feature capabilities."""
+    import platform as _platform
     try:
         import torch
 
@@ -2029,15 +2062,23 @@ async def system_status():
                 "free_vram_gb": round(free_vram, 2),
                 "cuda_version": torch.version.cuda,
             }
+            has_cuda = True
         else:
             gpu_info = {"available": False, "message": "No CUDA GPU detected"}
+            has_cuda = False
     except ImportError:
         gpu_info = {"available": False, "message": "PyTorch not installed"}
+        has_cuda = False
 
     active_jobs = sum(1 for j in jobs.values() if j["status"] in ("queued", "running"))
     return {
         "status": "ok",
         "gpu": gpu_info,
+        "capabilities": {
+            "cuda": has_cuda,
+            "platform": _platform.system().lower(),  # "windows" | "linux" | "darwin"
+            "features": _compute_features(has_cuda),
+        },
         "active_jobs": active_jobs,
         "total_jobs": len(jobs),
         "output_dir": OUTPUT_DIR,
@@ -2107,7 +2148,14 @@ async def list_engines():
     except ImportError:
         pass
 
+    try:
+        import torch
+        gpu_available = torch.cuda.is_available()
+    except Exception:
+        gpu_available = False
+
     return {
+        "gpu_available": gpu_available,
         "video_engines": video_engines,
         "tts_engines": tts_engines,
         "lip_sync": lip_sync,

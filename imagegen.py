@@ -321,7 +321,13 @@ def _load_img2img():
 def qwen_edit_available() -> bool:
     """True only when the FULL GGUF transformer + ALL 4 text_encoder shards
     + VAE are present at expected sizes. Strict thresholds so an in-flight
-    download isn't reported as ready — would crash GGUF loading."""
+    download isn't reported as ready — would crash GGUF loading.
+
+    Also requires CUDA: the loader uses ``enable_sequential_cpu_offload`` which
+    needs a GPU device to swap layers onto.
+    """
+    if not torch.cuda.is_available():
+        return False
     # GGUF Q4_K_S full size is ~11.4 GB. Require >= 11 GB.
     if not (os.path.isfile(QWEN_EDIT_GGUF) and os.path.getsize(QWEN_EDIT_GGUF) >= 11 * 1024 * 1024 * 1024):
         return False
@@ -351,6 +357,8 @@ def _load_qwen_edit(progress_callback: Optional[Callable] = None):
       - VAE: 254 MB
     Total VRAM at any one time stays under ~10 GB during generation.
     """
+    if not torch.cuda.is_available():
+        raise RuntimeError("Qwen-Image-Edit requires a CUDA GPU (sequential CPU offload needs a device).")
     global _qwen_edit_pipe
     if _qwen_edit_pipe is not None:
         return _qwen_edit_pipe

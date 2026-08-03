@@ -1,11 +1,13 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import {
   Video, Wand2, BookOpen, Scissors, Music, ArrowUpCircle,
   Users, KeyRound, Briefcase, Settings, ChevronLeft, ChevronRight,
-  Sparkles, Image as ImageIcon, Radio, ScanText, FileVideo,
+  Sparkles, Image as ImageIcon, Radio, ScanText, FileVideo, Cpu,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { getSystemStatus, type SystemStatus } from "@/lib/api";
 
 interface SidebarProps {
   activeTab: string;
@@ -14,9 +16,11 @@ interface SidebarProps {
   onToggle: () => void;
 }
 
-const NAV_ITEMS = [
-  { id: "generate", label: "Video Generator", icon: Video, group: "Create" },
-  { id: "story", label: "Story Mode", icon: BookOpen, group: "Create" },
+// gpuRequired: tab won't work without a CUDA GPU today. Still clickable so
+// users see the feature; the panel itself renders an explanatory state.
+const NAV_ITEMS: { id: string; label: string; icon: typeof Video; group: string; gpuRequired?: boolean }[] = [
+  { id: "generate", label: "Video Generator", icon: Video, group: "Create", gpuRequired: true },
+  { id: "story", label: "Story Mode", icon: BookOpen, group: "Create", gpuRequired: true },
   { id: "images", label: "Images Studio", icon: ImageIcon, group: "Create" },
   { id: "edit", label: "Video Editor", icon: Scissors, group: "Tools" },
   { id: "audio", label: "Audio Studio", icon: Music, group: "Tools" },
@@ -24,7 +28,7 @@ const NAV_ITEMS = [
   { id: "screen-transcribe", label: "Screen Transcribe", icon: ScanText, group: "Tools" },
   { id: "video-transcribe", label: "Video Transcribe", icon: FileVideo, group: "Tools" },
   { id: "upscale", label: "Upscale Video", icon: ArrowUpCircle, group: "Tools" },
-  { id: "characters", label: "Characters", icon: Users, group: "Assets" },
+  { id: "characters", label: "Characters", icon: Users, group: "Assets", gpuRequired: true },
   { id: "keyframes", label: "Keyframes", icon: KeyRound, group: "Assets" },
   { id: "jobs", label: "Jobs", icon: Briefcase, group: "System" },
   { id: "settings", label: "Settings", icon: Settings, group: "System" },
@@ -32,6 +36,13 @@ const NAV_ITEMS = [
 
 export default function Sidebar({ activeTab, onTabChange, isOpen, onToggle }: SidebarProps) {
   const groups = [...new Set(NAV_ITEMS.map((i) => i.group))];
+  const [status, setStatus] = useState<SystemStatus | null>(null);
+
+  useEffect(() => {
+    getSystemStatus().then(setStatus).catch(() => setStatus(null));
+  }, []);
+
+  const hasGpu = status?.capabilities?.cuda ?? true;  // optimistic until status resolves
 
   return (
     <aside
@@ -65,6 +76,10 @@ export default function Sidebar({ activeTab, onTabChange, isOpen, onToggle }: Si
             {NAV_ITEMS.filter((i) => i.group === group).map((item) => {
               const Icon = item.icon;
               const active = activeTab === item.id;
+              const dimmed = !hasGpu && item.gpuRequired === true;
+              const titleText = dimmed
+                ? `${item.label} — requires NVIDIA GPU`
+                : item.label;
               return (
                 <button
                   key={item.id}
@@ -73,12 +88,16 @@ export default function Sidebar({ activeTab, onTabChange, isOpen, onToggle }: Si
                     "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all",
                     active
                       ? "bg-indigo-600/15 text-indigo-400 border border-indigo-500/20"
-                      : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 border border-transparent"
+                      : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 border border-transparent",
+                    dimmed && !active && "opacity-50"
                   )}
-                  title={item.label}
+                  title={titleText}
                 >
                   <Icon className={cn("w-4 h-4 flex-shrink-0", active && "text-indigo-400")} />
-                  {isOpen && <span className="truncate">{item.label}</span>}
+                  {isOpen && <span className="truncate flex-1 text-left">{item.label}</span>}
+                  {isOpen && dimmed && (
+                    <Cpu className="w-3 h-3 text-zinc-600 flex-shrink-0" aria-label="Requires GPU" />
+                  )}
                 </button>
               );
             })}

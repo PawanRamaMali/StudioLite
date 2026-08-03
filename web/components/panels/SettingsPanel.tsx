@@ -173,7 +173,7 @@ export default function SettingsPanel() {
               <HardDrive className="w-6 h-6 mx-auto mb-2 text-emerald-400" />
               <p className="text-[10px] text-zinc-500 uppercase tracking-wider">VRAM Free</p>
               <p className="text-lg font-bold text-emerald-400 mt-1">
-                {gpu ? `${gpu.free_vram_gb.toFixed(1)}` : "..."}<span className="text-xs font-normal text-zinc-500"> GB</span>
+                {gpu?.free_vram_gb !== undefined ? `${gpu.free_vram_gb.toFixed(1)}` : "..."}<span className="text-xs font-normal text-zinc-500"> GB</span>
               </p>
             </Card>
             <Card className="text-center py-4">

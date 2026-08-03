@@ -162,13 +162,19 @@ ENGINES = {
 
 
 def list_available_engines() -> list:
-    """Return list of {id, name, available} for UI."""
+    """Return list of {id, name, available} for UI.
+
+    All engines require CUDA — GGUF quantization and enable_model_cpu_offload
+    both need a GPU device to offload to. On CPU-only systems every engine
+    is reported unavailable.
+    """
+    has_cuda = torch.cuda.is_available()
     checks = [
-        ("wan22_14b_gguf", gguf_available()),
-        ("hunyuan15_i2v_gguf", hunyuan15_available()),
-        ("ltx23_distilled_gguf", ltx23_available()),
-        ("vace_1.3b", vace_available()),
-        ("t2v_1.3b", True),
+        ("wan22_14b_gguf", has_cuda and gguf_available()),
+        ("hunyuan15_i2v_gguf", has_cuda and hunyuan15_available()),
+        ("ltx23_distilled_gguf", has_cuda and ltx23_available()),
+        ("vace_1.3b", has_cuda and vace_available()),
+        ("t2v_1.3b", has_cuda),
     ]
     return [{"id": eid, "name": ENGINES[eid], "available": avail} for eid, avail in checks]
 
@@ -176,7 +182,15 @@ def list_available_engines() -> list:
 def get_available_engine(preferred: Optional[str] = None) -> str:
     """Return the engine to use. If ``preferred`` is given and available, use it.
     Otherwise fall back to best available: Wan 2.2 > Hunyuan 1.5 > LTX-2.3 > VACE > T2V.
+
+    Raises RuntimeError on CPU-only systems — none of these engines are viable
+    without a CUDA GPU (weeks-long jobs at best, immediate crashes at worst).
     """
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "Video generation requires a CUDA GPU. Install NVIDIA drivers or "
+            "use an image-only workflow."
+        )
     # Preferred engine override (from UI or env)
     if preferred and preferred != "auto":
         if preferred == "wan22_14b_gguf" and gguf_available():
@@ -226,6 +240,8 @@ def _load_wan22_gguf(progress_callback: Optional[Callable] = None):
     from the already-cached Wan 2.1 T2V 1.3B model, and loading only the GGUF
     transformers + VAE config from the 2.2 14B repo.
     """
+    if not torch.cuda.is_available():
+        raise RuntimeError("Wan 2.2 14B requires a CUDA GPU (GGUF + CPU offload need a device).")
     global _i2v_pipe
     _set_engine("wan22_14b_gguf")
     if _i2v_pipe is not None:
@@ -319,6 +335,8 @@ def _load_hunyuan15_gguf(progress_callback: Optional[Callable] = None):
 
     8.3B params with Q4_K_M fits in 12GB VRAM via enable_model_cpu_offload.
     """
+    if not torch.cuda.is_available():
+        raise RuntimeError("HunyuanVideo 1.5 requires a CUDA GPU (GGUF + CPU offload need a device).")
     global _i2v_pipe
     _set_engine("hunyuan15_i2v_gguf")
     if _i2v_pipe is not None:
@@ -383,6 +401,8 @@ def _load_ltx23_gguf(progress_callback: Optional[Callable] = None):
     uses CalamitousFelicitousness's community diffusers conversion at
     .models/ltx-23-base/ for base components + GGUF transformer.
     """
+    if not torch.cuda.is_available():
+        raise RuntimeError("LTX-2.3 requires a CUDA GPU (GGUF + CPU offload need a device).")
     global _i2v_pipe
     _set_engine("ltx23_distilled_gguf")
     if _i2v_pipe is not None:
@@ -447,6 +467,8 @@ def _load_ltx23_gguf(progress_callback: Optional[Callable] = None):
 
 def _load_vace(progress_callback: Optional[Callable] = None):
     """Load VACE 1.3B as fallback."""
+    if not torch.cuda.is_available():
+        raise RuntimeError("VACE 1.3B requires a CUDA GPU (CPU offload needs a device).")
     global _i2v_pipe
     _set_engine("vace_1.3b")
     if _i2v_pipe is not None:

@@ -47,6 +47,11 @@ VOLUME ["/app/.models", "/app/.mp", "/app/outputs", "/app/models"]
 
 EXPOSE 8000 3000
 
+# Docker HEALTHCHECK: hit the FastAPI liveness endpoint every 30s. If the API
+# stops responding for 3 checks in a row the container is marked unhealthy.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8000/api/v1/health || exit 1
+
 # next start defaults to binding localhost; -H 0.0.0.0 makes it reachable from
 # outside the container.
 CMD ["bash", "-c", "python api_server.py & cd web && npx next start -H 0.0.0.0 -p 3000"]

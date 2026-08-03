@@ -2036,6 +2036,14 @@ def _compute_features(has_cuda: bool) -> dict:
     return features
 
 
+@app.get("/api/v1/health")
+async def health():
+    """Liveness probe. Docker HEALTHCHECK and load balancers hit this.
+    Returns 200 with a tiny body — no dependencies, no side effects.
+    """
+    return {"status": "ok"}
+
+
 @app.get("/api/v1/system/status")
 async def system_status():
     """Get system status: GPU, VRAM, loaded models, feature capabilities."""

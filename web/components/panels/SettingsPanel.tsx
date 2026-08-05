@@ -6,11 +6,11 @@ import { Badge } from "@/components/ui/Badge";
 import {
   Settings, Cpu, HardDrive, Wifi, Check, X, Activity,
   Key, Plus, Trash2, Save, RefreshCw, FileText, AlertTriangle,
-  Loader2, Download,
+  Loader2, Download, XCircle,
 } from "lucide-react";
 import {
   getSystemStatus, SystemStatus, getModelInventory, type ModelInventoryItem,
-  downloadModel, deleteModel, getJob, type Job,
+  downloadModel, deleteModel, getJob, cancelJob, type Job,
 } from "@/lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -29,6 +29,9 @@ export default function SettingsPanel() {
   const [downloadJobs, setDownloadJobs] = useState<Record<string, Job>>({});
   const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({});
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  // Keys the user has clicked cancel on but whose worker hasn't reported
+  // status="cancelled" yet. Used to disable the X button and show "Cancelling…".
+  const [cancelling, setCancelling] = useState<Set<string>>(new Set());
 
   // Env vars
   const [envVars, setEnvVars] = useState<EnvVar[]>([]);
@@ -91,10 +94,21 @@ export default function SettingsPanel() {
         try {
           const updated = await getJob(job.job_id);
           setDownloadJobs((prev) => ({ ...prev, [key]: updated }));
-          if (updated.status === "completed" || updated.status === "failed") {
+          if (
+            updated.status === "completed" ||
+            updated.status === "failed" ||
+            updated.status === "cancelled"
+          ) {
             if (updated.status === "failed" && updated.error) {
               setDownloadErrors((prev) => ({ ...prev, [key]: updated.error! }));
             }
+            // Clear cancelling flag once the worker acknowledges terminal state.
+            setCancelling((prev) => {
+              if (!prev.has(key)) return prev;
+              const next = new Set(prev);
+              next.delete(key);
+              return next;
+            });
             refreshModels();
           }
         } catch {
@@ -112,6 +126,19 @@ export default function SettingsPanel() {
       setDownloadJobs((prev) => ({ ...prev, [key]: job }));
     } catch (e) {
       setDownloadErrors((prev) => ({ ...prev, [key]: (e as Error).message || "Failed to start download" }));
+    }
+  };
+
+  const handleCancel = async (key: string) => {
+    const job = downloadJobs[key];
+    if (!job) return;
+    setCancelling((prev) => new Set(prev).add(key));
+    try {
+      const updated = await cancelJob(job.job_id);
+      setDownloadJobs((prev) => ({ ...prev, [key]: updated }));
+    } catch (e) {
+      setDownloadErrors((prev) => ({ ...prev, [key]: (e as Error).message || "Cancel failed" }));
+      setCancelling((prev) => { const next = new Set(prev); next.delete(key); return next; });
     }
   };
 
@@ -280,6 +307,8 @@ export default function SettingsPanel() {
                     models.map((m) => {
                       const job = downloadJobs[m.key];
                       const inFlight = job && (job.status === "queued" || job.status === "running");
+                      const wasCancelled = job && job.status === "cancelled";
+                      const isCancelling = cancelling.has(m.key);
                       const err = downloadErrors[m.key];
                       return (
                         <tr key={m.key} className="border-b border-zinc-800/30 hover:bg-zinc-800/20 align-top">
@@ -301,17 +330,33 @@ export default function SettingsPanel() {
                           <td className="py-2.5">
                             {inFlight ? (
                               <span className="flex items-center gap-1 text-indigo-400 text-xs">
-                                <Loader2 className="w-3 h-3 animate-spin" /> {job.message || "Downloading…"}
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                {isCancelling ? "Cancelling…" : (job.message || "Downloading…")}
                               </span>
                             ) : m.installed ? (
                               <span className="flex items-center gap-1 text-green-400 text-xs"><Check className="w-3 h-3" /> Ready</span>
+                            ) : wasCancelled ? (
+                              <span className="flex items-center gap-1 text-amber-400 text-xs" title={job.message}>
+                                <XCircle className="w-3 h-3" /> Cancelled — click Download to resume
+                              </span>
                             ) : (
                               <span className="flex items-center gap-1 text-zinc-600 text-xs"><X className="w-3 h-3" /> Not downloaded</span>
                             )}
                           </td>
                           <td className="py-2.5 text-right">
                             {inFlight ? (
-                              <span className="text-[10px] text-zinc-500">running…</span>
+                              <Button
+                                size="sm" variant="ghost"
+                                onClick={() => handleCancel(m.key)}
+                                disabled={isCancelling}
+                                title="Cancel download (partial files stay on disk, safe to resume)"
+                              >
+                                {isCancelling ? (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <X className="w-3 h-3" />
+                                )}
+                              </Button>
                             ) : m.installed ? (
                               <Button
                                 size="sm" variant="ghost"
@@ -327,7 +372,7 @@ export default function SettingsPanel() {
                               </Button>
                             ) : (
                               <Button size="sm" variant="secondary" onClick={() => handleDownload(m.key)}>
-                                <Download className="w-3 h-3 mr-1" /> Download
+                                <Download className="w-3 h-3 mr-1" /> {wasCancelled ? "Resume" : "Download"}
                               </Button>
                             )}
                           </td>

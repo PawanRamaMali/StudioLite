@@ -300,17 +300,29 @@ def estimate_download_size(model_key: str) -> int:
     return total
 
 
-def download_model(model_key: str, progress_callback=None) -> dict:
-    """Download a model's weights via huggingface_hub.snapshot_download.
+class DownloadCancelled(Exception):
+    """Raised by download_model when the caller sets cancel_event mid-download.
+
+    Partial cache files are preserved so a subsequent download_model call
+    resumes from where it stopped rather than starting from scratch.
+    """
+
+
+def download_model(model_key: str, progress_callback=None, cancel_event=None) -> dict:
+    """Download a model's weights via huggingface_hub.
 
     Progress callback signature: ``cb(pct: int, message: str)``. When we know
-    the total size (see estimate_download_size), the watcher thread emits a
-    real percentage capped at 99 during transfer; the final 100 fires after
-    snapshot_download returns. If size is unknown, falls back to a bytes-
-    downloaded counter.
+    the total size (see estimate_download_size), progress reflects real bytes
+    on disk capped at 99 during transfer; the final 100 fires once all files
+    are present. If size is unknown, falls back to a bytes-downloaded counter.
+
+    cancel_event: optional threading.Event. Checked between files (not
+    mid-file — huggingface_hub has no finer granularity). When set() is
+    called, the currently in-flight file finishes and the function raises
+    DownloadCancelled. Partial files stay on disk so a re-download resumes.
 
     Returns ``{"key", "hf_id", "path", "size_bytes"}`` on success.
-    Raises RuntimeError with a human message on any failure.
+    Raises DownloadCancelled if cancelled, RuntimeError on any other failure.
     """
     model = MODEL_REGISTRY.get(model_key)
     if not model:
@@ -328,14 +340,26 @@ def download_model(model_key: str, progress_callback=None) -> dict:
         }
 
     try:
-        from huggingface_hub import snapshot_download
+        from huggingface_hub import HfApi, hf_hub_download, snapshot_download
     except ImportError as e:
         raise RuntimeError(f"huggingface_hub not installed: {e}") from e
 
     total_bytes = estimate_download_size(model_key)  # 0 if unknown
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 
-    # HF snapshot_download blocks. To emit progress we start a watcher thread
-    # that polls the on-disk cache size while the download runs.
+    # Enumerate files so we can check cancel_event between them. If the
+    # metadata call fails (network / gated / rate-limit) fall back to the
+    # single-blocking-call snapshot_download path — no cancel support there,
+    # but the download still works.
+    files: list[tuple[str, int]] = []
+    try:
+        info = HfApi().model_info(hf_id, files_metadata=True, token=token)
+        for sib in getattr(info, "siblings", []) or []:
+            sz = getattr(sib, "size", None)
+            files.append((sib.rfilename, sz if isinstance(sz, int) and sz > 0 else 0))
+    except Exception:
+        files = []
+
     import threading
     stop_flag = threading.Event()
 
@@ -349,7 +373,6 @@ def download_model(model_key: str, progress_callback=None) -> dict:
             if not progress_callback:
                 continue
             if total_bytes > 0:
-                # Cap at 99 so the final 100 comes from the post-download call.
                 pct = min(99, int(size / total_bytes * 100))
                 gb_done = size / (1024 * 1024 * 1024)
                 gb_total = total_bytes / (1024 * 1024 * 1024)
@@ -368,16 +391,33 @@ def download_model(model_key: str, progress_callback=None) -> dict:
     watcher = threading.Thread(target=_watcher, daemon=True)
     watcher.start()
 
+    path = None
     try:
-        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-        path = snapshot_download(
-            repo_id=hf_id,
-            token=token,
-            resume_download=True,
-        )
-    except Exception as e:
-        stop_flag.set()
-        raise RuntimeError(f"Download failed: {e}") from e
+        if files:
+            # Per-file loop: cancel_event checked between files.
+            for rfilename, _sz in files:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise DownloadCancelled(f"Cancelled at {rfilename}")
+                try:
+                    path = hf_hub_download(
+                        repo_id=hf_id,
+                        filename=rfilename,
+                        token=token,
+                        resume_download=True,
+                    )
+                except Exception as e:
+                    raise RuntimeError(f"Download failed on {rfilename}: {e}") from e
+        else:
+            # Metadata call failed — fall back to snapshot_download without
+            # cancel support. Still respects resume_download.
+            try:
+                path = snapshot_download(
+                    repo_id=hf_id,
+                    token=token,
+                    resume_download=True,
+                )
+            except Exception as e:
+                raise RuntimeError(f"Download failed: {e}") from e
     finally:
         stop_flag.set()
 

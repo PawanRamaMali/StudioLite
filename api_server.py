@@ -67,6 +67,10 @@ app.mount("/static/screen_transcripts", StaticFiles(directory=SCREEN_TRANSCRIPTS
 # ---------------------------------------------------------------------------
 jobs = {}  # job_id -> dict
 _jobs_lock = threading.Lock()
+# job_id -> threading.Event. Presence means the job supports cooperative
+# cancellation (currently only model_download jobs). set() → the worker
+# stops at the next checkpoint and reports status="cancelled".
+_cancel_events: dict[str, "threading.Event"] = {}
 
 
 def _create_job(kind: str, params: dict | None = None) -> str:
@@ -383,7 +387,7 @@ class PromptEnhanceRequest(BaseModel):
 
 class JobResponse(BaseModel):
     job_id: str
-    status: str  # queued, running, completed, failed
+    status: str  # queued, running, completed, failed, cancelled
     progress: float = 0
     message: str = ""
     result: Optional[dict] = None
@@ -2215,6 +2219,7 @@ def _run_model_download(job_id: str, model_key: str):
         import model_hub as _mh
     except Exception as e:
         _update_job(job_id, status="failed", error=f"model_hub import failed: {e}")
+        _cancel_events.pop(job_id, None)
         return
 
     _update_job(job_id, status="running", message="Preparing download…")
@@ -2225,12 +2230,34 @@ def _run_model_download(job_id: str, model_key: str):
             update["progress"] = pct
         _update_job(job_id, **update)
 
+    cancel_event = _cancel_events.get(job_id)
     try:
-        result = _mh.download_model(model_key, progress_callback=_cb)
+        result = _mh.download_model(
+            model_key,
+            progress_callback=_cb,
+            cancel_event=cancel_event,
+        )
+    except _mh.DownloadCancelled:
+        # Not a failure — user asked for it. Partial cache is left on disk so
+        # a re-download resumes rather than starting over.
+        try:
+            partial = _mh._cache_size_bytes(_mh.MODEL_REGISTRY[model_key]["hf_id"])
+        except Exception:
+            partial = 0
+        gb = partial / (1024 ** 3) if partial else 0
+        msg = (
+            f"Cancelled. Partial: {gb:.2f} GB on disk (resumable)."
+            if partial > 0
+            else "Cancelled."
+        )
+        _update_job(job_id, status="cancelled", message=msg, error=None)
+        return
     except Exception as e:
         logger.exception("Model download failed: %s", model_key)
         _update_job(job_id, status="failed", error=str(e))
         return
+    finally:
+        _cancel_events.pop(job_id, None)
 
     _update_job(
         job_id,
@@ -2294,8 +2321,35 @@ async def download_model_endpoint(model_key: str, background_tasks: BackgroundTa
             )
 
     job_id = _create_job("model_download", {"model_key": model_key})
+    _cancel_events[job_id] = threading.Event()
     thread = threading.Thread(target=_run_model_download, args=(job_id, model_key), daemon=True)
     thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/jobs/{job_id}/cancel", response_model=JobResponse)
+async def cancel_job(job_id: str):
+    """Cooperatively cancel a job. Only model_download jobs are cancellable
+    today; anything else returns 400. For a running model download the
+    current file finishes, then the worker exits with status="cancelled"
+    and leaves partial cache on disk (resumable via re-download)."""
+    with _jobs_lock:
+        job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    event = _cancel_events.get(job_id)
+    if event is None:
+        # Either the job kind doesn't support cancel or it already finished.
+        if job["status"] in ("completed", "failed", "cancelled"):
+            return _job_response(job_id)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job {job_id} ({job.get('kind')}) does not support cancellation.",
+        )
+
+    event.set()
+    _update_job(job_id, message="Cancelling — waiting for current file to finish…")
     return _job_response(job_id)
 
 

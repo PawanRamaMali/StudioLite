@@ -2,7 +2,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export interface Job {
   job_id: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
   progress: number;
   message: string;
   result?: Record<string, unknown>;
@@ -83,6 +83,8 @@ export const deleteModel = (modelKey: string) =>
 // Jobs
 export const getJob = (id: string) => apiFetch<Job>(`/api/v1/jobs/${id}`);
 export const listJobs = (limit = 20) => apiFetch<Job[]>(`/api/v1/jobs?limit=${limit}`);
+export const cancelJob = (id: string) =>
+  apiFetch<Job>(`/api/v1/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
 
 // Generation
 export const generateText2Video = (params: {

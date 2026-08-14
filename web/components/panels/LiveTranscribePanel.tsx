@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import {
   Mic, MonitorSpeaker, Radio, Square, Download, Loader2, AlertCircle, Languages,
-  Copy, Check, Scissors,
+  Copy, Check, Scissors, Trash2,
 } from "lucide-react";
 
 type Segment = { start: number; end: number; text: string };
@@ -23,7 +23,10 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const WS_BASE = API_BASE.replace(/^http/, "ws");
 const SAMPLE_RATE = 16000;
 
-const STOP_TIMEOUT_MS = 15000;
+// Server-side flush is bounded to 20s; give the round-trip and any queued
+// decode a comfortable margin so we don't fall back to the on-disk transcript
+// while the server was legitimately still finalizing.
+const STOP_TIMEOUT_MS = 30000;
 const PING_INTERVAL_MS = 25000;
 
 /**
@@ -518,6 +521,20 @@ export default function LiveTranscribePanel() {
     }
   }, []);
 
+  // Reset the panel back to a fresh start: drop every previous block, the
+  // current live transcript, cached download links, and any lingering error
+  // — leaves the audio-source and model selections intact.
+  const clearAll = useCallback(() => {
+    setFinals([]);
+    setPartial(null);
+    setBlocks([]);
+    setDownloads(null);
+    setErrorMsg(null);
+    setDevice("");
+    setElapsed(0);
+    setCopied(null);
+  }, []);
+
   // Snapshot the current live text into a fresh block, then reset the live
   // area so subsequent captions accumulate from this point onward.
   const splitBlock = useCallback(() => {
@@ -694,13 +711,26 @@ export default function LiveTranscribePanel() {
           </Card>
 
           {!active && (
-            <Button className="w-full" size="lg" onClick={start} disabled={busy}>
-              {status === "connecting" ? (
-                <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Connecting...</>
-              ) : (
-                <><Radio className="w-4 h-4 mr-2" /> Start Live Transcribe</>
+            <div className="flex gap-2">
+              <Button className="flex-1" size="lg" onClick={start} disabled={busy}>
+                {status === "connecting" ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Connecting...</>
+                ) : (
+                  <><Radio className="w-4 h-4 mr-2" /> Start Live Transcribe</>
+                )}
+              </Button>
+              {(finals.length > 0 || blocks.length > 0 || downloads || errorMsg) && (
+                <Button
+                  size="lg"
+                  variant="secondary"
+                  onClick={clearAll}
+                  disabled={busy}
+                  title="Clear the transcript, all blocks, and download links"
+                >
+                  <Trash2 className="w-4 h-4 mr-2" /> Clear
+                </Button>
               )}
-            </Button>
+            </div>
           )}
           {active && (
             <Button className="w-full" size="lg" variant="danger" onClick={stop} disabled={status === "stopping"}>

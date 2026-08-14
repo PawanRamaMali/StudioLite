@@ -3699,7 +3699,8 @@ async def live_transcribe_ws(websocket: WebSocket):
     async def processor_task():
         """Drain the audio queue, run decode in a thread so it never blocks the loop."""
         await model_ready.wait()
-        while not stop_event.is_set() or not audio_queue.empty():
+        # While recording: feed audio and run rolling decodes.
+        while not stop_event.is_set():
             try:
                 chunk = await asyncio.wait_for(audio_queue.get(), timeout=0.5)
             except asyncio.TimeoutError:
@@ -3718,6 +3719,15 @@ async def live_transcribe_ws(websocket: WebSocket):
                     await websocket.send_json({"type": "final", **fs})
                 for ps in result["partial"]:
                     await websocket.send_json({"type": "partial", **ps})
+        # Once stop was signaled, feed any leftover audio into the buffer WITHOUT
+        # running another rolling decode — flush() will handle the tail. Skipping
+        # the extra decode pass keeps stop→complete under the client watchdog.
+        while True:
+            try:
+                extra = audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            transcriber.feed_pcm16(extra)
 
     try:
         transcriber = LiveTranscriber(

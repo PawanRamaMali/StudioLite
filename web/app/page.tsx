@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Sidebar from "@/components/Sidebar";
 import HomePanel from "@/components/panels/HomePanel";
+import FilmStudioPanel from "@/components/panels/FilmStudioPanel";
 import GeneratePanel from "@/components/panels/GeneratePanel";
 import StoryPanel from "@/components/panels/StoryPanel";
 import ImagesPanel from "@/components/panels/ImagesPanel";
@@ -50,6 +51,7 @@ export default function Home() {
   const activePanel = (() => {
     switch (activeTab) {
       case "home":              return <HomePanel onNavigate={setActiveTab} />;
+      case "film-studio":       return <FilmStudioPanel />;
       case "generate":          return <GeneratePanel />;
       case "story":             return <StoryPanel />;
       case "images":            return <ImagesPanel />;

@@ -362,3 +362,118 @@ export async function uploadImage(file: File): Promise<{ image_path: string; url
   }
   return res.json();
 }
+
+// ---------------------------------------------------------------------------
+// Film Studio
+// ---------------------------------------------------------------------------
+
+export type FilmStageKey =
+  | "producer" | "screenwriter" | "story_editor" | "breakdown"
+  | "storyboard" | "cinematographer" | "shots" | "editor";
+
+export type FilmStageStatus =
+  | "pending" | "running" | "paused" | "done"
+  | "failed" | "stale" | "needs_review";
+
+export interface FilmStageSpec {
+  key: FilmStageKey;
+  label: string;
+  description: string;
+  gated_by_default: boolean;
+}
+
+export interface FilmConfig {
+  llm_backend: string;
+  llm_model: string;
+  llm_host: string | null;
+  style: "stylized" | "photoreal";
+  target_minutes: number;
+  per_stage: Record<string, Record<string, unknown>>;
+}
+
+export interface FilmMeta {
+  id: string;
+  title: string;
+  brief: string;
+  created_at: number;
+  updated_at: number;
+  config: FilmConfig;
+}
+
+export interface FilmState {
+  stage_status: Record<FilmStageKey, FilmStageStatus>;
+  current_stage: FilmStageKey | null;
+  is_paused: boolean;
+  pause_requested: boolean;
+  last_error: string | null;
+  gates: Partial<Record<FilmStageKey, boolean>>;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+export interface FilmDetail {
+  project: FilmMeta;
+  state: FilmState;
+  artifacts: Partial<Record<FilmStageKey, Record<string, unknown>>>;
+  final_url: string | null;
+}
+
+export interface FilmListItem {
+  id: string;
+  title: string;
+  brief: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export const filmListStages = () =>
+  apiFetch<{ stages: FilmStageSpec[] }>("/api/v1/films/stages");
+
+export const filmList = () =>
+  apiFetch<{ projects: FilmListItem[] }>("/api/v1/films");
+
+export const filmCreate = (params: { brief: string; title?: string; config?: Partial<FilmConfig> }) =>
+  apiFetch<{ project: FilmMeta; state: FilmState }>("/api/v1/films", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+
+export const filmGet = (id: string) =>
+  apiFetch<FilmDetail>(`/api/v1/films/${encodeURIComponent(id)}`);
+
+export const filmDelete = (id: string) =>
+  apiFetch<{ deleted: string }>(`/api/v1/films/${encodeURIComponent(id)}`, { method: "DELETE" });
+
+export const filmRun = (id: string) =>
+  apiFetch<{ started: boolean; state: FilmState }>(
+    `/api/v1/films/${encodeURIComponent(id)}/run`, { method: "POST" }
+  );
+
+export const filmPause = (id: string) =>
+  apiFetch<{ pause_requested: boolean; state: FilmState }>(
+    `/api/v1/films/${encodeURIComponent(id)}/pause`, { method: "POST" }
+  );
+
+export const filmRewind = (id: string, stage: FilmStageKey) =>
+  apiFetch<{ rewound_to: FilmStageKey; state: FilmState }>(
+    `/api/v1/films/${encodeURIComponent(id)}/rewind/${encodeURIComponent(stage)}`, { method: "POST" }
+  );
+
+export const filmEditArtifact = (id: string, stage: FilmStageKey, data: unknown) =>
+  apiFetch<{ state: FilmState; artifact: unknown }>(
+    `/api/v1/films/${encodeURIComponent(id)}/artifact/${encodeURIComponent(stage)}`,
+    { method: "PUT", body: JSON.stringify({ data }) }
+  );
+
+export const filmSetGates = (id: string, gates: Partial<Record<FilmStageKey, boolean>>) =>
+  apiFetch<{ gates: Record<string, boolean> }>(
+    `/api/v1/films/${encodeURIComponent(id)}/gates`,
+    { method: "POST", body: JSON.stringify({ gates }) }
+  );
+
+export function filmStreamUrl(id: string): string {
+  const wsBase = API_BASE.replace(/^http/, "ws");
+  return `${wsBase}/api/v1/films/${encodeURIComponent(id)}/stream`;
+}
+
+export const FILM_API_BASE = API_BASE;

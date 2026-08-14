@@ -4380,6 +4380,287 @@ def _ensure_ffmpeg_on_path():
 _ensure_ffmpeg_on_path()
 
 
+# ---------------------------------------------------------------------------
+# Film Studio — multi-agent short-film pipeline (T1)
+# ---------------------------------------------------------------------------
+
+FILMS_DIR = os.path.join(OUTPUT_DIR, "films")
+os.makedirs(FILMS_DIR, exist_ok=True)
+app.mount("/static/films", StaticFiles(directory=FILMS_DIR), name="films")
+
+
+class FilmCreateRequest(BaseModel):
+    brief: str = Field(..., min_length=8, description="One-paragraph pitch.")
+    title: Optional[str] = None
+    config: Optional[Dict] = None  # llm_backend, llm_model, style, target_minutes, per_stage
+
+
+class FilmEditArtifactRequest(BaseModel):
+    data: Dict
+
+
+class FilmSetGatesRequest(BaseModel):
+    gates: Dict[str, bool]
+
+
+class FilmSetChoiceRequest(BaseModel):
+    chosen_index: int
+
+
+def _film_meta_dict(project) -> Dict:
+    m = project.meta
+    return {
+        "id": m.id,
+        "title": m.title,
+        "brief": m.brief,
+        "created_at": m.created_at,
+        "updated_at": m.updated_at,
+        "config": {
+            "llm_backend": m.config.llm_backend,
+            "llm_model": m.config.llm_model,
+            "llm_host": m.config.llm_host,
+            "style": m.config.style,
+            "target_minutes": m.config.target_minutes,
+            "per_stage": m.config.per_stage,
+        },
+    }
+
+
+def _film_state_dict(project) -> Dict:
+    s = project.state
+    return {
+        "stage_status": s.stage_status,
+        "current_stage": s.current_stage,
+        "is_paused": s.is_paused,
+        "pause_requested": s.pause_requested,
+        "last_error": s.last_error,
+        "gates": s.gates,
+        "started_at": s.started_at,
+        "finished_at": s.finished_at,
+    }
+
+
+def _film_stages_dict() -> list:
+    from filmmaker.stages import STAGES as _STAGES
+    return [{
+        "key": s.key,
+        "label": s.label,
+        "description": s.description,
+        "gated_by_default": s.gated_by_default,
+    } for s in _STAGES]
+
+
+@app.get("/api/v1/films/stages")
+async def film_list_stages():
+    """The pipeline shape — static; used by the frontend to render the timeline."""
+    return {"stages": _film_stages_dict()}
+
+
+@app.get("/api/v1/films")
+async def film_list():
+    from filmmaker import projects as _fp
+    return {"projects": _fp.list_all(OUTPUT_DIR)}
+
+
+@app.post("/api/v1/films")
+async def film_create(req: FilmCreateRequest):
+    from filmmaker import projects as _fp
+    proj = _fp.create(OUTPUT_DIR, brief=req.brief, title=req.title, config_dict=req.config)
+    return {
+        "project": _film_meta_dict(proj),
+        "state": _film_state_dict(proj),
+    }
+
+
+@app.get("/api/v1/films/{project_id}")
+async def film_get(project_id: str):
+    from filmmaker import projects as _fp
+    try:
+        proj = _fp.load(OUTPUT_DIR, project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    # Include artifact filenames so the frontend can render viewer panes.
+    artifacts = {}
+    for spec in _film_stages_dict():
+        art = proj.read_artifact(spec["key"])  # type: ignore[arg-type]
+        if art is not None:
+            artifacts[spec["key"]] = art
+    return {
+        "project": _film_meta_dict(proj),
+        "state": _film_state_dict(proj),
+        "artifacts": artifacts,
+        "final_url": (
+            f"/static/films/{project_id}/final.mp4"
+            if os.path.exists(os.path.join(FILMS_DIR, project_id, "final.mp4"))
+            else None
+        ),
+    }
+
+
+@app.delete("/api/v1/films/{project_id}")
+async def film_delete(project_id: str):
+    from filmmaker import projects as _fp, orchestrator as _fo
+    try:
+        proj = _fp.load(OUTPUT_DIR, project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    if _fo.manager.is_running(project_id):
+        raise HTTPException(409, "Pause the run before deleting.")
+    proj.delete()
+    return {"deleted": project_id}
+
+
+@app.post("/api/v1/films/{project_id}/run")
+async def film_run(project_id: str):
+    """Start (or resume) the pipeline for this project."""
+    from filmmaker import projects as _fp, orchestrator as _fo
+    try:
+        proj = _fp.load(OUTPUT_DIR, project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    # If the current stage sits at needs_review, advance it to done so the
+    # orchestrator moves on to the next one when we resume.
+    st = proj.state
+    for k, v in list(st.stage_status.items()):
+        if v == "needs_review":
+            proj.set_stage_status(k, "done")  # type: ignore[arg-type]
+    only_stale = any(v == "stale" for v in proj.state.stage_status.values())
+    started = await _fo.manager.start(proj, only_stale=only_stale)
+    if not started:
+        raise HTTPException(409, "A run is already active for this project.")
+    return {"started": True, "state": _film_state_dict(proj)}
+
+
+@app.post("/api/v1/films/{project_id}/pause")
+async def film_pause(project_id: str):
+    from filmmaker import projects as _fp, orchestrator as _fo
+    try:
+        proj = _fp.load(OUTPUT_DIR, project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    ok = _fo.manager.request_pause(proj)
+    return {"pause_requested": ok, "state": _film_state_dict(proj)}
+
+
+@app.post("/api/v1/films/{project_id}/rewind/{stage_key}")
+async def film_rewind(project_id: str, stage_key: str):
+    """Reset the given stage and everything downstream back to pending."""
+    from filmmaker import projects as _fp, orchestrator as _fo
+    from filmmaker.stages import STAGE_KEYS, stage_index
+    if stage_key not in STAGE_KEYS:
+        raise HTTPException(400, f"Unknown stage: {stage_key}")
+    try:
+        proj = _fp.load(OUTPUT_DIR, project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    if _fo.manager.is_running(project_id):
+        raise HTTPException(409, "Pause the run before rewinding.")
+    idx = stage_index(stage_key)  # type: ignore[arg-type]
+    state = proj.state
+    for k in STAGE_KEYS[idx:]:
+        state.stage_status[k] = "pending"
+    state.current_stage = None
+    state.last_error = None
+    state.is_paused = False
+    proj.save_state(state)
+    return {"rewound_to": stage_key, "state": _film_state_dict(proj)}
+
+
+@app.put("/api/v1/films/{project_id}/artifact/{stage_key}")
+async def film_edit_artifact(project_id: str, stage_key: str, req: FilmEditArtifactRequest):
+    """Write a user-edited artifact and mark downstream stages stale."""
+    from filmmaker import projects as _fp, orchestrator as _fo
+    from filmmaker.stages import STAGE_KEYS
+    if stage_key not in STAGE_KEYS:
+        raise HTTPException(400, f"Unknown stage: {stage_key}")
+    try:
+        proj = _fp.load(OUTPUT_DIR, project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    if _fo.manager.is_running(project_id):
+        raise HTTPException(409, "Pause the run before editing artifacts.")
+    proj.write_artifact(stage_key, req.data)  # type: ignore[arg-type]
+    # If the edited stage was pending/failed, promote it to done — the user
+    # just supplied the artifact by hand.
+    if proj.state.stage_status.get(stage_key) not in ("done", "needs_review"):
+        proj.set_stage_status(stage_key, "done")  # type: ignore[arg-type]
+    proj.mark_downstream_stale(stage_key)  # type: ignore[arg-type]
+    return {"state": _film_state_dict(proj), "artifact": req.data}
+
+
+@app.post("/api/v1/films/{project_id}/gates")
+async def film_set_gates(project_id: str, req: FilmSetGatesRequest):
+    from filmmaker import projects as _fp
+    try:
+        proj = _fp.load(OUTPUT_DIR, project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    state = proj.state
+    state.gates.update({k: bool(v) for k, v in req.gates.items()})
+    proj.save_state(state)
+    return {"gates": state.gates}
+
+
+@app.get("/api/v1/films/{project_id}/events")
+async def film_events(project_id: str, tail: int = 200):
+    """Historical events (tail of events.jsonl). Live stream uses the WS below."""
+    from filmmaker import projects as _fp
+    try:
+        proj = _fp.load(OUTPUT_DIR, project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    return {"events": proj.read_events(tail=tail)}
+
+
+@app.websocket("/api/v1/films/{project_id}/stream")
+async def film_stream(websocket: WebSocket, project_id: str):
+    """Push orchestrator events to the panel as they happen."""
+    import asyncio
+    from filmmaker import projects as _fp, orchestrator as _fo
+    await websocket.accept()
+    try:
+        proj = _fp.load(OUTPUT_DIR, project_id)
+    except FileNotFoundError:
+        await websocket.close(code=4404)
+        return
+    # Send a snapshot so the client can render immediately without an extra fetch.
+    await websocket.send_json({"type": "snapshot", "state": _film_state_dict(proj)})
+    # Replay the last few events so freshly-opened tabs still see the recent history.
+    for ev in proj.read_events(tail=50):
+        try:
+            await websocket.send_json({"type": "event", "event": ev})
+        except Exception:
+            return
+
+    loop = asyncio.get_event_loop()
+    queue: "asyncio.Queue[Dict]" = asyncio.Queue()
+
+    def _listener(ev: Dict) -> None:
+        # `_listener` fires from the orchestrator's own thread. Hop back into
+        # the WS event loop to enqueue safely.
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, ev)
+        except RuntimeError:
+            pass  # loop shutting down
+
+    unsub = _fo.manager.subscribe(project_id, _listener)
+    try:
+        while True:
+            try:
+                ev = await asyncio.wait_for(queue.get(), timeout=30.0)
+                await websocket.send_json({"type": "event", "event": ev})
+            except asyncio.TimeoutError:
+                # heartbeat — also gives us a chance to notice a client disconnect
+                try:
+                    await websocket.send_json({"type": "ping"})
+                except Exception:
+                    return
+    except WebSocketDisconnect:
+        return
+    finally:
+        unsub()
+
+
 # Load .env file on startup
 _env_file = os.path.join(ROOT_DIR, ".env")
 if os.path.exists(_env_file):

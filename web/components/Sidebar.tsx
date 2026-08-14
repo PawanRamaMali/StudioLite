@@ -5,6 +5,7 @@ import {
   Home, Video, Wand2, BookOpen, Scissors, Music, ArrowUpCircle,
   Users, KeyRound, Briefcase, Settings, ChevronLeft, ChevronRight,
   Sparkles, Image as ImageIcon, Radio, ScanText, FileVideo, Cpu,
+  Film,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getSystemStatus, type SystemStatus } from "@/lib/api";
@@ -20,6 +21,7 @@ interface SidebarProps {
 // users see the feature; the panel itself renders an explanatory state.
 const NAV_ITEMS: { id: string; label: string; icon: typeof Video; group: string; gpuRequired?: boolean }[] = [
   { id: "home", label: "Home", icon: Home, group: "Start" },
+  { id: "film-studio", label: "Film Studio", icon: Film, group: "Create" },
   { id: "generate", label: "Video Generator", icon: Video, group: "Create", gpuRequired: true },
   { id: "story", label: "Story Mode", icon: BookOpen, group: "Create", gpuRequired: true },
   { id: "images", label: "Images Studio", icon: ImageIcon, group: "Create" },

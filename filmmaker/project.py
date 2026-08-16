@@ -34,6 +34,10 @@ class ProjectConfig:
     style: str = "stylized"          # "stylized" | "photoreal"
     # Target runtime hint the Producer and Breakdown agents anchor on.
     target_minutes: float = 2.0
+    # SDXL inference-step preset. Trades wall-clock for image quality.
+    # Values: "draft" (fast iteration), "standard" (default),
+    # "high" (finishing look), "ultra" (final render).
+    quality: str = "standard"
 
 
 @dataclass
@@ -280,6 +284,7 @@ def _meta_from_json(d: Dict[str, Any]) -> ProjectMeta:
         llm_host=cfg_raw.get("llm_host"),
         style=cfg_raw.get("style", "stylized"),
         target_minutes=float(cfg_raw.get("target_minutes", 2.0)),
+        quality=str(cfg_raw.get("quality", "standard")).lower(),
     )
     return ProjectMeta(
         id=d["id"],

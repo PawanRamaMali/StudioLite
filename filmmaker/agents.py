@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 from typing import Any, Dict, List, Optional
 
@@ -352,7 +353,7 @@ def run_cinematographer(project: Project) -> Dict[str, Any]:
             by_id[shot_id] = {
                 "framing":    str(item.get("framing", "MS")).upper(),
                 "lens_mm":    int(item.get("lens_mm", 35) or 35),
-                "camera_move":str(item.get("camera_move", "static")).lower(),
+                "camera_move":_normalize_camera_move(item.get("camera_move")),
                 "lighting":   str(item.get("lighting", "natural key light")).strip(),
                 "palette":    str(item.get("palette", "neutral")).strip(),
                 "duration_sec": max(1, min(15, int(item.get("duration_sec", 4) or 4))),
@@ -367,9 +368,42 @@ def run_cinematographer(project: Project) -> Dict[str, Any]:
     return {"scenes": out}
 
 
+_ALLOWED_CAMERA_MOVES = {"static", "pan", "dolly", "handheld", "crane", "whip"}
+
+
+def _normalize_camera_move(raw: Any) -> str:
+    """Snap the LLM's camera_move to the DP-schema enum. Small models like to
+    return descriptive phrases ("pan right to follow the character") instead
+    of the plain enum; we accept the intent as long as an allowed token is in
+    the phrase, otherwise fall back to static."""
+    s = str(raw or "static").strip().lower()
+    if s in _ALLOWED_CAMERA_MOVES:
+        return s
+    for tok in s.replace(",", " ").replace("-", " ").replace("/", " ").split():
+        if tok in _ALLOWED_CAMERA_MOVES:
+            return tok
+    return "static"
+
+
 # ---------------------------------------------------------------------------
 # 7. Shot Generator — SDXL keyframe per shot (T1 stub, no motion)
 # ---------------------------------------------------------------------------
+
+# SDXL Turbo handles ~4 prompts per batch cleanly on 12 GB VRAM. Bigger cards
+# can push higher, but the wall-clock win flattens past ~4 anyway.
+_SDXL_BATCH_SIZE = 4
+
+_QUALITY_STEPS: Dict[str, int] = {
+    "draft":    12,
+    "standard": 30,
+    "high":     50,
+    "ultra":    75,
+}
+
+
+def _quality_to_steps(q: str) -> int:
+    return _QUALITY_STEPS.get((q or "standard").lower(), _QUALITY_STEPS["standard"])
+
 
 def run_shots(project: Project) -> Dict[str, Any]:
     """T1: render one SDXL keyframe per shot. Never blocks the pipeline on a
@@ -383,10 +417,13 @@ def run_shots(project: Project) -> Dict[str, Any]:
     shots_by_scene = storyboard.get("scenes") or {}
     dp_by_scene = cinema.get("scenes") or {}
     style = project.meta.config.style
+    steps = _quality_to_steps(project.meta.config.quality)
 
-    render = _load_sdxl_renderer()
-    result_shots: List[Dict[str, Any]] = []
+    render_one = _load_sdxl_renderer()
+    render_batch = _load_sdxl_batch_renderer()
 
+    # First pass: build the flat work list so we can batch across scenes.
+    jobs: List[Dict[str, Any]] = []
     for scene in scenes:
         sid = scene["id"]
         shots = shots_by_scene.get(sid, [])
@@ -396,30 +433,74 @@ def run_shots(project: Project) -> Dict[str, Any]:
         for shot in shots:
             shot_id = shot["id"]
             dp_shot = dp.get(shot_id, {})
-            prompt = _shot_prompt(style, scene, shot, dp_shot)
-            png_path = os.path.join(scene_dir, f"{shot_id}.png")
-            rendered = False
-            error: Optional[str] = None
-            try:
-                if render is not None:
-                    render(prompt, png_path)
-                    rendered = True
-                else:
-                    _placeholder_png(png_path, f"{sid}/{shot_id}")
-            except Exception as e:
-                logger.exception("SDXL render failed for %s/%s; using placeholder", sid, shot_id)
-                error = str(e)
-                _placeholder_png(png_path, f"{sid}/{shot_id}")
-            result_shots.append({
+            jobs.append({
                 "scene_id": sid,
                 "shot_id": shot_id,
-                "prompt": prompt,
-                "path": os.path.relpath(png_path, project.dir).replace(os.sep, "/"),
+                "prompt": _shot_prompt(style, scene, shot, dp_shot),
+                "png_path": os.path.join(scene_dir, f"{shot_id}.png"),
                 "duration_sec": int(dp_shot.get("duration_sec", 4) or 4),
                 "dialogue": shot.get("dialogue", ""),
-                "rendered": rendered,
-                "error": error,
+                "rendered": False,
+                "error": None,
             })
+
+    total = len(jobs)
+    project.append_event({"type": "shots_progress", "done": 0, "total": total})
+
+    # Batch through the work list. On any batch failure, fall back to per-shot
+    # for just that batch — a single OOM shouldn't discard the whole render.
+    i = 0
+    done = 0
+    while i < total:
+        chunk = jobs[i:i + _SDXL_BATCH_SIZE]
+        used_batch = False
+        if render_batch is not None and len(chunk) > 1:
+            try:
+                render_batch(
+                    [j["prompt"] for j in chunk],
+                    [j["png_path"] for j in chunk],
+                    steps=steps,
+                )
+                for j in chunk:
+                    j["rendered"] = True
+                used_batch = True
+            except Exception as e:
+                logger.warning(
+                    "SDXL batch of %d failed (%s); dropping to per-shot for this chunk",
+                    len(chunk), e,
+                )
+
+        if not used_batch:
+            for j in chunk:
+                try:
+                    if render_one is not None:
+                        render_one(j["prompt"], j["png_path"], steps=steps)
+                        j["rendered"] = True
+                    else:
+                        _placeholder_png(j["png_path"], f"{j['scene_id']}/{j['shot_id']}")
+                except Exception as e:
+                    logger.exception(
+                        "SDXL render failed for %s/%s; using placeholder",
+                        j["scene_id"], j["shot_id"],
+                    )
+                    j["error"] = str(e)
+                    _placeholder_png(j["png_path"], f"{j['scene_id']}/{j['shot_id']}")
+
+        done += len(chunk)
+        i += _SDXL_BATCH_SIZE
+        project.append_event({"type": "shots_progress", "done": done, "total": total})
+        logger.info("shots progress: %d / %d", done, total)
+
+    result_shots = [{
+        "scene_id":     j["scene_id"],
+        "shot_id":      j["shot_id"],
+        "prompt":       j["prompt"],
+        "path":         os.path.relpath(j["png_path"], project.dir).replace(os.sep, "/"),
+        "duration_sec": j["duration_sec"],
+        "dialogue":     j["dialogue"],
+        "rendered":     j["rendered"],
+        "error":        j["error"],
+    } for j in jobs]
     return {"shots": result_shots}
 
 
@@ -442,18 +523,64 @@ def _shot_prompt(style: str, scene: Dict[str, Any], shot: Dict[str, Any], dp: Di
 
 
 def _load_sdxl_renderer():
-    """Return a callable `(prompt, out_path) -> None`, or None if unavailable."""
+    """Return a callable `(prompt, out_path, *, steps=None) -> None`, or None if unavailable."""
     try:
         from reelforge import rf_generate_image
     except Exception as e:  # pragma: no cover
         logger.info("SDXL not available (%s); shot generator will use placeholders.", e)
         return None
 
-    def _render(prompt: str, out_path: str) -> None:
-        img = rf_generate_image(prompt, provider="sdxl_turbo", aspect_ratio="16:9")
-        # rf_generate_image returns a PIL.Image
-        img.save(out_path, "PNG")
+    def _render(prompt: str, out_path: str, *, steps: Optional[int] = None) -> None:
+        # rf_generate_image writes to `.mp/<uuid>.png` and returns that path —
+        # not a PIL.Image, despite the plausible-sounding name.
+        src = rf_generate_image(
+            prompt, provider="sdxl_turbo", aspect_ratio="16:9", steps=steps,
+        )
+        shutil.move(src, out_path)
     return _render
+
+
+def _load_sdxl_batch_renderer():
+    """Return a callable `(prompts, out_paths, *, steps=None) -> None` that
+    runs the SDXL pipeline on a whole batch in one forward pass, or None if
+    the underlying pipeline isn't importable. Falls back cleanly (raises) on
+    per-batch OOM so the caller can drop to per-shot mode."""
+    try:
+        from reelforge import rf_load_sdxl_pipeline
+        import reelforge as _rf
+    except Exception as e:  # pragma: no cover
+        logger.info("SDXL batch renderer unavailable (%s)", e)
+        return None
+
+    def _render_batch(prompts: List[str], out_paths: List[str], *,
+                      steps: Optional[int] = None) -> None:
+        if len(prompts) != len(out_paths):
+            raise ValueError("prompts / out_paths length mismatch")
+        rf_load_sdxl_pipeline(None)
+        pipe = getattr(_rf, "_sdxl_pipe", None)
+        if pipe is None:
+            raise RuntimeError("SDXL pipeline did not load")
+
+        # Match the wrapper's default aspect ratio (16:9) and style-preset knobs
+        # so batched output matches single-shot output.
+        ar = _rf.ASPECT_RATIOS.get("16:9", {"image_gen_width": 1024, "image_gen_height": 576})
+        preset = _rf.IMAGE_STYLE_PRESETS.get("photorealistic", {"positive": "", "negative": ""})
+        enriched = [f"{p}, {preset['positive']}" for p in prompts]
+        negatives = [preset["negative"]] * len(prompts)
+        result = pipe(
+            prompt=enriched,
+            negative_prompt=negatives,
+            num_inference_steps=steps or 30,
+            guidance_scale=7.5,
+            width=ar["image_gen_width"],
+            height=ar["image_gen_height"],
+        )
+        images = result.images
+        if len(images) != len(out_paths):
+            raise RuntimeError(f"SDXL returned {len(images)} images for {len(out_paths)} prompts")
+        for img, out in zip(images, out_paths):
+            img.save(out, "PNG")
+    return _render_batch
 
 
 def _placeholder_png(path: str, label: str) -> None:

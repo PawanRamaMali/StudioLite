@@ -18,8 +18,12 @@ StageKey = Literal[
     "breakdown",
     "storyboard",
     "cinematographer",
+    "voice_cast",
+    "voice_actor",
     "shots",
     "editor",
+    "composer",
+    "mixer",
 ]
 
 StageStatus = Literal[
@@ -43,8 +47,8 @@ class StageSpec:
     gated_by_default: bool = False
 
 
-# Order matters — this is the pipeline. T1 ships all eight; the last two
-# (shots, editor) are executable stubs so the whole thing runs end to end.
+# Order matters — this is the pipeline. Dialogue voices and music score fold
+# into the final cut via the mixer stage, so the film comes out with sound.
 STAGES: List[StageSpec] = [
     StageSpec("producer",       "Producer",         "Turns the brief into 3 loglines and picks one.",              gated_by_default=True),
     StageSpec("screenwriter",   "Screenwriter",     "Writes a first-draft screenplay from the chosen logline."),
@@ -52,8 +56,12 @@ STAGES: List[StageSpec] = [
     StageSpec("breakdown",      "Script Breakdown", "Parses the screenplay into scenes + metadata."),
     StageSpec("storyboard",     "Storyboard",       "Expands each scene into a shot list."),
     StageSpec("cinematographer","Cinematographer",  "Assigns framing / lens / camera move / duration per shot.",   gated_by_default=True),
-    StageSpec("shots",          "Shot Generator",   "T1: renders one SDXL keyframe per shot. T2 upgrades to video."),
-    StageSpec("editor",         "Editor",           "T1: assembles keyframes into a slideshow. T2 adds dialogue + music."),
+    StageSpec("voice_cast",     "Voice Casting",    "Assigns a Piper voice to each named character."),
+    StageSpec("voice_actor",    "Voice Actor",      "Piper-synthesizes each dialogue line as a wav clip."),
+    StageSpec("shots",          "Shot Generator",   "Renders one SDXL keyframe per shot."),
+    StageSpec("editor",         "Editor",           "Assembles keyframes into the silent cut."),
+    StageSpec("composer",       "Composer",         "LLM writes a score prompt; MusicGen renders one track for the cut."),
+    StageSpec("mixer",          "Mixer",            "Muxes video + dialogue + score with sidechain ducking under speech."),
 ]
 
 STAGE_KEYS: List[StageKey] = [s.key for s in STAGES]

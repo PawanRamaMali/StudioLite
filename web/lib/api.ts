@@ -388,6 +388,7 @@ export interface FilmConfig {
   llm_host: string | null;
   style: "stylized" | "photoreal";
   target_minutes: number;
+  quality: "draft" | "standard" | "high" | "ultra";
   per_stage: Record<string, Record<string, unknown>>;
 }
 
@@ -415,7 +416,8 @@ export interface FilmDetail {
   project: FilmMeta;
   state: FilmState;
   artifacts: Partial<Record<FilmStageKey, Record<string, unknown>>>;
-  final_url: string | null;
+  final_url: string | null;         // silent slideshow (editor stage output)
+  final_mixed_url: string | null;   // mixed cut with dialogue + score (mixer stage output)
 }
 
 export interface FilmListItem {

@@ -33,14 +33,25 @@ export default function Home() {
   // and drive no dependent effect.
   useEffect(() => {
     let initialTab: string | null = null;
+    // `?tab=film-studio` (or any panel key) wins — lets external tools deep-link
+    // straight into a panel without a manual sidebar click.
     try {
-      const seen = window.localStorage.getItem(FIRST_VISIT_KEY);
-      if (!seen) {
-        initialTab = "home";
-        window.localStorage.setItem(FIRST_VISIT_KEY, "1");
-      }
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get("tab");
+      if (tabParam) initialTab = tabParam;
     } catch {
-      // localStorage disabled — stay on generate
+      // URL parsing failed — ignore
+    }
+    if (!initialTab) {
+      try {
+        const seen = window.localStorage.getItem(FIRST_VISIT_KEY);
+        if (!seen) {
+          initialTab = "home";
+          window.localStorage.setItem(FIRST_VISIT_KEY, "1");
+        }
+      } catch {
+        // localStorage disabled — stay on generate
+      }
     }
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (initialTab) setActiveTab(initialTab);

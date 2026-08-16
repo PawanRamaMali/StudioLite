@@ -4485,14 +4485,19 @@ async def film_get(project_id: str):
         art = proj.read_artifact(spec["key"])  # type: ignore[arg-type]
         if art is not None:
             artifacts[spec["key"]] = art
+    silent_path = os.path.join(FILMS_DIR, project_id, "final.mp4")
+    mixed_path  = os.path.join(FILMS_DIR, project_id, "final_mixed.mp4")
     return {
         "project": _film_meta_dict(proj),
         "state": _film_state_dict(proj),
         "artifacts": artifacts,
         "final_url": (
             f"/static/films/{project_id}/final.mp4"
-            if os.path.exists(os.path.join(FILMS_DIR, project_id, "final.mp4"))
-            else None
+            if os.path.exists(silent_path) else None
+        ),
+        "final_mixed_url": (
+            f"/static/films/{project_id}/final_mixed.mp4"
+            if os.path.exists(mixed_path) else None
         ),
     }
 

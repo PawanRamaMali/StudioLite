@@ -44,6 +44,16 @@ export default function FilmStudioPanel() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Deep-link support: `?film=<id>` opens that film's detail on mount.
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const filmId = params.get("film");
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (filmId) setActiveId(filmId);
+    } catch { /* ignore */ }
+  }, []);
+
   const loadProjects = useCallback(async () => {
     try {
       const res: ProjectListRes = await filmList();
@@ -357,7 +367,9 @@ function ProjectView({
     return <Card className="text-zinc-500 text-sm">Loading project…</Card>;
   }
 
-  const { project, state, artifacts, final_url } = detail;
+  const { project, state, artifacts, final_url, final_mixed_url } = detail;
+  const playbackUrl = final_mixed_url || final_url;
+  const hasAudio = Boolean(final_mixed_url);
   const isRunning = Object.values(state.stage_status).some((s) => s === "running");
   const isAwaiting = Object.values(state.stage_status).some((s) => s === "needs_review");
   const hasStale = Object.values(state.stage_status).some((s) => s === "stale");
@@ -499,24 +511,41 @@ function ProjectView({
 
       {/* middle + right: artifact viewer + final video */}
       <div className="lg:col-span-2 space-y-3">
-        {final_url && (
+        {playbackUrl && (
           <Card className="border-green-500/20 bg-green-500/5">
             <CardTitle className="text-sm mb-2 flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 text-green-400" /> Final cut
+              <Badge className={
+                hasAudio
+                  ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                  : "bg-zinc-500/15 text-zinc-400 border-zinc-500/30"
+              }>
+                {hasAudio ? "with audio" : "silent"}
+              </Badge>
             </CardTitle>
             <video
-              src={`${FILM_API_BASE}${final_url}`}
+              key={playbackUrl}
+              src={`${FILM_API_BASE}${playbackUrl}`}
               controls
               className="w-full rounded-lg bg-black"
             />
-            <div className="mt-2 flex gap-2">
+            <div className="mt-2 flex gap-3 items-center">
               <a
-                href={`${FILM_API_BASE}${final_url}`}
+                href={`${FILM_API_BASE}${playbackUrl}`}
                 download
                 className="inline-flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300"
               >
                 <Download className="w-3.5 h-3.5" /> Download MP4
               </a>
+              {hasAudio && final_url && (
+                <a
+                  href={`${FILM_API_BASE}${final_url}`}
+                  download
+                  className="inline-flex items-center gap-1.5 text-[11px] text-zinc-500 hover:text-zinc-300"
+                >
+                  silent version
+                </a>
+              )}
             </div>
           </Card>
         )}

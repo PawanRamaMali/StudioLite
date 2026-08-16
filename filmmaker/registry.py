@@ -21,8 +21,12 @@ RUNNERS: Dict[StageKey, StageRunner] = {
     "breakdown":       agents.run_breakdown,
     "storyboard":      agents.run_storyboard,
     "cinematographer": agents.run_cinematographer,
+    "voice_cast":      agents.run_voice_cast,
+    "voice_actor":     agents.run_voice_actor,
     "shots":           agents.run_shots,
     "editor":          agents.run_editor,
+    "composer":        agents.run_composer,
+    "mixer":           agents.run_mixer,
 }
 
 

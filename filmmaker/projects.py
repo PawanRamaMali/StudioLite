@@ -38,4 +38,5 @@ def _config_from_dict(d: Dict[str, Any]) -> ProjectConfig:
         llm_host=d.get("llm_host"),
         style=str(d.get("style", "stylized")),
         target_minutes=float(d.get("target_minutes", 2.0)),
+        quality=str(d.get("quality", "standard")).lower(),
     )

@@ -759,6 +759,413 @@ def _render_static_clip(img: str, out_path: str, duration_sec: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 9. Voice Casting — LLM assigns a Piper voice per named character.
+# ---------------------------------------------------------------------------
+
+_PIPER_POOL: List[Dict[str, str]] = [
+    {"name": "Amy",      "gender": "female", "accent": "US"},
+    {"name": "Ryan",     "gender": "male",   "accent": "US"},
+    {"name": "Lessac",   "gender": "male",   "accent": "US"},
+    {"name": "Libritts", "gender": "neutral","accent": "US"},
+    {"name": "Kathleen", "gender": "female", "accent": "US"},
+    {"name": "Danny",    "gender": "male",   "accent": "US"},
+    {"name": "Alan",     "gender": "male",   "accent": "UK"},
+    {"name": "Alba",     "gender": "female", "accent": "UK"},
+    {"name": "Jenny",    "gender": "female", "accent": "UK"},
+    {"name": "Northern", "gender": "male",   "accent": "UK"},
+    {"name": "Semaine",  "gender": "female", "accent": "UK"},
+    {"name": "Southern", "gender": "female", "accent": "UK"},
+]
+_PIPER_NAMES = {v["name"] for v in _PIPER_POOL}
+
+
+_VOICE_CAST_SYSTEM = """\
+You cast voice actors for a short film. Given the list of characters and the
+available voice pool, assign ONE voice per character. Prefer variety and
+match gender / register where reasonable.
+
+Return JSON:
+{
+  "cast": [
+    {"character": "MARGO", "voice": "Amy",  "why": "warm mid-range for the narrator"},
+    ...
+  ]
+}
+The `voice` field MUST be one of the pool names. No commentary.
+"""
+
+
+def run_voice_cast(project: Project) -> Dict[str, Any]:
+    breakdown = project.read_artifact("breakdown") or {}
+    scenes = breakdown.get("scenes") or []
+    characters: List[str] = []
+    seen = set()
+    for scene in scenes:
+        for c in scene.get("characters", []) or []:
+            c = str(c).strip()
+            if c and c not in seen:
+                seen.add(c); characters.append(c)
+    if not characters:
+        return {"cast": {}, "note": "No named characters in breakdown; nothing to cast."}
+
+    user_msg = json.dumps({
+        "characters": characters,
+        "voice_pool": _PIPER_POOL,
+    }, ensure_ascii=False, indent=2)
+    try:
+        raw = _chat(project, "voice_cast", _VOICE_CAST_SYSTEM, user_msg,
+                    want_json=True, temperature=0.3, max_tokens=1500)
+        data = llm.parse_json(raw)
+        cast_list = data.get("cast") or []
+    except Exception as e:
+        logger.warning("voice_cast LLM failed (%s); falling back to round-robin", e)
+        cast_list = []
+
+    cast: Dict[str, Dict[str, str]] = {}
+    fallback = [v["name"] for v in _PIPER_POOL]
+    for i, char in enumerate(characters):
+        item = next((c for c in cast_list
+                     if isinstance(c, dict)
+                     and str(c.get("character", "")).strip().upper() == char.upper()), None)
+        picked = str((item or {}).get("voice", "")).strip()
+        if picked not in _PIPER_NAMES:
+            picked = fallback[i % len(fallback)]
+        cast[char] = {"voice": picked, "why": str((item or {}).get("why", "")).strip()}
+    return {"cast": cast}
+
+
+# ---------------------------------------------------------------------------
+# 10. Voice Actor — Piper synthesizes each dialogue line.
+# ---------------------------------------------------------------------------
+
+def run_voice_actor(project: Project) -> Dict[str, Any]:
+    storyboard = project.read_artifact("storyboard") or {}
+    breakdown  = project.read_artifact("breakdown") or {}
+    cast_art   = project.read_artifact("voice_cast") or {}
+    scenes: List[Dict[str, Any]] = breakdown.get("scenes") or []
+    shots_by_scene: Dict[str, List[Dict[str, Any]]] = storyboard.get("scenes") or {}
+    cast: Dict[str, Dict[str, str]] = cast_art.get("cast") or {}
+
+    voice_dir = os.path.join(project.artifacts_dir, "voice")
+    os.makedirs(voice_dir, exist_ok=True)
+
+    # PiperTTS handles voice model download on first use; if piper-tts isn't
+    # importable, fall back to silent placeholders so the pipeline still runs.
+    tts_cache: Dict[str, Any] = {}
+    try:
+        from mpv2.classes.PiperTts import PiperTTS
+    except Exception as e:  # pragma: no cover
+        logger.warning("Piper unavailable (%s); voice_actor will emit silent placeholders", e)
+        PiperTTS = None  # type: ignore
+
+    def get_tts(voice_name: str):
+        if PiperTTS is None:
+            return None
+        if voice_name not in tts_cache:
+            try:
+                tts_cache[voice_name] = PiperTTS(voice_name=voice_name)
+            except Exception as e:
+                logger.warning("Piper voice %s failed to init (%s)", voice_name, e)
+                tts_cache[voice_name] = None
+        return tts_cache[voice_name]
+
+    lines: List[Dict[str, Any]] = []
+    for scene in scenes:
+        sid = scene["id"]
+        for shot in shots_by_scene.get(sid, []) or []:
+            dialogue = str(shot.get("dialogue", "") or "").strip()
+            if not dialogue:
+                continue
+            # Best-effort: try to pull the speaking character from the shot's
+            # subject; otherwise pick the first character named in the scene.
+            speaker = _guess_speaker(shot, scene, cast)
+            voice_name = (cast.get(speaker, {}) or {}).get("voice") or _PIPER_POOL[0]["name"]
+
+            wav_rel = f"voice/{sid}_{shot['id']}.wav"
+            wav_abs = os.path.join(project.artifacts_dir, "voice", f"{sid}_{shot['id']}.wav")
+            ok = False
+            err: Optional[str] = None
+            tts = get_tts(voice_name)
+            if tts is not None:
+                try:
+                    tts.synthesize(dialogue, wav_abs)
+                    ok = True
+                except Exception as e:
+                    logger.warning("Piper synth failed for %s/%s (%s); writing silence",
+                                   sid, shot["id"], e)
+                    err = str(e)
+            if not ok:
+                _write_silent_wav(wav_abs, 1.0)
+            lines.append({
+                "scene_id": sid,
+                "shot_id":  shot["id"],
+                "speaker":  speaker,
+                "voice":    voice_name,
+                "text":     dialogue,
+                "wav":      wav_rel,
+                "duration_sec": _wav_duration_seconds(wav_abs),
+                "synthesized": ok,
+                "error": err,
+            })
+    return {"lines": lines}
+
+
+def _guess_speaker(shot: Dict[str, Any], scene: Dict[str, Any],
+                   cast: Dict[str, Dict[str, str]]) -> str:
+    """Storyboard shots have `subject` but not a strict speaker field. Best-guess:
+    match a cast character whose name appears in subject/action, else fall back
+    to the scene's first character, else 'NARRATOR'."""
+    haystack = f"{shot.get('subject', '')} {shot.get('action', '')}".upper()
+    for char in cast.keys():
+        if char and char.upper() in haystack:
+            return char
+    chars = scene.get("characters") or []
+    if chars:
+        return str(chars[0])
+    return "NARRATOR"
+
+
+def _write_silent_wav(path: str, duration_sec: float, rate: int = 22050) -> None:
+    import wave, struct
+    n = max(1, int(duration_sec * rate))
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+        w.writeframes(struct.pack("<" + "h" * n, *([0] * n)))
+
+
+def _wav_duration_seconds(path: str) -> float:
+    try:
+        import wave
+        with wave.open(path, "rb") as w:
+            return w.getnframes() / float(w.getframerate() or 22050)
+    except Exception:
+        return 0.0
+
+
+# ---------------------------------------------------------------------------
+# 11. Composer — MusicGen scores the whole cut.
+# ---------------------------------------------------------------------------
+
+_COMPOSER_SYSTEM = """\
+You are a film composer. Given the film's tone, brief, and total duration in
+seconds, write ONE short text prompt suitable for MusicGen. Focus on:
+mood, instrumentation, tempo (bpm), and a hint at dynamics.
+
+Return JSON: {"prompt": "..."} — one sentence, under 40 words. No commentary.
+"""
+
+
+def run_composer(project: Project) -> Dict[str, Any]:
+    editor_art = project.read_artifact("editor") or {}
+    duration = int(editor_art.get("duration_sec", 0) or 0)
+    if duration <= 0:
+        raise ValueError("Editor artifact missing a valid duration_sec.")
+
+    prod = project.read_artifact("producer") or {}
+    loglines = prod.get("loglines") or []
+    idx = int(prod.get("chosen_index", 0))
+    chosen = loglines[idx] if 0 <= idx < len(loglines) else {}
+    user_msg = json.dumps({
+        "brief":    project.meta.brief[:400],
+        "tone":     chosen.get("tone", "drama"),
+        "title":    chosen.get("title", ""),
+        "duration_sec": duration,
+    }, ensure_ascii=False, indent=2)
+
+    prompt = ""
+    try:
+        raw = _chat(project, "composer", _COMPOSER_SYSTEM, user_msg,
+                    want_json=True, temperature=0.5, max_tokens=400)
+        prompt = str((llm.parse_json(raw) or {}).get("prompt", "")).strip()
+    except Exception as e:
+        logger.warning("composer LLM failed (%s); using generic cue", e)
+
+    if not prompt:
+        prompt = f"cinematic underscore, subtle strings and piano, {chosen.get('tone','drama')} mood, 80 bpm"
+
+    score_abs = os.path.join(project.artifacts_dir, "score.wav")
+    ok = False
+    err: Optional[str] = None
+    try:
+        _render_musicgen(prompt, score_abs, duration_sec=duration)
+        ok = True
+    except Exception as e:
+        logger.warning("MusicGen unavailable/failed (%s); score will be silent", e)
+        err = str(e)
+        _write_silent_wav(score_abs, float(duration))
+    return {
+        "prompt": prompt,
+        "path":   os.path.relpath(score_abs, project.dir).replace(os.sep, "/"),
+        "duration_sec": duration,
+        "rendered": ok,
+        "error": err,
+    }
+
+
+def _render_musicgen(prompt: str, out_path: str, *, duration_sec: int) -> None:
+    """Render a single MusicGen track. Uses facebook/musicgen-small — first
+    call pulls ~2 GB from HF Hub; subsequent calls hit the local cache."""
+    import numpy as np
+    import soundfile as sf
+    from transformers import AutoProcessor, MusicgenForConditionalGeneration
+    import torch as _torch
+
+    model_id = "facebook/musicgen-small"
+    processor = AutoProcessor.from_pretrained(model_id)
+    model = MusicgenForConditionalGeneration.from_pretrained(model_id)
+    device = "cuda" if _torch.cuda.is_available() else "cpu"
+    model = model.to(device)
+
+    # MusicGen small is capped at ~30 s per generate call. Chain multiple
+    # generations back-to-back to cover the full film length.
+    sr = model.config.audio_encoder.sampling_rate
+    tokens_per_sec = 50  # MusicGen encodec frame rate
+    chunk_len_sec = 30
+    chunks: list = []
+    remaining = duration_sec
+    while remaining > 0:
+        this = min(chunk_len_sec, remaining)
+        inputs = processor(text=[prompt], padding=True, return_tensors="pt").to(device)
+        with _torch.no_grad():
+            audio = model.generate(**inputs, max_new_tokens=this * tokens_per_sec)
+        arr = audio[0, 0].cpu().numpy().astype(np.float32)
+        chunks.append(arr)
+        remaining -= this
+    combined = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+    # Normalize to -3 dBFS to leave headroom for the mixer.
+    peak = float(np.max(np.abs(combined))) or 1.0
+    combined = (combined / peak) * 0.7
+    sf.write(out_path, combined, sr)
+
+
+# ---------------------------------------------------------------------------
+# 12. Mixer — ffmpeg mux: silent cut + dialogue at shot offsets + score with
+#     sidechain ducking under speech.
+# ---------------------------------------------------------------------------
+
+def run_mixer(project: Project) -> Dict[str, Any]:
+    editor_art   = project.read_artifact("editor") or {}
+    composer_art = project.read_artifact("composer") or {}
+    voice_art    = project.read_artifact("voice_actor") or {}
+    shots_art    = project.read_artifact("shots") or {}
+
+    silent_rel = editor_art.get("output_path")
+    if not silent_rel:
+        raise ValueError("Editor artifact missing output_path.")
+    silent_abs = os.path.join(project.dir, silent_rel)
+    if not os.path.exists(silent_abs):
+        raise ValueError(f"Silent cut missing at {silent_abs}")
+
+    # Cumulative shot offsets (ms) — dialogue for shot N lands at sum(durations 0..N-1).
+    offsets_ms: Dict[str, int] = {}
+    cursor_ms = 0
+    for s in shots_art.get("shots") or []:
+        key = f"{s['scene_id']}::{s['shot_id']}"
+        offsets_ms[key] = cursor_ms
+        cursor_ms += max(1, int(s.get("duration_sec", 4) or 4)) * 1000
+
+    # Dialogue lines with their absolute offset within the cut.
+    dialogue: List[Dict[str, Any]] = []
+    for line in voice_art.get("lines") or []:
+        key = f"{line['scene_id']}::{line['shot_id']}"
+        wav_abs = os.path.join(project.artifacts_dir, "voice",
+                               f"{line['scene_id']}_{line['shot_id']}.wav")
+        if not os.path.exists(wav_abs):
+            continue
+        dialogue.append({"wav": wav_abs, "delay_ms": offsets_ms.get(key, 0)})
+
+    score_rel = composer_art.get("path")
+    score_abs = os.path.join(project.dir, score_rel) if score_rel else None
+    have_score = bool(score_abs and os.path.exists(score_abs))
+    have_speech = bool(dialogue)
+
+    out_abs = os.path.join(project.dir, "final_mixed.mp4")
+    _run_mixer_ffmpeg(
+        silent_video=silent_abs,
+        dialogue=dialogue,
+        score=score_abs if have_score else None,
+        out_path=out_abs,
+    )
+    return {
+        "output_path":  os.path.relpath(out_abs, project.dir).replace(os.sep, "/"),
+        "has_dialogue": have_speech,
+        "has_score":    have_score,
+        "dialogue_lines": len(dialogue),
+    }
+
+
+def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
+                      score: Optional[str], out_path: str) -> None:
+    """Build and run the ffmpeg mux. Handles four cases: dialogue+score,
+    dialogue only, score only, and neither (in which case we just remux
+    the silent cut through the same encoder settings for consistency)."""
+    inputs: List[str] = ["-i", silent_video]
+    if score:
+        inputs += ["-i", score]
+    for d in dialogue:
+        inputs += ["-i", d["wav"]]
+
+    filter_parts: List[str] = []
+    # Input indices — 0 = video; 1 = score (if any); N = dialogue lines after.
+    score_idx = 1 if score else None
+    dlg_start = (2 if score else 1)
+
+    dlg_labels: List[str] = []
+    for i, d in enumerate(dialogue):
+        idx = dlg_start + i
+        lbl = f"d{i}"
+        delay = int(d["delay_ms"])
+        filter_parts.append(
+            f"[{idx}:a]adelay={delay}|{delay},aformat=sample_rates=44100:channel_layouts=stereo[{lbl}]"
+        )
+        dlg_labels.append(f"[{lbl}]")
+
+    if dlg_labels:
+        if len(dlg_labels) > 1:
+            filter_parts.append(
+                f"{''.join(dlg_labels)}amix=inputs={len(dlg_labels)}:normalize=0[speech]"
+            )
+        else:
+            filter_parts.append(f"{dlg_labels[0]}anull[speech]")
+
+    if score is not None:
+        filter_parts.append(
+            f"[{score_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.45[music_raw]"
+        )
+        if dlg_labels:
+            filter_parts.append(
+                "[music_raw][speech]sidechaincompress="
+                "threshold=0.04:ratio=8:attack=5:release=250[music_ducked]"
+            )
+            filter_parts.append("[speech][music_ducked]amix=inputs=2:normalize=0[audio]")
+        else:
+            filter_parts.append("[music_raw]anull[audio]")
+    elif dlg_labels:
+        filter_parts.append("[speech]anull[audio]")
+
+    cmd = ["ffmpeg", "-y"] + inputs
+    if filter_parts:
+        cmd += ["-filter_complex", ";".join(filter_parts),
+                "-map", "0:v", "-map", "[audio]",
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest",
+                out_path]
+    else:
+        # Neither dialogue nor score — remux silent cut with an aac silent track
+        # so downstream consumers still see a well-formed audio stream.
+        cmd += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                "-map", "0:v", "-map", "1:a",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+                "-shortest",
+                out_path]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"mixer ffmpeg failed:\n{(e.stderr or '')[-800:]}") from e
+
+
+# ---------------------------------------------------------------------------
 # shared LLM plumbing
 # ---------------------------------------------------------------------------
 

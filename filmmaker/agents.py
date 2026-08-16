@@ -913,18 +913,28 @@ def run_voice_cast(project: Project) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def run_voice_actor(project: Project) -> Dict[str, Any]:
-    storyboard = project.read_artifact("storyboard") or {}
-    breakdown  = project.read_artifact("breakdown") or {}
-    cast_art   = project.read_artifact("voice_cast") or {}
+    """Synthesize dialogue with Piper. The Storyboard's `dialogue` field is
+    unreliable — the LLM drops lines, misattributes speakers, and reorders
+    them. So we ignore that field and parse the screenplay directly, keeping
+    the true speaker on every line and distributing lines across shots by
+    reading order."""
+    storyboard   = project.read_artifact("storyboard") or {}
+    breakdown    = project.read_artifact("breakdown") or {}
+    cast_art     = project.read_artifact("voice_cast") or {}
+    editor       = project.read_artifact("story_editor") or {}
+    screenwriter = project.read_artifact("screenwriter") or {}
+
     scenes: List[Dict[str, Any]] = breakdown.get("scenes") or []
     shots_by_scene: Dict[str, List[Dict[str, Any]]] = storyboard.get("scenes") or {}
     cast: Dict[str, Dict[str, str]] = cast_art.get("cast") or {}
 
-    voice_dir = os.path.join(project.artifacts_dir, "voice")
-    os.makedirs(voice_dir, exist_ok=True)
+    full_screenplay = (editor.get("revised_fountain")
+                       or screenwriter.get("fountain")
+                       or "")
+    per_scene_script = _split_screenplay_by_scene(full_screenplay, scenes)
 
-    # PiperTTS handles voice model download on first use; if piper-tts isn't
-    # importable, fall back to silent placeholders so the pipeline still runs.
+    os.makedirs(os.path.join(project.artifacts_dir, "voice"), exist_ok=True)
+
     tts_cache: Dict[str, Any] = {}
     try:
         from mpv2.classes.PiperTts import PiperTTS
@@ -943,26 +953,71 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
                 tts_cache[voice_name] = None
         return tts_cache[voice_name]
 
+    def voice_for(speaker: str) -> str:
+        # Breakdown often captures a fuller character name than the screenplay
+        # cue ("Jacob Lucas" vs "JACOB"). Match exact first, then substring,
+        # then first-word. Case-insensitive throughout.
+        sp = speaker.upper().strip()
+        cast_items = [(k, v) for k, v in cast.items() if k]
+        for k, v in cast_items:
+            if k.upper().strip() == sp:
+                return v.get("voice") or _PIPER_POOL[0]["name"]
+        for k, v in cast_items:
+            ku = k.upper().strip()
+            if sp and (sp in ku or ku in sp):
+                return v.get("voice") or _PIPER_POOL[0]["name"]
+        sp_first = sp.split()[0] if sp else ""
+        for k, v in cast_items:
+            ku_first = k.upper().strip().split()[0] if k.strip() else ""
+            if sp_first and sp_first == ku_first:
+                return v.get("voice") or _PIPER_POOL[0]["name"]
+        return _PIPER_POOL[0]["name"]
+
     lines: List[Dict[str, Any]] = []
     for scene in scenes:
         sid = scene["id"]
-        for shot in shots_by_scene.get(sid, []) or []:
-            dialogue = str(shot.get("dialogue", "") or "").strip()
-            if not dialogue:
+        shots = shots_by_scene.get(sid, []) or []
+        if not shots:
+            continue
+        script = per_scene_script.get(sid) or ""
+        dialogue = _parse_screenplay_dialogue(script)
+        if not dialogue:
+            continue
+
+        # Distribute lines across shots by reading order. Line i lands on the
+        # shot whose slot maps to the same fraction of the scene. This gives
+        # the LLM-agnostic pacing the audit called out (was: all lines bunched
+        # onto the final two shots).
+        assignments: List[Optional[Dict[str, Any]]] = [None] * len(shots)
+        for i, line in enumerate(dialogue):
+            slot = i * len(shots) // max(1, len(dialogue))
+            # If two lines want the same slot, push the second one forward.
+            while slot < len(shots) and assignments[slot] is not None:
+                slot += 1
+            if slot >= len(shots):
+                slot = len(shots) - 1
+            assignments[slot] = line
+
+        for slot_idx, line in enumerate(assignments):
+            if line is None:
                 continue
-            # Best-effort: try to pull the speaking character from the shot's
-            # subject; otherwise pick the first character named in the scene.
-            speaker = _guess_speaker(shot, scene, cast)
-            voice_name = (cast.get(speaker, {}) or {}).get("voice") or _PIPER_POOL[0]["name"]
+            shot = shots[slot_idx]
+            speaker = line["speaker"]
+            voice_name = voice_for(speaker)
 
             wav_rel = f"voice/{sid}_{shot['id']}.wav"
-            wav_abs = os.path.join(project.artifacts_dir, "voice", f"{sid}_{shot['id']}.wav")
+            wav_abs = os.path.join(project.artifacts_dir, "voice",
+                                   f"{sid}_{shot['id']}.wav")
             ok = False
             err: Optional[str] = None
             tts = get_tts(voice_name)
             if tts is not None:
                 try:
-                    tts.synthesize(dialogue, wav_abs)
+                    tts.synthesize(line["text"], wav_abs)
+                    # Piper voices land tight against the file boundaries and
+                    # feel rushed inside a short shot. Bake head+tail silence
+                    # in so the line has breathing room when mixed.
+                    _pad_wav_with_silence(wav_abs, head_sec=0.25, tail_sec=0.45)
                     ok = True
                 except Exception as e:
                     logger.warning("Piper synth failed for %s/%s (%s); writing silence",
@@ -975,7 +1030,7 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
                 "shot_id":  shot["id"],
                 "speaker":  speaker,
                 "voice":    voice_name,
-                "text":     dialogue,
+                "text":     line["text"],
                 "wav":      wav_rel,
                 "duration_sec": _wav_duration_seconds(wav_abs),
                 "synthesized": ok,
@@ -984,19 +1039,57 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
     return {"lines": lines}
 
 
-def _guess_speaker(shot: Dict[str, Any], scene: Dict[str, Any],
-                   cast: Dict[str, Dict[str, str]]) -> str:
-    """Storyboard shots have `subject` but not a strict speaker field. Best-guess:
-    match a cast character whose name appears in subject/action, else fall back
-    to the scene's first character, else 'NARRATOR'."""
-    haystack = f"{shot.get('subject', '')} {shot.get('action', '')}".upper()
-    for char in cast.keys():
-        if char and char.upper() in haystack:
-            return char
-    chars = scene.get("characters") or []
-    if chars:
-        return str(chars[0])
-    return "NARRATOR"
+def _parse_screenplay_dialogue(text: str) -> List[Dict[str, str]]:
+    """Return `[{speaker, text}, ...]` extracted from Fountain-style screenplay
+    text.
+
+    Real character cues must be preceded by a blank line — that's the
+    Fountain convention that separates them from ALL-CAPS character
+    introductions in action prose (which look identical otherwise:
+    `SASHA (a young woman in a chef's apron) stands at one end...` reads as
+    a cue but isn't).
+    """
+    import re as _re
+    out: List[Dict[str, str]] = []
+    lines = text.splitlines()
+    cue = _re.compile(r"^([A-Z][A-Z0-9 .'\-]{1,40})(?:\s*\(([^)]*)\))?\s*$")
+    paren_line = _re.compile(r"^\s*\([^)]*\)\s*$")
+    i = 0
+    while i < len(lines):
+        preceded_by_blank = (i == 0) or (not lines[i - 1].strip())
+        m = cue.match(lines[i].strip())
+        if preceded_by_blank and m and i + 1 < len(lines):
+            speaker = m.group(1).strip()
+            j = i + 1
+            # Optional parenthetical on its own line ("(quietly)") between
+            # the cue and the dialogue.
+            if j < len(lines) and paren_line.match(lines[j]):
+                j += 1
+            # Dialogue: consume consecutive non-blank, non-cue lines.
+            spoken: List[str] = []
+            while j < len(lines) and lines[j].strip() and not cue.match(lines[j].strip()):
+                spoken.append(lines[j].strip())
+                j += 1
+            if spoken:
+                out.append({"speaker": speaker, "text": " ".join(spoken)})
+            i = j
+            continue
+        i += 1
+    return out
+
+
+def _pad_wav_with_silence(path: str, *, head_sec: float, tail_sec: float) -> None:
+    """Prepend/append zero-amplitude samples to a WAV in place, matching its
+    channels/sampwidth/framerate exactly."""
+    import wave
+    with wave.open(path, "rb") as r:
+        ch, sw, sr = r.getnchannels(), r.getsampwidth(), r.getframerate()
+        frames = r.readframes(r.getnframes())
+    head = b"\x00" * (int(head_sec * sr) * ch * sw)
+    tail = b"\x00" * (int(tail_sec * sr) * ch * sw)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(ch); w.setsampwidth(sw); w.setframerate(sr)
+        w.writeframes(head + frames + tail)
 
 
 def _write_silent_wav(path: str, duration_sec: float, rate: int = 22050) -> None:
@@ -1091,25 +1184,57 @@ def _render_musicgen(prompt: str, out_path: str, *, duration_sec: int) -> None:
     model = model.to(device)
 
     # MusicGen small is capped at ~30 s per generate call. Chain multiple
-    # generations back-to-back to cover the full film length.
+    # generations back-to-back to cover the full film length. Overlap-request
+    # each subsequent chunk by `xfade_sec` and crossfade the seam so the
+    # tempo/key jump at 30 s stops being audible.
     sr = model.config.audio_encoder.sampling_rate
-    tokens_per_sec = 50  # MusicGen encodec frame rate
+    tokens_per_sec = 50           # MusicGen encodec frame rate
     chunk_len_sec = 30
+    xfade_sec = 1.0
     chunks: list = []
     remaining = duration_sec
     while remaining > 0:
-        this = min(chunk_len_sec, remaining)
+        # Ask for extra so the crossfade region is fresh audio, not the tail
+        # of the last chunk faded out to nothing.
+        want = min(chunk_len_sec, remaining) + (xfade_sec if chunks else 0)
         inputs = processor(text=[prompt], padding=True, return_tensors="pt").to(device)
         with _torch.no_grad():
-            audio = model.generate(**inputs, max_new_tokens=this * tokens_per_sec)
+            audio = model.generate(**inputs, max_new_tokens=int(want * tokens_per_sec))
         arr = audio[0, 0].cpu().numpy().astype(np.float32)
         chunks.append(arr)
-        remaining -= this
-    combined = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+        remaining -= chunk_len_sec  # advance by the "playable" length, not `want`
+
+    combined = _crossfade_concat(chunks, sr=sr, xfade_sec=xfade_sec)
     # Normalize to -3 dBFS to leave headroom for the mixer.
     peak = float(np.max(np.abs(combined))) or 1.0
     combined = (combined / peak) * 0.7
+    # Trim to the requested duration so we never overshoot the final cut.
+    max_samples = int(duration_sec * sr)
+    if len(combined) > max_samples:
+        combined = combined[:max_samples]
     sf.write(out_path, combined, sr)
+
+
+def _crossfade_concat(chunks: List["np.ndarray"], *, sr: int, xfade_sec: float) -> "np.ndarray":
+    """Concatenate audio chunks with an equal-power crossfade over the seam.
+    Falls back to a plain concatenate for single-chunk input."""
+    import numpy as np
+    if len(chunks) <= 1:
+        return chunks[0]
+    xfade = int(xfade_sec * sr)
+    out = chunks[0].copy()
+    for nxt in chunks[1:]:
+        n = min(xfade, len(out), len(nxt))
+        if n <= 0:
+            out = np.concatenate([out, nxt])
+            continue
+        # Equal-power (cosine) crossfade keeps perceived loudness flat.
+        t = np.linspace(0, np.pi / 2, n, dtype=np.float32)
+        fade_out = np.cos(t)
+        fade_in  = np.sin(t)
+        seam = out[-n:] * fade_out + nxt[:n] * fade_in
+        out = np.concatenate([out[:-n], seam, nxt[n:]])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1154,11 +1279,13 @@ def run_mixer(project: Project) -> Dict[str, Any]:
     have_speech = bool(dialogue)
 
     out_abs = os.path.join(project.dir, "final_mixed.mp4")
+    total_dur = float(editor_art.get("duration_sec", 0) or 0)
     _run_mixer_ffmpeg(
         silent_video=silent_abs,
         dialogue=dialogue,
         score=score_abs if have_score else None,
         out_path=out_abs,
+        duration_sec=total_dur if total_dur > 0 else None,
     )
     return {
         "output_path":  os.path.relpath(out_abs, project.dir).replace(os.sep, "/"),
@@ -1169,7 +1296,8 @@ def run_mixer(project: Project) -> Dict[str, Any]:
 
 
 def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
-                      score: Optional[str], out_path: str) -> None:
+                      score: Optional[str], out_path: str,
+                      duration_sec: Optional[float] = None) -> None:
     """Build and run the ffmpeg mux. Handles four cases: dialogue+score,
     dialogue only, score only, and neither (in which case we just remux
     the silent cut through the same encoder settings for consistency)."""
@@ -1194,21 +1322,29 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
         )
         dlg_labels.append(f"[{lbl}]")
 
+    # Build the speech bus. When there's also a score to duck under, we need
+    # it in two branches (sidechain input AND the final amix), so asplit=2
+    # duplicates it — ffmpeg filter labels are single-use. And pad the
+    # sidechain branch to the requested duration (or a generous ceiling) so
+    # sidechaincompress doesn't stop emitting audio when the last dialogue
+    # line ends — sidechaincompress output length matches the shorter of its
+    # two inputs, so a short speech bus would silently truncate the whole mix.
+    pad_target = duration_sec if duration_sec and duration_sec > 0 else 3600.0
     if dlg_labels:
-        # Merge all dialogue tracks into a single speech bus. When there's
-        # also a score to duck under, we need the speech bus in two places
-        # (sidechain input AND the final amix), so asplit=2 duplicates it —
-        # ffmpeg filter labels are single-use.
         mix_expr = (f"{''.join(dlg_labels)}amix=inputs={len(dlg_labels)}:normalize=0"
                     if len(dlg_labels) > 1 else dlg_labels[0])
+        # `mix_expr` is either a filter chain (needs `,` before next filter)
+        # or a bare label like "[d0]" (next filter follows directly).
+        sep = "," if len(dlg_labels) > 1 else ""
         if score is not None:
-            filter_parts.append(f"{mix_expr},asplit=2[speech][speech_side]"
-                                if len(dlg_labels) > 1
-                                else f"{mix_expr}asplit=2[speech][speech_side]")
+            filter_parts.append(
+                f"{mix_expr}{sep}asplit=2[speech][speech_pre_pad];"
+                f"[speech_pre_pad]apad=whole_dur={pad_target}[speech_side]"
+            )
         else:
-            filter_parts.append(f"{mix_expr}anull[speech]"
-                                if len(dlg_labels) == 1
-                                else f"{mix_expr}[speech]")
+            filter_parts.append(f"{mix_expr}{sep}anull[speech]"
+                                if not sep
+                                else f"{mix_expr}{sep}anull[speech]")
 
     if score is not None:
         filter_parts.append(
@@ -1219,28 +1355,31 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
                 "[music_raw][speech_side]sidechaincompress="
                 "threshold=0.04:ratio=8:attack=5:release=250[music_ducked]"
             )
-            filter_parts.append("[speech][music_ducked]amix=inputs=2:normalize=0[audio]")
+            filter_parts.append("[speech][music_ducked]amix=inputs=2:normalize=0:duration=longest[audio]")
         else:
             filter_parts.append("[music_raw]anull[audio]")
     elif dlg_labels:
         filter_parts.append("[speech]anull[audio]")
+
+    # Pin the output length to the editor's video duration when we know it.
+    # Without this, a short dialogue chain (e.g. one line early in the film)
+    # makes amix produce a stream that ends before the video, and ffmpeg's
+    # `-shortest` truncates the whole cut. Explicit `-t` keeps the video full
+    # length and pads the audio track to match.
+    duration_args = ["-t", f"{duration_sec:.3f}"] if duration_sec and duration_sec > 0 else []
 
     cmd = ["ffmpeg", "-y"] + inputs
     if filter_parts:
         cmd += ["-filter_complex", ";".join(filter_parts),
                 "-map", "0:v", "-map", "[audio]",
                 "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "192k",
-                "-shortest",
-                out_path]
+                "-c:a", "aac", "-b:a", "192k"] + duration_args + [out_path]
     else:
         # Neither dialogue nor score — remux silent cut with an aac silent track
         # so downstream consumers still see a well-formed audio stream.
         cmd += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                 "-map", "0:v", "-map", "1:a",
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
-                "-shortest",
-                out_path]
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k"] + duration_args + [out_path]
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:

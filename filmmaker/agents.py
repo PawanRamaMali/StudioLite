@@ -247,7 +247,7 @@ shots. Return JSON:
       "description": "one-sentence visual description of the moment",
       "subject": "who or what is on frame",
       "action": "what happens in this shot",
-      "dialogue": "any spoken line, or empty string"
+      "dialogue": "the exact spoken line as written in the screenplay, or empty string"
     },
     ...
   ]
@@ -255,19 +255,41 @@ shots. Return JSON:
 
 Every shot must be renderable as a single still image (T1) and later a short
 motion clip (T2). Keep descriptions concrete and visual.
+
+DIALOGUE RULES — non-negotiable:
+- The `screenplay` field of the input contains the source of truth.
+- Every spoken line in that screenplay (the text on the line under a
+  character cue in ALL CAPS) MUST land verbatim in the `dialogue` field
+  of exactly one shot. Do not paraphrase, do not shorten, do not merge
+  lines across characters.
+- If a shot has no dialogue, use an empty string. Non-speaking shots are
+  fine — but every screenplay line must appear somewhere.
+- Never invent dialogue that isn't in the screenplay.
 """
 
 
 def run_storyboard(project: Project) -> Dict[str, Any]:
     breakdown = project.read_artifact("breakdown") or {}
+    editor = project.read_artifact("story_editor") or {}
+    screenwriter = project.read_artifact("screenwriter") or {}
     scenes = breakdown.get("scenes") or []
     if not scenes:
         raise ValueError("Breakdown artifact has no scenes.")
+
+    full_screenplay = (editor.get("revised_fountain")
+                       or screenwriter.get("fountain")
+                       or "")
+    scene_scripts = _split_screenplay_by_scene(full_screenplay, scenes)
+
     out: Dict[str, List[Dict[str, Any]]] = {}
     for scene in scenes:
-        user_msg = json.dumps(scene, ensure_ascii=False, indent=2)
+        sid = scene["id"]
+        user_msg = json.dumps({
+            "scene": scene,
+            "screenplay": scene_scripts.get(sid) or full_screenplay,
+        }, ensure_ascii=False, indent=2)
         raw = _chat(project, "storyboard", _STORYBOARD_SYSTEM, user_msg,
-                    want_json=True, temperature=0.5, max_tokens=2500)
+                    want_json=True, temperature=0.4, max_tokens=3000)
         data = llm.parse_json(raw)
         shots = data.get("shots") or []
         norm: List[Dict[str, Any]] = []
@@ -290,8 +312,60 @@ def run_storyboard(project: Project) -> Dict[str, Any]:
                 "action": scene.get("summary", ""),
                 "dialogue": "",
             }]
-        out[scene["id"]] = norm
+
+        # Warn when the scene's screenplay clearly has speaking characters
+        # but the storyboard emitted zero dialogue. That's the failure mode
+        # #61 was filed for — surface it instead of silently dropping the
+        # dialogue on the floor.
+        script = scene_scripts.get(sid) or ""
+        expected_speech = _screenplay_has_dialogue(script) if script else bool(scene.get("characters"))
+        got_dialogue = any(x["dialogue"] for x in norm)
+        if expected_speech and not got_dialogue:
+            project.append_event({
+                "type": "storyboard_dialogue_missing",
+                "scene_id": sid,
+                "message": ("Screenplay has spoken lines but the storyboard "
+                            "emitted none. Voice Actor will have nothing to say."),
+            })
+
+        out[sid] = norm
     return {"scenes": out}
+
+
+def _split_screenplay_by_scene(full: str, scenes: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Split the Fountain screenplay into per-scene slices by walking scene
+    headings (INT./EXT. lines) in order and matching them to breakdown scenes
+    by index. Not slug-aware — scene N of the screenplay maps to scenes[N] of
+    the breakdown, which is how the breakdown is generated in the first place.
+    """
+    if not full or not scenes:
+        return {}
+    import re as _re
+    heading = _re.compile(r"^(?:INT\.|EXT\.|INT/EXT\.|EXT/INT\.)", _re.M)
+    starts = [m.start() for m in heading.finditer(full)]
+    if not starts:
+        return {}
+    slices = []
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(full)
+        slices.append(full[start:end].strip())
+    out: Dict[str, str] = {}
+    for i, scene in enumerate(scenes):
+        if i < len(slices):
+            out[scene["id"]] = slices[i]
+    return out
+
+
+def _screenplay_has_dialogue(script: str) -> bool:
+    """A Fountain dialogue block is an ALL-CAPS character cue on its own line
+    followed by a non-blank line. Detect that pattern without importing a real
+    Fountain parser — false positives (props in caps) are cheap; a false
+    negative just means we skip the warning, which is fine."""
+    import re as _re
+    return bool(_re.search(
+        r"(?m)^[A-Z][A-Z .'\-]{1,40}\s*(?:\([^)]*\))?\s*\n\s*\S",
+        script,
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -1121,12 +1195,20 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
         dlg_labels.append(f"[{lbl}]")
 
     if dlg_labels:
-        if len(dlg_labels) > 1:
-            filter_parts.append(
-                f"{''.join(dlg_labels)}amix=inputs={len(dlg_labels)}:normalize=0[speech]"
-            )
+        # Merge all dialogue tracks into a single speech bus. When there's
+        # also a score to duck under, we need the speech bus in two places
+        # (sidechain input AND the final amix), so asplit=2 duplicates it —
+        # ffmpeg filter labels are single-use.
+        mix_expr = (f"{''.join(dlg_labels)}amix=inputs={len(dlg_labels)}:normalize=0"
+                    if len(dlg_labels) > 1 else dlg_labels[0])
+        if score is not None:
+            filter_parts.append(f"{mix_expr},asplit=2[speech][speech_side]"
+                                if len(dlg_labels) > 1
+                                else f"{mix_expr}asplit=2[speech][speech_side]")
         else:
-            filter_parts.append(f"{dlg_labels[0]}anull[speech]")
+            filter_parts.append(f"{mix_expr}anull[speech]"
+                                if len(dlg_labels) == 1
+                                else f"{mix_expr}[speech]")
 
     if score is not None:
         filter_parts.append(
@@ -1134,7 +1216,7 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
         )
         if dlg_labels:
             filter_parts.append(
-                "[music_raw][speech]sidechaincompress="
+                "[music_raw][speech_side]sidechaincompress="
                 "threshold=0.04:ratio=8:attack=5:release=250[music_ducked]"
             )
             filter_parts.append("[speech][music_ducked]amix=inputs=2:normalize=0[audio]")

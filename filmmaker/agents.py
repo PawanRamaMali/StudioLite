@@ -483,50 +483,61 @@ def _placeholder_png(path: str, label: str) -> None:
 
 def run_editor(project: Project) -> Dict[str, Any]:
     shots_art = project.read_artifact("shots") or {}
+    cinema = project.read_artifact("cinematographer") or {}
     shots: List[Dict[str, Any]] = shots_art.get("shots") or []
     if not shots:
         raise ValueError("No rendered shots to edit.")
-    concat_lines: List[str] = []
-    for s in shots:
-        rel = s["path"]
+
+    dp_by_scene: Dict[str, Dict[str, Any]] = cinema.get("scenes") or {}
+
+    clips_dir = os.path.join(project.artifacts_dir, "editor_clips")
+    os.makedirs(clips_dir, exist_ok=True)
+
+    clip_paths: List[str] = []
+    for i, s in enumerate(shots):
+        img_abs = os.path.join(project.dir, s["path"])
         # Any missing image? Skip rather than fail — the placeholder writer
         # already covers the normal missing case.
-        img_abs = os.path.join(project.dir, rel)
         if not os.path.exists(img_abs):
             continue
         dur = max(1, int(s.get("duration_sec", 4) or 4))
-        concat_lines.append(f"file '{img_abs.replace(os.sep, '/')}'")
-        concat_lines.append(f"duration {dur}")
-    if not concat_lines:
-        raise ValueError("No renderable shot images found.")
-    # ffmpeg concat demuxer needs the last file repeated (no `duration` on it).
-    last_rel = None
-    for s in reversed(shots):
-        img_abs = os.path.join(project.dir, s["path"])
-        if os.path.exists(img_abs):
-            last_rel = img_abs
-            break
-    if last_rel:
-        concat_lines.append(f"file '{last_rel.replace(os.sep, '/')}'")
+        scene_id = s.get("scene_id", "")
+        shot_id = s.get("shot_id", "")
+        camera_move = ((dp_by_scene.get(scene_id) or {})
+                       .get(shot_id) or {}).get("camera_move", "static")
+        clip_out = os.path.join(clips_dir, f"{i:03d}_{scene_id}_{shot_id}.mp4")
+        try:
+            _render_kenburns_clip(img_abs, clip_out, dur, camera_move)
+        except FileNotFoundError as e:
+            raise RuntimeError("ffmpeg not on PATH — cannot assemble the final cut.") from e
+        except Exception:
+            # Per-shot fallback: static concat-style clip so a broken zoompan
+            # graph doesn't nuke the whole render.
+            logger.exception("Ken Burns render failed for %s/%s; using static clip",
+                             scene_id, shot_id)
+            try:
+                _render_static_clip(img_abs, clip_out, dur)
+            except Exception:
+                logger.exception("Static fallback failed for %s/%s; skipping", scene_id, shot_id)
+                continue
+        clip_paths.append(clip_out)
 
-    concat_txt = os.path.join(project.dir, "artifacts", "editor.concat.txt")
+    if not clip_paths:
+        raise ValueError("No renderable shot images found.")
+
+    concat_txt = os.path.join(project.artifacts_dir, "editor.concat.txt")
     with open(concat_txt, "w", encoding="utf-8") as f:
-        f.write("\n".join(concat_lines))
+        for p in clip_paths:
+            f.write(f"file '{p.replace(os.sep, '/')}'\n")
 
     out_path = os.path.join(project.dir, "final.mp4")
-    # The concat demuxer emits variable per-frame timing from the `duration`
-    # entries above. `fps=30` inside the filter graph converts that to a
-    # constant 30 fps stream, which QuickTime / Chrome MP4 playback expects.
-    # We deliberately avoid `-r 30 -vsync vfr` — modern ffmpeg (>=7) rejects
-    # that combo and the old `-vsync` flag is deprecated in favour of `-fps_mode`.
+    # All per-shot clips share codec/pix_fmt/size/fps by construction, so
+    # concat with stream copy — no re-encode, no framerate rewriting.
     cmd = [
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0",
         "-i", concat_txt,
-        "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30",
-        "-fps_mode", "cfr",
-        "-pix_fmt", "yuv420p",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-c", "copy",
         out_path,
     ]
     try:
@@ -542,6 +553,82 @@ def run_editor(project: Project) -> Dict[str, Any]:
         "duration_sec": total,
         "shot_count": len(shots),
     }
+
+
+def _render_kenburns_clip(img: str, out_path: str, duration_sec: int, camera_move: str) -> None:
+    """Render one still into a duration_sec clip at 1280x720 30fps with camera
+    motion matched to the DP's `camera_move` intent."""
+    fps = 30
+    frames = duration_sec * fps
+    # Feed zoompan a large source so the crop stays sharp — otherwise ffmpeg
+    # scales the still to output size first and the zoom shows pixel edges.
+    src = ("scale=3840:2160:force_original_aspect_ratio=increase,"
+           "crop=3840:2160,setsar=1")
+    kb = _kenburns_expr(camera_move, frames, fps)
+    vf = f"{src},zoompan={kb}:s=1280x720:fps={fps}"
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", img,
+        "-vf", vf,
+        "-t", str(duration_sec),
+        "-fps_mode", "cfr",
+        "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+
+def _kenburns_expr(camera_move: str, frames: int, fps: int) -> str:
+    """Return the `z=...:x=...:y=...:d=N` clause for a zoompan filter, mapped
+    from the Cinematographer's camera_move field. `on` is the current output
+    frame index inside zoompan expressions."""
+    move = (camera_move or "static").lower()
+    span = max(frames - 1, 1)
+    if move == "dolly":
+        z = "'min(zoom+0.0015,1.30)'"
+        x = "'iw/2-(iw/zoom/2)'"
+        y = "'ih/2-(ih/zoom/2)'"
+    elif move == "pan":
+        z = "'1.15'"
+        x = f"'(iw-iw/zoom)*on/{span}'"
+        y = "'(ih-ih/zoom)/2'"
+    elif move == "crane":
+        z = "'1.15'"
+        x = "'(iw-iw/zoom)/2'"
+        y = f"'(ih-ih/zoom)*(1-on/{span})'"
+    elif move == "whip":
+        z = "'1.20'"
+        x = f"'(iw-iw/zoom)*min(on*2/{span},1)'"
+        y = "'(ih-ih/zoom)/2'"
+    elif move == "handheld":
+        z = "'1.12'"
+        x = f"'(iw-iw/zoom)/2 + 20*sin(on/{fps}*6.28)'"
+        y = f"'(ih-ih/zoom)/2 + 15*sin(on/{fps}*4.71)'"
+    else:
+        # static or unknown — very slow push-in reads as "digital cinema"
+        z = "'min(zoom+0.0004,1.08)'"
+        x = "'iw/2-(iw/zoom/2)'"
+        y = "'ih/2-(ih/zoom/2)'"
+    return f"z={z}:x={x}:y={y}:d={frames}"
+
+
+def _render_static_clip(img: str, out_path: str, duration_sec: int) -> None:
+    """Fallback: encode the still as a static 1280x720 30fps clip so it can
+    still concat cleanly with the successful Ken Burns clips around it."""
+    vf = ("scale=1280:720:force_original_aspect_ratio=decrease,"
+          "pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30")
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", img,
+        "-vf", vf,
+        "-t", str(duration_sec),
+        "-fps_mode", "cfr",
+        "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
 
 
 # ---------------------------------------------------------------------------

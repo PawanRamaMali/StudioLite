@@ -1392,14 +1392,30 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
 
 def _chat(project: Project, stage_key: str, system: str, user: str, *,
           want_json: bool, temperature: float, max_tokens: int = 4096) -> str:
+    """Single blocking chat call. Retries ONCE on LLMError with a bigger
+    max_tokens budget and slightly cooler temperature so the same truncation
+    or parse issue doesn't recur — Ollama occasionally cuts a JSON response
+    mid-array when the model runs long, and a modest retry usually clears it.
+    """
     cfg = project.meta.config
     per = cfg.per_stage.get(stage_key, {}) if cfg.per_stage else {}
     backend = per.get("llm_backend") or cfg.llm_backend
     model = per.get("llm_model") or cfg.llm_model
     host = per.get("llm_host") or cfg.llm_host
-    return llm.chat(
-        system=system, user=user,
-        backend=backend, model=model, host=host,
-        temperature=temperature, max_tokens=max_tokens,
-        want_json=want_json,
-    )
+
+    try:
+        return llm.chat(
+            system=system, user=user,
+            backend=backend, model=model, host=host,
+            temperature=temperature, max_tokens=max_tokens,
+            want_json=want_json,
+        )
+    except llm.LLMError as e:
+        logger.warning("LLM call for %s failed (%s); retrying with larger budget", stage_key, e)
+        return llm.chat(
+            system=system, user=user,
+            backend=backend, model=model, host=host,
+            temperature=max(0.1, temperature - 0.2),
+            max_tokens=int(max_tokens * 1.5),
+            want_json=want_json,
+        )

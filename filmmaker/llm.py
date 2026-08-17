@@ -51,7 +51,12 @@ def chat(
 
 
 def parse_json(text: str) -> Dict[str, Any]:
-    """Robust-ish JSON extractor for messy LLM output. Raises LLMError on failure."""
+    """Robust-ish JSON extractor for messy LLM output. Raises LLMError on failure.
+
+    Attempts, in order: direct parse, first {..} block by brace matching,
+    a truncation repair (close hanging strings + brackets). Ollama occasionally
+    stops mid-object when the model runs long; the repair lets us salvage the
+    complete portion instead of nuking the whole stage."""
     stripped = _strip_fence(text).strip()
     # 1. Direct parse.
     try:
@@ -63,8 +68,15 @@ def parse_json(text: str) -> Dict[str, Any]:
     if obj is not None:
         try:
             return json.loads(obj)
-        except json.JSONDecodeError as e:
-            raise LLMError(f"Could not parse JSON block from LLM: {e}\nSnippet:\n{obj[:400]}")
+        except json.JSONDecodeError:
+            pass
+    # 3. Try to repair a truncated response.
+    repaired = _repair_truncated_json(stripped)
+    if repaired:
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            pass
     raise LLMError(f"No JSON object found in LLM output. Snippet:\n{stripped[:400]}")
 
 
@@ -138,3 +150,69 @@ def _extract_first_json_object(text: str) -> Optional[str]:
             if depth == 0:
                 return text[start:i + 1]
     return None
+
+
+def _repair_truncated_json(text: str) -> Optional[str]:
+    """Best-effort completion of a JSON snippet that was cut off mid-way.
+
+    Handles the shapes Ollama actually produces when its response is
+    truncated by num_predict:
+    - Unclosed string (append `"`)
+    - Trailing `,` or `:` with no value after (strip the dangling separator;
+      insert `null` when the caller was mid-key-value)
+    - Unclosed `{` / `[` (append matching closers in reverse)
+
+    Returns a JSON string that MIGHT parse, or None if the input has no
+    JSON-shaped content at all. The caller should still `json.loads` the
+    result to confirm."""
+    if not text:
+        return None
+    # Trim to the first `{` or `[`.
+    candidates = [i for i in (text.find("{"), text.find("[")) if i >= 0]
+    if not candidates:
+        return None
+    text = text[min(candidates):]
+
+    stack: list = []      # each entry is '{' or '['
+    in_str = False
+    escape = False
+    for c in text:
+        if in_str:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_str = False
+        else:
+            if c == '"':
+                in_str = True
+            elif c in "{[":
+                stack.append(c)
+            elif c in "}]":
+                if stack:
+                    stack.pop()
+
+    out = text
+    # If we ended mid-string, close it. A dangling `\` at the end is an
+    # unfinished escape sequence — drop it before closing, otherwise the
+    # appended `"` becomes an escaped quote and the string never closes.
+    if in_str:
+        if escape:
+            out = out.rstrip("\\")
+        out += '"'
+    # Drop dangling separators that would create empty values.
+    trimmed = out.rstrip()
+    while trimmed and trimmed[-1] in ",:":
+        # `:` means we truncated after a key — insert `null` before closing
+        # so the JSON becomes `{ "k": null }` instead of `{ "k": }`.
+        if trimmed[-1] == ":":
+            trimmed = trimmed + " null"
+            break
+        trimmed = trimmed[:-1].rstrip()
+    # Close open brackets in reverse.
+    closers = []
+    while stack:
+        open_c = stack.pop()
+        closers.append("}" if open_c == "{" else "]")
+    return trimmed + "".join(closers)

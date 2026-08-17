@@ -145,6 +145,11 @@ class RunManager:
             self._emit(project, {"type": "run_failed", "error": str(e), "traceback": tb[-2000:]})
 
     async def _run_one(self, project: Project, spec: StageSpec) -> None:
+        # Snapshot the prior artifact BEFORE we mark the stage running — a
+        # re-run that then errors shouldn't retroactively "break" a stage
+        # whose good output is still sitting on disk from the previous pass.
+        had_prior_artifact = project.has_artifact(spec.key)
+
         project.set_stage_status(spec.key, "running")
         project.update_state(current_stage=spec.key)
         self._emit(project, {"type": "stage_started", "stage": spec.key, "label": spec.label})
@@ -161,13 +166,30 @@ class RunManager:
                 "elapsed": round(time.time() - started, 2),
             })
         except Exception as e:
-            project.set_stage_status(spec.key, "failed")
-            project.update_state(last_error=f"{spec.key}: {e}", is_paused=True)
-            self._emit(project, {
-                "type": "stage_failed",
-                "stage": spec.key,
-                "error": str(e),
-            })
+            # If a prior successful artifact still exists, don't destroy the
+            # state that reflects it — mark the stage `needs_review` so the
+            # user can either accept the old artifact or manually retry. This
+            # keeps a flaky re-run from turning a completed film into a broken
+            # one, but still surfaces the failure prominently in the panel.
+            if had_prior_artifact:
+                project.set_stage_status(spec.key, "needs_review")
+                project.update_state(
+                    last_error=f"{spec.key} re-run failed (prior artifact preserved): {e}",
+                    is_paused=True,
+                )
+                self._emit(project, {
+                    "type": "stage_failed_retry_preserved",
+                    "stage": spec.key,
+                    "error": str(e),
+                })
+            else:
+                project.set_stage_status(spec.key, "failed")
+                project.update_state(last_error=f"{spec.key}: {e}", is_paused=True)
+                self._emit(project, {
+                    "type": "stage_failed",
+                    "stage": spec.key,
+                    "error": str(e),
+                })
             raise
 
     def _emit(self, project: Project, event: Dict) -> None:

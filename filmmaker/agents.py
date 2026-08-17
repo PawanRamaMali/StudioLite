@@ -85,13 +85,24 @@ def run_producer(project: Project) -> Dict[str, Any]:
 
 _SCREENWRITER_SYSTEM = """\
 You are a professional screenwriter drafting a SHORT film in Fountain-style
-plaintext screenplay format. Follow these conventions strictly:
+plaintext screenplay format. Follow these conventions STRICTLY — the
+downstream pipeline parses your output and silently drops any dialogue whose
+character cue is not in ALL CAPS on its own line.
 
 - Scene headings on their own line: `INT. LOCATION - TIME` or `EXT. LOCATION - TIME`.
 - Action lines: present tense, visual, one short paragraph.
-- Character cue on its own line in ALL CAPS, then the dialogue line below it.
-- Parentheticals in (parens) on their own line under the cue, used sparingly.
-- Use a blank line between blocks.
+- Character cue on its own line in ALL CAPS. NEVER Title Case. Example:
+      MARGO
+      Where is he?
+  Not:
+      Margo
+      Where is he?
+- Parentheticals in (parens) on their own line under the cue, used sparingly:
+      MARGO
+      (quietly)
+      Where is he?
+  Do NOT put dialogue on the same line as the parenthetical.
+- Blank line between blocks.
 
 Constraints:
 - Total runtime target: about ONE screen page per minute.
@@ -1039,35 +1050,97 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
     return {"lines": lines}
 
 
+_CUE_STRICT = None  # populated below
+_CUE_LOOSE  = None
+_PAREN_LINE = None
+_PAREN_THEN_TEXT = None
+
+
+def _looks_like_cue(line: str) -> Optional[tuple]:
+    """Match a Fountain character cue on `line`. Returns (speaker, paren) or None.
+
+    Accepts both classical ALL-CAPS cues (SASHA, OPPOSING STREET CHEF) and
+    the Title-Case cues small models keep emitting (Karl, Old Timothy).
+    Requires that every WORD of the cue starts with an uppercase letter,
+    which weeds out random prose lines. Cue may end with an optional
+    parenthetical like `(annoyed)`.
+    """
+    import re as _re
+    global _CUE_STRICT, _CUE_LOOSE
+    if _CUE_STRICT is None:
+        _CUE_STRICT = _re.compile(r"^([A-Z][A-Z0-9 .'\-]{0,40})(?:\s*\(([^)]*)\))?\s*$")
+        _CUE_LOOSE  = _re.compile(r"^([A-Za-z][A-Za-z0-9 .'\-]{0,40})(?:\s*\(([^)]*)\))?\s*$")
+    s = line.strip()
+    if not s or len(s) > 60:
+        return None
+    m = _CUE_STRICT.match(s)
+    if m:
+        return (m.group(1).strip(), (m.group(2) or "").strip())
+    m = _CUE_LOOSE.match(s)
+    if not m:
+        return None
+    name = m.group(1).strip()
+    # Every word must start uppercase (Title Case). Blocks prose sentences.
+    words = [w for w in name.split() if w]
+    if not words or not all(w[0].isupper() and len(w) <= 20 for w in words):
+        return None
+    # Cheap sanity: cue should be short (<= 5 words).
+    if len(words) > 5:
+        return None
+    return (name, (m.group(2) or "").strip())
+
+
 def _parse_screenplay_dialogue(text: str) -> List[Dict[str, str]]:
     """Return `[{speaker, text}, ...]` extracted from Fountain-style screenplay
     text.
 
     Real character cues must be preceded by a blank line — that's the
-    Fountain convention that separates them from ALL-CAPS character
-    introductions in action prose (which look identical otherwise:
-    `SASHA (a young woman in a chef's apron) stands at one end...` reads as
-    a cue but isn't).
+    Fountain convention that separates them from character INTRODUCTIONS in
+    action prose (e.g. `SASHA (a young woman in a chef's apron) stands at
+    one end...` reads as a cue but isn't).
+
+    Handles three dialogue layouts we've actually seen from various LLMs:
+      1. Classical: cue on one line, dialogue on the next.
+      2. Cue + optional paren line + dialogue.
+      3. Cue on one line, next line starts with `(paren) actual dialogue text` —
+         extract the text AFTER the paren.
     """
     import re as _re
+    global _PAREN_LINE, _PAREN_THEN_TEXT
+    if _PAREN_LINE is None:
+        _PAREN_LINE = _re.compile(r"^\s*\([^)]*\)\s*$")
+        _PAREN_THEN_TEXT = _re.compile(r"^\s*\([^)]*\)\s+(.+?)\s*$")
+
     out: List[Dict[str, str]] = []
     lines = text.splitlines()
-    cue = _re.compile(r"^([A-Z][A-Z0-9 .'\-]{1,40})(?:\s*\(([^)]*)\))?\s*$")
-    paren_line = _re.compile(r"^\s*\([^)]*\)\s*$")
     i = 0
     while i < len(lines):
         preceded_by_blank = (i == 0) or (not lines[i - 1].strip())
-        m = cue.match(lines[i].strip())
-        if preceded_by_blank and m and i + 1 < len(lines):
-            speaker = m.group(1).strip()
+        cue_match = _looks_like_cue(lines[i]) if preceded_by_blank else None
+        if cue_match and i + 1 < len(lines):
+            speaker, _paren = cue_match
             j = i + 1
-            # Optional parenthetical on its own line ("(quietly)") between
-            # the cue and the dialogue.
-            if j < len(lines) and paren_line.match(lines[j]):
+            # Layout 3: `(paren) actual dialogue` — pull the text out and skip past.
+            m_inline = _PAREN_THEN_TEXT.match(lines[j]) if j < len(lines) else None
+            if m_inline:
+                inline_text = m_inline.group(1).strip()
+                # Keep pulling continuation lines that are neither blank nor cues.
                 j += 1
-            # Dialogue: consume consecutive non-blank, non-cue lines.
+                extra: List[str] = [inline_text]
+                while j < len(lines) and lines[j].strip() and not _looks_like_cue(lines[j]):
+                    extra.append(lines[j].strip())
+                    j += 1
+                out.append({"speaker": speaker, "text": " ".join(extra)})
+                i = j
+                continue
+            # Layout 2: optional parenthetical on its own line ("(quietly)")
+            # between the cue and the dialogue.
+            if j < len(lines) and _PAREN_LINE.match(lines[j]):
+                j += 1
+            # Layout 1: dialogue is the consecutive non-blank, non-cue lines
+            # that follow.
             spoken: List[str] = []
-            while j < len(lines) and lines[j].strip() and not cue.match(lines[j].strip()):
+            while j < len(lines) and lines[j].strip() and not _looks_like_cue(lines[j]):
                 spoken.append(lines[j].strip())
                 j += 1
             if spoken:

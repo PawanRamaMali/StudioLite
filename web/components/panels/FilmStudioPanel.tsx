@@ -349,6 +349,24 @@ function ProjectView({
     };
   }, [projectId, refresh]);
 
+  // Polling fallback. The WebSocket above rides through Next.js's dev-server
+  // rewrite of /api/*, which does NOT proxy WS upgrades, so live events
+  // silently never arrive and the panel stays frozen on whatever the initial
+  // fetch showed. Polling every 3 seconds whenever a stage is active keeps
+  // the UI honest even when WS is dead — the refresh is a cheap ~200ms
+  // fetch. When nothing is in flight we don't poll, so idle films are quiet.
+  const anyActive = useMemo(() => {
+    if (!detail) return false;
+    return Object.values(detail.state.stage_status).some(
+      (s) => s === "running" || s === "paused" || s === "needs_review"
+    );
+  }, [detail]);
+  useEffect(() => {
+    if (!anyActive) return;
+    const id = setInterval(() => { refresh(); }, 3000);
+    return () => clearInterval(id);
+  }, [anyActive, refresh]);
+
   const runAction = async (name: string, fn: () => Promise<unknown>) => {
     setBusy(name);
     try { await fn(); await refresh(); }
@@ -375,8 +393,24 @@ function ProjectView({
   const hasStale = Object.values(state.stage_status).some((s) => s === "stale");
   const allDone = Object.values(state.stage_status).every((s) => s === "done");
 
+  const doneCount = Object.values(state.stage_status).filter((s) => s === "done").length;
+  const currentStageSpec = state.current_stage
+    ? stages.find((s) => s.key === state.current_stage) ?? null
+    : null;
+
   return (
     <div className="space-y-4">
+      {/* Compact meta strip: brief + config badges. No more separate card taking a whole column. */}
+      <div className="flex flex-col md:flex-row md:items-center gap-3 md:gap-6">
+        <p className="text-xs text-zinc-400 leading-relaxed md:flex-1 line-clamp-2">{project.brief}</p>
+        <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
+          <Badge>{project.config.style}</Badge>
+          <Badge>{project.config.target_minutes} min</Badge>
+          <Badge>{project.config.llm_model}</Badge>
+          <span className="text-zinc-600">· Updated {fmtRelTime(project.updated_at)}</span>
+        </div>
+      </div>
+
       {err && (
         <Card className="border-red-500/30 bg-red-500/5">
           <div className="flex items-start justify-between gap-2">
@@ -390,193 +424,219 @@ function ProjectView({
           </div>
         </Card>
       )}
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      {/* left column: metadata + controls + timeline */}
-      <div className="lg:col-span-1 space-y-3">
-        <Card>
-          <CardTitle className="text-base flex items-center gap-2">
-            <Film className="w-4 h-4 text-indigo-400" /> {project.title}
-          </CardTitle>
-          <p className="text-xs text-zinc-400 mt-2 leading-relaxed line-clamp-4">{project.brief}</p>
-          <div className="mt-3 flex items-center gap-2 flex-wrap">
-            <Badge>{project.config.style}</Badge>
-            <Badge>{project.config.target_minutes} min</Badge>
-            <Badge>{project.config.llm_model}</Badge>
-            <span className="text-[10px] text-zinc-600">Updated {fmtRelTime(project.updated_at)}</span>
-          </div>
-          <div className="mt-3 flex items-center gap-2 text-[10px]">
-            <span className={`inline-block w-1.5 h-1.5 rounded-full ${wsAlive ? "bg-green-500" : "bg-zinc-600"}`} />
-            <span className="text-zinc-500">{wsAlive ? "Live events connected" : "Reconnecting…"}</span>
-          </div>
-        </Card>
 
-        <Card>
-          <CardTitle className="text-sm mb-3">Controls</CardTitle>
-          <div className="space-y-2">
-            {!isRunning && !allDone && (
-              <Button
-                className="w-full" size="md"
-                onClick={() => runAction("run", () => filmRun(projectId))}
-                disabled={busy !== null}
-              >
-                {busy === "run" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Starting…</> :
-                                  <><Play className="w-4 h-4 mr-2" />
-                                    {isAwaiting ? "Continue" : hasStale ? "Re-run stale stages" : "Start pipeline"}</>}
-              </Button>
-            )}
-            {isRunning && (
-              <Button
-                className="w-full" size="md" variant="danger"
-                onClick={() => runAction("pause", () => filmPause(projectId))}
-                disabled={busy !== null || state.pause_requested}
-              >
-                {state.pause_requested
-                  ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Pausing after this stage…</>
-                  : <><Pause className="w-4 h-4 mr-2" />Pause</>}
-              </Button>
-            )}
-            <Button
-              className="w-full" size="sm" variant="ghost"
-              disabled={isRunning || busy !== null}
-              onClick={async () => {
-                if (!window.confirm("Delete this film and all its artifacts? Cannot be undone.")) return;
-                setBusy("delete");
-                try { await filmDelete(projectId); onGone(); }
-                catch (e) { setErr(e instanceof Error ? e.message : "Delete failed"); setBusy(null); }
-              }}
-            >
-              <Trash2 className="w-3.5 h-3.5 mr-1.5" /> Delete film
-            </Button>
-            {state.last_error && (
-              <div className="text-[11px] text-red-300 bg-red-500/5 border border-red-500/20 rounded p-2">
-                <div className="font-semibold mb-1">Last error</div>
-                <div className="font-mono whitespace-pre-wrap break-words">{state.last_error}</div>
-              </div>
-            )}
-          </div>
-        </Card>
-
-        <Card>
-          <CardTitle className="text-sm mb-3">Pipeline</CardTitle>
-          <ol className="space-y-1">
-            {stages.map((spec, i) => {
-              const status = state.stage_status[spec.key];
-              const meta = STATUS_META[status] || STATUS_META.pending;
-              const isCur = state.current_stage === spec.key;
-              const isSel = selectedStage === spec.key;
-              return (
-                <li key={spec.key}>
-                  <button
-                    onClick={() => setSelectedStage(spec.key)}
-                    className={`w-full flex items-start gap-2 px-2 py-1.5 rounded-md text-left transition-colors ${
-                      isSel ? "bg-indigo-600/10 border border-indigo-500/30" : "hover:bg-zinc-800/40 border border-transparent"
-                    }`}
-                  >
-                    <StageStatusIcon status={status} />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] text-zinc-500 font-mono">{i + 1}.</span>
-                        <span className={`text-xs font-medium ${isCur ? "text-indigo-300" : "text-zinc-200"} truncate`}>
-                          {spec.label}
-                        </span>
-                        {spec.gated_by_default && (
-                          <Badge className="text-[9px]">gate</Badge>
-                        )}
-                      </div>
-                      <div className={`text-[10px] ${meta.tone}`}>{meta.label}</div>
-                    </div>
-                    {(status === "done" || status === "stale" || status === "needs_review" || status === "failed") && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (!window.confirm(`Rewind from "${spec.label}" onward?`)) return;
-                          runAction("rewind", () => filmRewind(projectId, spec.key));
-                        }}
-                        className="text-zinc-600 hover:text-orange-400 p-0.5"
-                        title="Rewind pipeline to this stage"
-                      >
-                        <RotateCcw className="w-3 h-3" />
-                      </button>
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </ol>
-          {currentStageStatus && !selectedStage && (
-            <p className="text-[10px] text-zinc-500 mt-2">Tip: click a stage to view or edit its artifact.</p>
-          )}
-        </Card>
-      </div>
-
-      {/* middle + right: artifact viewer + final video */}
-      <div className="lg:col-span-2 space-y-3">
-        {playbackUrl && (
-          <Card className="border-green-500/20 bg-green-500/5">
-            <CardTitle className="text-sm mb-2 flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-green-400" /> Final cut
+      {/* HERO — the star of the page. Video when there is one; live status when running; call to
+          action when idle. Only one of these renders at a time. */}
+      {playbackUrl ? (
+        <Card className="border-green-500/20 bg-green-500/5 p-0 overflow-hidden">
+          <div className="flex items-center justify-between px-4 pt-3 pb-2">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-green-400" />
+              <span className="text-sm font-semibold text-zinc-100">Final cut</span>
               <Badge className={
                 hasAudio
                   ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
                   : "bg-zinc-500/15 text-zinc-400 border-zinc-500/30"
               }>
-                {hasAudio ? "with audio" : "silent"}
+                {hasAudio ? "with audio" : "silent · mixer pending"}
               </Badge>
-            </CardTitle>
-            <video
-              key={playbackUrl}
-              src={`${FILM_API_BASE}${playbackUrl}`}
-              controls
-              className="w-full rounded-lg bg-black"
-            />
-            <div className="mt-2 flex gap-3 items-center">
+            </div>
+            <div className="flex items-center gap-3">
               <a
                 href={`${FILM_API_BASE}${playbackUrl}`}
                 download
                 className="inline-flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300"
               >
-                <Download className="w-3.5 h-3.5" /> Download MP4
+                <Download className="w-3.5 h-3.5" /> Download
               </a>
               {hasAudio && final_url && (
                 <a
                   href={`${FILM_API_BASE}${final_url}`}
                   download
-                  className="inline-flex items-center gap-1.5 text-[11px] text-zinc-500 hover:text-zinc-300"
+                  className="text-[11px] text-zinc-500 hover:text-zinc-300"
                 >
                   silent version
                 </a>
               )}
             </div>
-          </Card>
-        )}
-
-        {selectedStage ? (
-          <ArtifactView
-            projectId={projectId}
-            stage={stages.find((s) => s.key === selectedStage)!}
-            status={state.stage_status[selectedStage]}
-            artifact={artifacts[selectedStage] || null}
-            onSaved={refresh}
-            onClose={() => setSelectedStage(null)}
-            disabled={isRunning}
+          </div>
+          <video
+            key={playbackUrl}
+            src={`${FILM_API_BASE}${playbackUrl}`}
+            controls
+            className="w-full bg-black block"
           />
-        ) : (
-          <Card>
-            <CardTitle className="text-sm mb-2">What now</CardTitle>
-            <p className="text-xs text-zinc-400 leading-relaxed">
-              Click <span className="text-zinc-200 font-medium">Start pipeline</span> to run every stage.
-              The Producer will pause at a review gate — pick a logline in its artifact viewer,
-              then Continue. The Cinematographer also pauses by default so you can tweak the shot
-              plan before rendering. Any stage can be rewound to redo it plus everything downstream.
-            </p>
-            <p className="text-[10px] text-zinc-600 mt-3">
-              T1 renders SDXL keyframes and assembles a silent slideshow. T2 adds motion, voice,
-              music, and lipsync.
-            </p>
-          </Card>
+        </Card>
+      ) : isRunning || isAwaiting ? (
+        <Card className="border-indigo-500/30 bg-indigo-500/5">
+          <div className="flex items-center gap-3">
+            {isRunning
+              ? <Loader2 className="w-5 h-5 text-indigo-300 animate-spin" />
+              : <Clock className="w-5 h-5 text-sky-300" />}
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-semibold text-zinc-100">
+                {currentStageSpec?.label || (isAwaiting ? "Awaiting your input" : "Working…")}
+              </div>
+              <div className="text-xs text-zinc-400 mt-0.5">
+                {currentStageSpec?.description || "Pipeline in progress."}
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-2xl font-mono text-zinc-100 leading-none">{doneCount}<span className="text-zinc-600">/{stages.length}</span></div>
+              <div className="text-[10px] text-zinc-500 uppercase tracking-wide mt-1">stages done</div>
+            </div>
+          </div>
+        </Card>
+      ) : (
+        <Card>
+          <div className="flex items-center gap-3">
+            <Sparkles className="w-5 h-5 text-indigo-400" />
+            <div className="flex-1">
+              <div className="text-sm font-semibold text-zinc-100">Ready when you are</div>
+              <div className="text-xs text-zinc-400 mt-0.5">Start the pipeline to produce your film. All 12 stages will run end to end.</div>
+            </div>
+            {state.last_error && (
+              <Badge className="bg-red-500/15 text-red-300 border-red-500/30">error on last run</Badge>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {/* CONTROLS — compact row, primary action prominent, secondary actions as icons. */}
+      <div className="flex items-center flex-wrap gap-2">
+        {!isRunning && !allDone && (
+          <Button
+            size="md"
+            onClick={() => runAction("run", () => filmRun(projectId))}
+            disabled={busy !== null}
+          >
+            {busy === "run" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Starting…</> :
+                              <><Play className="w-4 h-4 mr-2" />
+                                {isAwaiting ? "Continue" : hasStale ? "Re-run stale" : "Start pipeline"}</>}
+          </Button>
         )}
+        {isRunning && (
+          <Button
+            size="md" variant="danger"
+            onClick={() => runAction("pause", () => filmPause(projectId))}
+            disabled={busy !== null || state.pause_requested}
+          >
+            {state.pause_requested
+              ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Pausing after this stage…</>
+              : <><Pause className="w-4 h-4 mr-2" />Pause</>}
+          </Button>
+        )}
+        <div className="flex-1" />
+        <Button
+          size="sm" variant="ghost"
+          disabled={isRunning || busy !== null}
+          onClick={async () => {
+            if (!window.confirm("Delete this film and all its artifacts? Cannot be undone.")) return;
+            setBusy("delete");
+            try { await filmDelete(projectId); onGone(); }
+            catch (e) { setErr(e instanceof Error ? e.message : "Delete failed"); setBusy(null); }
+          }}
+        >
+          <Trash2 className="w-3.5 h-3.5 mr-1.5" /> Delete
+        </Button>
       </div>
-    </div>
+
+      {state.last_error && (
+        <Card className="border-red-500/20 bg-red-500/5">
+          <div className="flex items-start gap-2 text-[11px] text-red-300">
+            <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+            <div className="flex-1">
+              <div className="font-semibold mb-1">Last error</div>
+              <div className="font-mono whitespace-pre-wrap break-words">{state.last_error}</div>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* TIMELINE — horizontal 12-stage grid. Each stage is clickable to open its artifact. */}
+      <Card>
+        <div className="flex items-center justify-between mb-3">
+          <CardTitle className="text-sm">Pipeline</CardTitle>
+          <span className="text-[10px] text-zinc-500">click a stage to view or edit its artifact · rewind icon on hover</span>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-2">
+          {stages.map((spec, i) => {
+            const status = state.stage_status[spec.key];
+            const meta = STATUS_META[status] || STATUS_META.pending;
+            const isCur = state.current_stage === spec.key;
+            const isSel = selectedStage === spec.key;
+            const canRewind = status === "done" || status === "stale" || status === "needs_review" || status === "failed";
+            const border =
+              isSel ? "border-indigo-400/60 bg-indigo-500/10" :
+              isCur ? "border-indigo-500/40 bg-indigo-500/5" :
+              status === "done" ? "border-green-500/20 bg-green-500/5 hover:bg-green-500/10" :
+              status === "failed" ? "border-red-500/30 bg-red-500/5" :
+              status === "stale" ? "border-orange-500/30 bg-orange-500/5" :
+              status === "needs_review" ? "border-sky-500/30 bg-sky-500/5" :
+              status === "paused" ? "border-amber-500/30 bg-amber-500/5" :
+              "border-zinc-800 bg-zinc-900/40 hover:bg-zinc-800/60";
+            return (
+              <button
+                key={spec.key}
+                onClick={() => setSelectedStage(spec.key)}
+                className={`group relative text-left rounded-lg border p-2.5 transition-colors ${border}`}
+              >
+                <div className="flex items-start gap-2">
+                  <StageStatusIcon status={status} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-zinc-500 font-mono">{String(i + 1).padStart(2, "0")}</span>
+                      <span className={`text-xs font-medium truncate ${isCur ? "text-indigo-200" : "text-zinc-100"}`}>
+                        {spec.label}
+                      </span>
+                    </div>
+                    <div className={`text-[10px] mt-0.5 ${meta.tone}`}>
+                      {meta.label}
+                      {spec.gated_by_default && <span className="text-zinc-600"> · gated</span>}
+                    </div>
+                  </div>
+                </div>
+                {canRewind && (
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!window.confirm(`Rewind from "${spec.label}" onward?`)) return;
+                      runAction("rewind", () => filmRewind(projectId, spec.key));
+                    }}
+                    className="absolute top-1.5 right-1.5 text-zinc-600 hover:text-orange-400 p-1 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                    title="Rewind pipeline to this stage"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </Card>
+
+      {/* ARTIFACT DRAWER — modal overlay so it doesn't push the hero out of the way. */}
+      {selectedStage && (
+        <div className="fixed inset-0 z-40 flex" onClick={() => setSelectedStage(null)}>
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+          <div
+            className="ml-auto relative z-50 w-full max-w-3xl h-full overflow-y-auto bg-zinc-950 border-l border-zinc-800 p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <ArtifactView
+              projectId={projectId}
+              stage={stages.find((s) => s.key === selectedStage)!}
+              status={state.stage_status[selectedStage]}
+              artifact={artifacts[selectedStage] || null}
+              onSaved={refresh}
+              onClose={() => setSelectedStage(null)}
+              disabled={isRunning}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -248,7 +248,7 @@ def _normalize_scene(i: int, s: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _STORYBOARD_SYSTEM = """\
-You are a storyboard artist. For the given SCENE, break it into 3-8 discrete
+You are a storyboard artist. For the given SCENE, break it into discrete
 shots. Return JSON:
 
 {
@@ -264,8 +264,15 @@ shots. Return JSON:
   ]
 }
 
+SHOT COUNT — pace shots to the scene's `estimated_seconds`. Aim for one
+shot per 5 to 8 seconds. Minimum 3 shots for any scene. Maximum 15. Do
+NOT emit more shots than the scene needs to fill its runtime — a 20
+second scene should have 3 or 4 shots, not 8.
+
 Every shot must be renderable as a single still image (T1) and later a short
-motion clip (T2). Keep descriptions concrete and visual.
+motion clip (T2). Keep descriptions concrete and visual. When you name a
+character in `subject` or `action`, use the SAME name the screenplay uses
+in its cues (so downstream stages can match dialogue to the right shot).
 
 DIALOGUE RULES — non-negotiable:
 - The `screenplay` field of the input contains the source of truth.
@@ -995,19 +1002,49 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
         if not dialogue:
             continue
 
-        # Distribute lines across shots by reading order. Line i lands on the
-        # shot whose slot maps to the same fraction of the scene. This gives
-        # the LLM-agnostic pacing the audit called out (was: all lines bunched
-        # onto the final two shots).
+        # Distribute lines across shots. First pass: try to place each line
+        # on a shot whose subject/action text mentions the speaker (rough
+        # proximity match, in reading order). Second pass: for any line not
+        # placed, fall back to even index distribution. This keeps the right
+        # voice under the right face when the storyboard bothers to describe
+        # who's on screen, without breaking on generic shots.
         assignments: List[Optional[Dict[str, Any]]] = [None] * len(shots)
+
+        def shot_mentions(idx: int, speaker: str) -> bool:
+            hay = f"{shots[idx].get('subject','')} {shots[idx].get('action','')}".upper()
+            for tok in speaker.upper().split():
+                if len(tok) >= 3 and tok in hay:
+                    return True
+            return False
+
+        next_search_idx = 0
+        unplaced: List[int] = []
         for i, line in enumerate(dialogue):
+            speaker = line["speaker"]
+            placed = False
+            # Search forward from where the last line landed. Prefer earliest
+            # unassigned shot that mentions the speaker; keeps reading order.
+            for k in range(next_search_idx, len(shots)):
+                if assignments[k] is None and shot_mentions(k, speaker):
+                    assignments[k] = line
+                    next_search_idx = k + 1
+                    placed = True
+                    break
+            if not placed:
+                unplaced.append(i)
+
+        # Second pass: fill unplaced lines by proportional index, skipping
+        # already-taken slots.
+        for i in unplaced:
             slot = i * len(shots) // max(1, len(dialogue))
-            # If two lines want the same slot, push the second one forward.
             while slot < len(shots) and assignments[slot] is not None:
                 slot += 1
             if slot >= len(shots):
-                slot = len(shots) - 1
-            assignments[slot] = line
+                slot = 0
+                while slot < len(shots) and assignments[slot] is not None:
+                    slot += 1
+            if slot < len(shots):
+                assignments[slot] = dialogue[i]
 
         for slot_idx, line in enumerate(assignments):
             if line is None:
@@ -1111,12 +1148,58 @@ def _parse_screenplay_dialogue(text: str) -> List[Dict[str, str]]:
         _PAREN_LINE = _re.compile(r"^\s*\([^)]*\)\s*$")
         _PAREN_THEN_TEXT = _re.compile(r"^\s*\([^)]*\)\s+(.+?)\s*$")
 
+    # Layout 4: everything on ONE line. `LUCY (to herself) Just one more.`
+    # or `JESSICA Doc? I'm here.`. Preceded by a blank line, otherwise we'd
+    # false-match on character intros embedded in action prose (e.g.
+    # "A dim room. DOCTOR LUCY MITCHELL, mid-30s, adjusts her glasses.").
+    inline_one = _re.compile(
+        r"^([A-Za-z][A-Za-z0-9 .'\-]{0,40}?)"     # speaker (non-greedy)
+        r"(?:\s*\(([^)]*)\))?"                     # optional parenthetical
+        r"\s+"
+        r"([A-Z\"'…].*)$"                     # dialogue starts with cap / quote / ellipsis
+    )
+
+    def _inline_speaker(speaker_raw: str, paren: str, dialogue: str) -> Optional[str]:
+        # Speaker must pass the cue check AND be short (1-3 words) to keep
+        # multi-word character intros out.
+        cue = _looks_like_cue(speaker_raw)
+        if cue is None:
+            return None
+        words = [w for w in speaker_raw.split() if w]
+        if not words or len(words) > 3:
+            return None
+        # No paren annotation => require a speech marker in the dialogue.
+        # Real spoken lines almost always carry ? / ! / ellipsis; character
+        # intros ("mid-30s, in a lab coat") do not.
+        if not paren and not any(m in dialogue for m in ("?", "!", "…", "...")):
+            return None
+        return cue[0]
+
     out: List[Dict[str, str]] = []
     lines = text.splitlines()
     i = 0
+    prev_was_dialogue = False  # rapid back-and-forth often has no blank between exchanges
     while i < len(lines):
+        raw = lines[i]
+        if not raw.strip():
+            prev_was_dialogue = False
+            i += 1
+            continue
         preceded_by_blank = (i == 0) or (not lines[i - 1].strip())
-        cue_match = _looks_like_cue(lines[i]) if preceded_by_blank else None
+        can_be_cue = preceded_by_blank or prev_was_dialogue
+
+        # Try inline single-line layout first — it's the most specific match.
+        if can_be_cue:
+            m = inline_one.match(raw.rstrip())
+            if m:
+                speaker = _inline_speaker(m.group(1).strip(), (m.group(2) or "").strip(), m.group(3).strip())
+                if speaker:
+                    out.append({"speaker": speaker, "text": m.group(3).strip()})
+                    prev_was_dialogue = True
+                    i += 1
+                    continue
+
+        cue_match = _looks_like_cue(raw) if can_be_cue else None
         if cue_match and i + 1 < len(lines):
             speaker, _paren = cue_match
             j = i + 1
@@ -1131,6 +1214,7 @@ def _parse_screenplay_dialogue(text: str) -> List[Dict[str, str]]:
                     extra.append(lines[j].strip())
                     j += 1
                 out.append({"speaker": speaker, "text": " ".join(extra)})
+                prev_was_dialogue = True
                 i = j
                 continue
             # Layout 2: optional parenthetical on its own line ("(quietly)")
@@ -1145,8 +1229,12 @@ def _parse_screenplay_dialogue(text: str) -> List[Dict[str, str]]:
                 j += 1
             if spoken:
                 out.append({"speaker": speaker, "text": " ".join(spoken)})
+                prev_was_dialogue = True
+            else:
+                prev_was_dialogue = False
             i = j
             continue
+        prev_was_dialogue = False
         i += 1
     return out
 

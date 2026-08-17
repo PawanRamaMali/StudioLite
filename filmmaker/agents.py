@@ -106,10 +106,18 @@ character cue is not in ALL CAPS on its own line.
 
 Constraints:
 - Total runtime target: about ONE screen page per minute.
+- **Scene count scales with runtime**. Under 2 minutes: 1-2 scenes is fine.
+  2 to 3 minutes: at least 3 scenes. 4 minutes or longer: at least 4 scenes
+  with distinct headings (location or time change), so the film has real
+  structure instead of one long conversation in a single room.
 - Cast: 2-4 named speaking characters. Introduce each in ALL CAPS on first
-  appearance in an action line.
+  appearance in an action line, followed by a short physical description in
+  parentheses on the SAME line — age range, wardrobe, one distinctive
+  feature. Downstream stages parse those descriptors to keep the character
+  looking consistent across shots. Example:
+      MARGO (60s, silver bob, apron dusted with flour) wipes the counter.
 - Make it filmable with the given visual style; avoid long monologues.
-- No preface, no epilogue, no formatting tricks — just the screenplay.
+- No preface, no epilogue, no formatting tricks. Just the screenplay.
 """
 
 
@@ -200,6 +208,13 @@ For each scene, extract:
 - mood: one short phrase ("tense stillness", "hopeful bustle", etc.)
 - estimated_seconds: your best guess of screen time, integer
 
+SCENE COUNT — the film has a stated target runtime (in `target_minutes`
+below). If the screenplay reads like one long single-location scene, break
+it into MULTIPLE scenes at any natural beat — location change, time jump,
+mood shift, new character arriving. Aim for one scene per 60 to 90 seconds
+of runtime. Under 2 minutes may be one or two scenes; a 5 minute film
+needs at least 4 scenes.
+
 Return JSON: {"scenes": [ ... ]}. No commentary.
 """
 
@@ -214,7 +229,9 @@ def run_breakdown(project: Project) -> Dict[str, Any]:
     if not screenplay.strip():
         raise ValueError("No screenplay to break down.")
 
-    user_msg = f"Screenplay:\n\n{screenplay}"
+    target_minutes = project.meta.config.target_minutes
+    user_msg = (f"target_minutes: {target_minutes}\n\n"
+                f"Screenplay:\n\n{screenplay}")
     raw = _chat(project, "breakdown", _BREAKDOWN_SYSTEM, user_msg,
                 want_json=True, temperature=0.2, max_tokens=6000)
     data = llm.parse_json(raw)
@@ -265,9 +282,11 @@ shots. Return JSON:
 }
 
 SHOT COUNT — pace shots to the scene's `estimated_seconds`. Aim for one
-shot per 5 to 8 seconds. Minimum 3 shots for any scene. Maximum 15. Do
-NOT emit more shots than the scene needs to fill its runtime — a 20
-second scene should have 3 or 4 shots, not 8.
+shot per 6 to 10 seconds. Minimum 3 shots for any scene. The soft
+maximum scales with scene length: roughly `estimated_seconds / 6`, but
+never more than 20 for one scene. A 20 second scene should have 3 or 4
+shots. A 60 second scene: 8 to 10. A 120 second scene: 15 to 20. Do
+NOT pack more shots than the scene runtime warrants.
 
 Every shot must be renderable as a single still image (T1) and later a short
 motion clip (T2). Keep descriptions concrete and visual. When you name a
@@ -448,7 +467,7 @@ def run_cinematographer(project: Project) -> Dict[str, Any]:
                 "camera_move":_normalize_camera_move(item.get("camera_move")),
                 "lighting":   str(item.get("lighting", "natural key light")).strip(),
                 "palette":    str(item.get("palette", "neutral")).strip(),
-                "duration_sec": max(1, min(15, int(item.get("duration_sec", 4) or 4))),
+                "duration_sec": max(3, min(20, int(item.get("duration_sec", 4) or 4))),
             }
         # Fill defaults for any missing shots.
         for sh in shots:
@@ -514,6 +533,28 @@ def run_shots(project: Project) -> Dict[str, Any]:
     render_one = _load_sdxl_renderer()
     render_batch = _load_sdxl_batch_renderer()
 
+    # Parse character bios from the screenplay so we can bake them into
+    # every shot prompt where the character appears. Cheap poor-man's
+    # consistency until IP-Adapter lands: same physical descriptors show up
+    # in every prompt for MARGO, so SDXL is nudged toward the same look.
+    editor = project.read_artifact("story_editor") or {}
+    screenwriter = project.read_artifact("screenwriter") or {}
+    full_screenplay = (editor.get("revised_fountain")
+                       or screenwriter.get("fountain") or "")
+    character_bios = _extract_character_bios(full_screenplay)
+
+    # Voice actor's per-shot dialogue durations. If a shot has spoken lines,
+    # we extend its screen time so the line fits (plus half a second of pad)
+    # and no two lines end up overlapping in the mixer.
+    voice_art = project.read_artifact("voice_actor") or {}
+    dialogue_dur_by_key: Dict[str, float] = {}
+    for line in voice_art.get("lines", []) or []:
+        key = f"{line['scene_id']}::{line['shot_id']}"
+        dialogue_dur_by_key[key] = max(
+            dialogue_dur_by_key.get(key, 0.0),
+            float(line.get("duration_sec", 0) or 0),
+        )
+
     # First pass: build the flat work list so we can batch across scenes.
     jobs: List[Dict[str, Any]] = []
     for scene in scenes:
@@ -525,12 +566,18 @@ def run_shots(project: Project) -> Dict[str, Any]:
         for shot in shots:
             shot_id = shot["id"]
             dp_shot = dp.get(shot_id, {})
+            base_dur = int(dp_shot.get("duration_sec", 4) or 4)
+            dlg_dur = dialogue_dur_by_key.get(f"{sid}::{shot_id}", 0.0)
+            # Enough room for the wav to play out with pad + a hair extra
+            # so the next shot's line never starts before this one finishes.
+            fitted = int(dlg_dur + 0.75) if dlg_dur > 0 else 0
+            duration_sec = max(base_dur, fitted, 3)
             jobs.append({
                 "scene_id": sid,
                 "shot_id": shot_id,
-                "prompt": _shot_prompt(style, scene, shot, dp_shot),
+                "prompt": _shot_prompt(style, scene, shot, dp_shot, character_bios),
                 "png_path": os.path.join(scene_dir, f"{shot_id}.png"),
-                "duration_sec": int(dp_shot.get("duration_sec", 4) or 4),
+                "duration_sec": duration_sec,
                 "dialogue": shot.get("dialogue", ""),
                 "rendered": False,
                 "error": None,
@@ -596,14 +643,32 @@ def run_shots(project: Project) -> Dict[str, Any]:
     return {"shots": result_shots}
 
 
-def _shot_prompt(style: str, scene: Dict[str, Any], shot: Dict[str, Any], dp: Dict[str, Any]) -> str:
-    """Build a single-line SDXL prompt from the DP + storyboard artifacts."""
+def _shot_prompt(style: str, scene: Dict[str, Any], shot: Dict[str, Any],
+                 dp: Dict[str, Any], character_bios: Optional[Dict[str, str]] = None) -> str:
+    """Build a single-line SDXL prompt from the DP + storyboard artifacts.
+    If character_bios is provided, physical descriptors for any character
+    named in this shot's subject/action get baked into the prompt so the
+    same person renders with the same look across scenes."""
     style_prefix = "cinematic photorealistic still, film grain" if style == "photoreal" \
                    else "stylized illustrated frame, painterly, cinematic"
+
     parts = [
         style_prefix,
         f"{dp.get('framing', 'MS')} shot",
         f"{dp.get('lens_mm', 35)}mm lens",
+    ]
+
+    # Character descriptors take priority so they land inside the CLIP 77-token
+    # window before palette/lighting boilerplate gets truncated.
+    if character_bios:
+        haystack = f"{shot.get('subject','')} {shot.get('action','')} {shot.get('description','')}".upper()
+        for name, bio in character_bios.items():
+            for tok in name.upper().split():
+                if len(tok) >= 3 and tok in haystack:
+                    parts.append(f"{name}: {bio}")
+                    break
+
+    parts += [
         shot.get("description") or shot.get("action") or "",
         f"location: {scene.get('location', '')}",
         f"time of day: {scene.get('time_of_day', '')}",
@@ -612,6 +677,125 @@ def _shot_prompt(style: str, scene: Dict[str, Any], shot: Dict[str, Any], dp: Di
         f"palette: {dp.get('palette', '')}",
     ]
     return ", ".join([p for p in parts if p]).strip()
+
+
+_NAME_BLOCKLIST = {
+    "THE", "A", "AN", "THIS", "THAT", "IT", "HE", "SHE", "THEY", "WE",
+    "SOME", "EVERY", "MY", "OUR", "HIS", "HER", "THEIR", "YOUR", "THEIR",
+    "SUDDENLY", "MEANWHILE", "OUTSIDE", "INSIDE", "LATER", "THEN", "NOW",
+    "THERE", "HERE", "WHERE", "WHEN", "WHILE", "AFTER", "BEFORE", "AS",
+}
+_CUE_PAREN_TERMS = {
+    "V.O.", "O.S.", "CONT'D", "CONTD", "MORE", "BEAT", "PAUSE",
+    "OFF SCREEN", "OFFSCREEN", "VOICE OVER", "VOICEOVER",
+}
+
+
+def _extract_character_bios(script: str) -> Dict[str, str]:
+    """Walk action lines for character INTRODUCTIONS of the form
+    `NAME (age, wardrobe, feature) does something...` or the comma variant
+    `NAME, description[, more description].`. Skips dialogue blocks so we
+    don't grab spoken lines that happen to start with a Title-Case word,
+    and skips cue-style annotations like `(V.O.)` or `(to himself)`."""
+    import re as _re
+    bios: Dict[str, str] = {}
+    lines = script.splitlines()
+    # Intros often land mid-paragraph ("The passenger is JENNY, mid-30s, ..."),
+    # so we scan each action line with finditer instead of anchoring to `^`.
+    paren_intro = _re.compile(r"\b([A-Z][A-Za-z]{2,}(?: [A-Z][A-Za-z]{2,}){0,2})\s*\(([^)]{5,120})\)\s+[a-z]")
+    comma_intro = _re.compile(r"\b([A-Z][A-Za-z]{2,}(?: [A-Z][A-Za-z]{2,}){0,2}),\s*([^\n]{5,300}?)(?=[.\n]|$)")
+
+    def _accept(name: str, desc: str) -> Optional[tuple]:
+        clean = _clean_name(name)
+        if not clean:
+            return None
+        head = clean.upper().split()[0] if clean.split() else ""
+        if head in _NAME_BLOCKLIST:
+            return None
+        d = desc.strip()
+        if d.upper() in _CUE_PAREN_TERMS:
+            return None
+        if d.lower().startswith(("to ", "at ", "on ", "off ", "for ", "into ",
+                                 "with a ", "under ", "over ", "toward ",
+                                 "in a ", "at the ")):
+            return None
+        if not _looks_like_desc(d):
+            return None
+        return (clean, d)
+
+    # Walk with a small state machine so we ONLY look at action lines. A cue
+    # (character line) puts us into dialogue mode; blank line exits it.
+    in_dialogue = False
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            in_dialogue = False
+            continue
+        if not in_dialogue and _looks_like_cue(raw) is not None:
+            in_dialogue = True
+            continue
+        if in_dialogue:
+            continue
+
+        for m in paren_intro.finditer(line):
+            picked = _accept(m.group(1), m.group(2))
+            if picked and picked[0] not in bios:
+                bios[picked[0]] = picked[1]
+        for m in comma_intro.finditer(line):
+            picked = _accept(m.group(1), m.group(2))
+            if picked and picked[0] not in bios:
+                bios[picked[0]] = picked[1]
+    return bios
+
+
+def _clean_name(raw: str) -> str:
+    # Drop trailing verbs the regex sometimes swallows. Keep the leading
+    # capitalised words only.
+    parts = raw.strip().split()
+    kept: List[str] = []
+    for w in parts:
+        if not w:
+            break
+        if w[0].isupper() or (kept and w in {"of", "the"}):
+            kept.append(w)
+        else:
+            break
+    return " ".join(kept[:3]).strip()
+
+
+_DESC_AGE = None
+_DESC_WORDS = None
+
+
+def _looks_like_desc(text: str) -> bool:
+    """A real physical description carries an age marker (e.g. `mid-30s`,
+    `60s`, `40 years old`) or a specific wardrobe / feature word matched at
+    word boundaries. Substring matching would false-positive `hair` inside
+    `chair` and `s ` inside `Let's`, which is how earlier passes leaked
+    dialogue text into the bio dict."""
+    import re as _re
+    global _DESC_AGE, _DESC_WORDS
+    if _DESC_AGE is None:
+        _DESC_AGE = _re.compile(
+            r"\b(?:mid[-\s]?)?(?:early|late)?[-\s]?"
+            r"(?:\d{1,2}s|\d{1,2}[-\s]?year[-\s]?old|"
+            r"teen|teens|twenties|thirties|forties|fifties|sixties|seventies|eighties)\b",
+            _re.I,
+        )
+        _DESC_WORDS = _re.compile(
+            r"\b(?:hair|beard|eyes?|jacket|coat|shirt|dress|apron|boots|"
+            r"glasses|hat|scarf|uniform|wearing|clad|bald|tall|short|thin|"
+            r"stout|young|elderly|grizzled|weathered|middle[-\s]?aged|"
+            r"grey|gray|silver|blond|blonde|brunette|redhead|freckled|"
+            r"tattoo|scar|goatee|moustache|mustache|stubble|pale|dark|"
+            r"skinny|slim|broad|muscular|heavyset|petite|slender|lanky)\b",
+            _re.I,
+        )
+    if _DESC_AGE.search(text):
+        return True
+    if _DESC_WORDS.search(text):
+        return True
+    return False
 
 
 def _load_sdxl_renderer():
@@ -1432,7 +1616,23 @@ def run_mixer(project: Project) -> Dict[str, Any]:
                                f"{line['scene_id']}_{line['shot_id']}.wav")
         if not os.path.exists(wav_abs):
             continue
-        dialogue.append({"wav": wav_abs, "delay_ms": offsets_ms.get(key, 0)})
+        dialogue.append({
+            "wav": wav_abs,
+            "delay_ms": offsets_ms.get(key, 0),
+            "dur_ms": int(_wav_duration_seconds(wav_abs) * 1000),
+        })
+
+    # Prevent overlap. Sort by scheduled offset, then push any line back so
+    # it starts no earlier than the previous line's end + a short gap. This
+    # is a fallback in case the shot-duration fitting in run_shots didn't
+    # give a line enough room (very long dialogue, wrong shot assignment).
+    _MIN_GAP_MS = 200
+    dialogue.sort(key=lambda d: d["delay_ms"])
+    scheduled_end = 0
+    for d in dialogue:
+        if d["delay_ms"] < scheduled_end + _MIN_GAP_MS:
+            d["delay_ms"] = scheduled_end + _MIN_GAP_MS
+        scheduled_end = d["delay_ms"] + d["dur_ms"]
 
     score_rel = composer_art.get("path")
     score_abs = os.path.join(project.dir, score_rel) if score_rel else None

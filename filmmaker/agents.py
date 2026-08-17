@@ -423,11 +423,17 @@ Return JSON:
       "camera_move": "static" | "pan" | "dolly" | "handheld" | "crane" | "whip",
       "lighting": "one-line description of key light + mood",
       "palette": "3-5 color words separated by commas",
-      "duration_sec": integer 2..10
+      "duration_sec": integer 4..15
     }, ...
   ]
 }
-Match the scene mood and the film's visual style.
+
+DURATION — the sum of `duration_sec` across all shots in a scene should
+roughly equal the scene's `estimated_seconds`. So if the scene runs 90
+seconds and has 12 shots, each shot averages about 7 to 8 seconds. Do
+NOT default every shot to the low end (4). Vary duration to match the
+beat — quick reaction shots can be shorter, dialogue and establishing
+shots longer. Match the scene mood and the film's visual style.
 """
 
 

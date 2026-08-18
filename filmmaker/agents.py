@@ -239,6 +239,21 @@ def run_breakdown(project: Project) -> Dict[str, Any]:
     scenes = [_normalize_scene(i, s) for i, s in enumerate(scenes) if isinstance(s, dict)]
     if not scenes:
         raise llm.LLMError("Breakdown returned no scenes.")
+
+    # Enforce target runtime. The LLM under-estimates for long films (a 10
+    # minute brief comes back as 4 scenes x 60s = 240s). Rescale proportionally
+    # so the sum matches the requested runtime within a few percent.
+    target_sec = int(target_minutes * 60)
+    current = sum(s["estimated_seconds"] for s in scenes) or 1
+    if target_sec >= 30 and abs(current - target_sec) / target_sec > 0.15:
+        scale = target_sec / current
+        for s in scenes:
+            s["estimated_seconds"] = max(15, int(round(s["estimated_seconds"] * scale)))
+        # Fix the last one to swallow rounding drift.
+        drift = target_sec - sum(s["estimated_seconds"] for s in scenes)
+        if scenes and abs(drift) <= 30:
+            scenes[-1]["estimated_seconds"] = max(15, scenes[-1]["estimated_seconds"] + drift)
+
     return {"scenes": scenes}
 
 
@@ -540,14 +555,48 @@ def run_shots(project: Project) -> Dict[str, Any]:
     render_batch = _load_sdxl_batch_renderer()
 
     # Parse character bios from the screenplay so we can bake them into
-    # every shot prompt where the character appears. Cheap poor-man's
-    # consistency until IP-Adapter lands: same physical descriptors show up
-    # in every prompt for MARGO, so SDXL is nudged toward the same look.
+    # every shot prompt where the character appears. Same physical descriptors
+    # show up in every prompt for MARGO, so SDXL is nudged toward the same
+    # look even without IP-Adapter as a backstop.
     editor = project.read_artifact("story_editor") or {}
     screenwriter = project.read_artifact("screenwriter") or {}
     full_screenplay = (editor.get("revised_fountain")
                        or screenwriter.get("fountain") or "")
     character_bios = _extract_character_bios(full_screenplay)
+
+    # Load character portraits (from the character_portraits stage) as PIL
+    # images keyed by uppercased name. Each shot whose subject/action names
+    # one of these characters will pass the portrait as an IP-Adapter
+    # reference so the same face lands in every appearance.
+    portraits_art = project.read_artifact("character_portraits") or {}
+    portraits_pil: Dict[str, Any] = {}
+    try:
+        from PIL import Image as _PILImage
+        for name, meta in (portraits_art.get("portraits") or {}).items():
+            p = meta.get("path")
+            if not p:
+                continue
+            abs_p = os.path.join(project.dir, p)
+            if not os.path.exists(abs_p):
+                continue
+            try:
+                portraits_pil[name.upper()] = _PILImage.open(abs_p).convert("RGB")
+            except Exception as e:
+                logger.warning("Could not load portrait for %s: %s", name, e)
+    except Exception:
+        pass
+
+    def portrait_for_shot(shot: Dict[str, Any]) -> Any:
+        """Return a PIL portrait for the primary character in this shot, or
+        None if no named character matches."""
+        if not portraits_pil:
+            return None
+        hay = f"{shot.get('subject','')} {shot.get('action','')}".upper()
+        for name_up, img in portraits_pil.items():
+            for tok in name_up.split():
+                if len(tok) >= 3 and tok in hay:
+                    return img
+        return None
 
     # Voice actor's per-shot dialogue durations. If a shot has spoken lines,
     # we extend its screen time so the line fits (plus half a second of pad)
@@ -585,6 +634,7 @@ def run_shots(project: Project) -> Dict[str, Any]:
                 "png_path": os.path.join(scene_dir, f"{shot_id}.png"),
                 "duration_sec": duration_sec,
                 "dialogue": shot.get("dialogue", ""),
+                "ref_image": portrait_for_shot(shot),
                 "rendered": False,
                 "error": None,
             })
@@ -594,17 +644,22 @@ def run_shots(project: Project) -> Dict[str, Any]:
 
     # Batch through the work list. On any batch failure, fall back to per-shot
     # for just that batch — a single OOM shouldn't discard the whole render.
+    # We split by whether the chunk has any character references — mixed
+    # batches technically work (diffusers accepts per-slot None) but keep it
+    # simple: character-heavy chunks tend to run smoothly grouped.
     i = 0
     done = 0
     while i < total:
         chunk = jobs[i:i + _SDXL_BATCH_SIZE]
         used_batch = False
+        chunk_has_refs = any(j["ref_image"] is not None for j in chunk)
         if render_batch is not None and len(chunk) > 1:
             try:
                 render_batch(
                     [j["prompt"] for j in chunk],
                     [j["png_path"] for j in chunk],
                     steps=steps,
+                    ref_images=([j["ref_image"] for j in chunk] if chunk_has_refs else None),
                 )
                 for j in chunk:
                     j["rendered"] = True
@@ -619,7 +674,8 @@ def run_shots(project: Project) -> Dict[str, Any]:
             for j in chunk:
                 try:
                     if render_one is not None:
-                        render_one(j["prompt"], j["png_path"], steps=steps)
+                        render_one(j["prompt"], j["png_path"], steps=steps,
+                                   ref_image=j["ref_image"])
                         j["rendered"] = True
                     else:
                         _placeholder_png(j["png_path"], f"{j['scene_id']}/{j['shot_id']}")
@@ -804,20 +860,95 @@ def _looks_like_desc(text: str) -> bool:
     return False
 
 
+_IP_ADAPTER_STATE: str = "unknown"   # unknown | loaded | disabled
+
+
+def _ensure_ip_adapter_loaded() -> bool:
+    """Try to load IP-Adapter on reelforge's cached SDXL pipeline. Returns
+    True if the adapter is currently loaded and usable; False otherwise.
+
+    We can't tell in advance whether the pipeline architecture is compatible
+    (SDXL Turbo, for instance, is distilled and rejects IP-Adapter at
+    inference time with a matmul shape error). Callers should be ready to
+    catch a RuntimeError from the actual pipeline call and invoke
+    _disable_ip_adapter() to fall back gracefully."""
+    global _IP_ADAPTER_STATE
+    if _IP_ADAPTER_STATE in ("loaded", "disabled"):
+        return _IP_ADAPTER_STATE == "loaded"
+    try:
+        from reelforge import rf_load_sdxl_pipeline
+        import reelforge as _rf
+        rf_load_sdxl_pipeline(None)
+        pipe = getattr(_rf, "_sdxl_pipe", None)
+        if pipe is None:
+            _IP_ADAPTER_STATE = "disabled"
+            return False
+        pipe.load_ip_adapter(
+            "h94/IP-Adapter",
+            subfolder="sdxl_models",
+            weight_name="ip-adapter_sdxl_vit-h.safetensors",
+        )
+        pipe.set_ip_adapter_scale(0.55)
+        _IP_ADAPTER_STATE = "loaded"
+        logger.info("IP-Adapter loaded on SDXL pipeline (scale=0.55)")
+        return True
+    except Exception as e:
+        _IP_ADAPTER_STATE = "disabled"
+        logger.warning("Failed to load IP-Adapter (%s); shots will render without face conditioning", e)
+        return False
+
+
+def _disable_ip_adapter() -> None:
+    """Unload IP-Adapter after an incompatibility error at inference time.
+    Marks the module state so we don't try to reload it this session."""
+    global _IP_ADAPTER_STATE
+    try:
+        import reelforge as _rf
+        pipe = getattr(_rf, "_sdxl_pipe", None)
+        if pipe is not None and hasattr(pipe, "unload_ip_adapter"):
+            pipe.unload_ip_adapter()
+    except Exception:
+        pass
+    _IP_ADAPTER_STATE = "disabled"
+    logger.warning("IP-Adapter disabled for the rest of the session")
+
+
 def _load_sdxl_renderer():
-    """Return a callable `(prompt, out_path, *, steps=None) -> None`, or None if unavailable."""
+    """Return a callable `(prompt, out_path, *, steps=None, ref_image=None) -> None`,
+    or None if unavailable. When `ref_image` is a PIL image, IP-Adapter is loaded
+    (once) on the pipeline and the image is passed as the character reference."""
     try:
         from reelforge import rf_generate_image
+        import reelforge as _rf
     except Exception as e:  # pragma: no cover
         logger.info("SDXL not available (%s); shot generator will use placeholders.", e)
         return None
 
-    def _render(prompt: str, out_path: str, *, steps: Optional[int] = None) -> None:
-        # rf_generate_image writes to `.mp/<uuid>.png` and returns that path —
-        # not a PIL.Image, despite the plausible-sounding name.
-        src = rf_generate_image(
-            prompt, provider="sdxl_turbo", aspect_ratio="16:9", steps=steps,
-        )
+    def _render(prompt: str, out_path: str, *, steps: Optional[int] = None,
+                ref_image=None) -> None:
+        # rf_generate_image writes to `.mp/<uuid>.png` and returns that path.
+        use_ref = ref_image is not None and _ensure_ip_adapter_loaded()
+        try:
+            if use_ref:
+                src = rf_generate_image(
+                    prompt, provider="sdxl_turbo", aspect_ratio="16:9",
+                    steps=steps, ip_adapter_image=ref_image,
+                )
+            else:
+                src = rf_generate_image(
+                    prompt, provider="sdxl_turbo", aspect_ratio="16:9", steps=steps,
+                )
+        except RuntimeError as e:
+            # SDXL Turbo distilled attention rejects the IP-Adapter projection
+            # with `mat1 and mat2 shapes cannot be multiplied`. Disable
+            # IP-Adapter for the rest of the session and retry once without.
+            if use_ref and "shapes cannot be multiplied" in str(e):
+                _disable_ip_adapter()
+                src = rf_generate_image(
+                    prompt, provider="sdxl_turbo", aspect_ratio="16:9", steps=steps,
+                )
+            else:
+                raise
         shutil.move(src, out_path)
     return _render
 
@@ -835,7 +966,8 @@ def _load_sdxl_batch_renderer():
         return None
 
     def _render_batch(prompts: List[str], out_paths: List[str], *,
-                      steps: Optional[int] = None) -> None:
+                      steps: Optional[int] = None,
+                      ref_images: Optional[List[Any]] = None) -> None:
         if len(prompts) != len(out_paths):
             raise ValueError("prompts / out_paths length mismatch")
         rf_load_sdxl_pipeline(None)
@@ -849,14 +981,38 @@ def _load_sdxl_batch_renderer():
         preset = _rf.IMAGE_STYLE_PRESETS.get("photorealistic", {"positive": "", "negative": ""})
         enriched = [f"{p}, {preset['positive']}" for p in prompts]
         negatives = [preset["negative"]] * len(prompts)
-        result = pipe(
-            prompt=enriched,
-            negative_prompt=negatives,
-            num_inference_steps=steps or 30,
-            guidance_scale=7.5,
-            width=ar["image_gen_width"],
-            height=ar["image_gen_height"],
-        )
+
+        kwargs: Dict[str, Any] = {
+            "prompt": enriched,
+            "negative_prompt": negatives,
+            "num_inference_steps": steps or 30,
+            "guidance_scale": 7.5,
+            "width": ar["image_gen_width"],
+            "height": ar["image_gen_height"],
+        }
+        # If any shot in the batch has a reference image, load IP-Adapter and
+        # pass a list matching the batch size. Diffusers accepts None per slot
+        # to mean "no reference for this prompt".
+        use_refs = (ref_images is not None
+                    and any(r is not None for r in ref_images)
+                    and _ensure_ip_adapter_loaded())
+        if use_refs:
+            if len(ref_images) != len(prompts):
+                raise ValueError("ref_images length must match prompts length")
+            kwargs["ip_adapter_image"] = ref_images
+
+        try:
+            result = pipe(**kwargs)
+        except RuntimeError as e:
+            # Turbo's distilled attention rejects the IP-Adapter projection.
+            # Disable IP-Adapter and retry without references.
+            if use_refs and "shapes cannot be multiplied" in str(e):
+                _disable_ip_adapter()
+                kwargs.pop("ip_adapter_image", None)
+                result = pipe(**kwargs)
+            else:
+                raise
+
         images = result.images
         if len(images) != len(out_paths):
             raise RuntimeError(f"SDXL returned {len(images)} images for {len(out_paths)} prompts")
@@ -1786,3 +1942,369 @@ def _chat(project: Project, stage_key: str, system: str, user: str, *,
             max_tokens=int(max_tokens * 1.5),
             want_json=want_json,
         )
+
+
+# ---------------------------------------------------------------------------
+# NEW STAGE — Character Portraits
+#
+# Renders one canonical portrait per named character before Shots runs. The
+# portraits are the reference images IP-Adapter conditions on during shot
+# render, so the same face lands in every shot that character appears in.
+# ---------------------------------------------------------------------------
+
+def run_character_portraits(project: Project) -> Dict[str, Any]:
+    """Produce one 1024x1024 canonical portrait per named character. Uses
+    the same SDXL wrapper as run_shots but with a portrait-tuned prompt.
+    Falls back to a placeholder card if SDXL is unavailable so downstream
+    stages can still key off `portraits[name] = path`."""
+    voice_cast = project.read_artifact("voice_cast") or {}
+    editor     = project.read_artifact("story_editor") or {}
+    screenwriter = project.read_artifact("screenwriter") or {}
+    cast = voice_cast.get("cast") or {}
+    script = editor.get("revised_fountain") or screenwriter.get("fountain") or ""
+    bios = _extract_character_bios(script)
+
+    portraits_dir = os.path.join(project.artifacts_dir, "portraits")
+    os.makedirs(portraits_dir, exist_ok=True)
+
+    # Build the character list from the cast (voice_cast is the source of truth
+    # for "named characters we care about"). Merge bios by name.
+    characters: List[Dict[str, str]] = []
+    seen = set()
+    for name in cast.keys():
+        clean = name.strip()
+        if not clean or clean.upper() in seen:
+            continue
+        seen.add(clean.upper())
+        # Bios are case-sensitive by capture; match case-insensitively.
+        bio = ""
+        for bio_name, bio_desc in bios.items():
+            if bio_name.upper() == clean.upper() or (
+                len(clean.split()) and clean.split()[0].upper() ==
+                (bio_name.split()[0].upper() if bio_name.split() else "")):
+                bio = bio_desc
+                break
+        characters.append({"name": clean, "bio": bio})
+
+    if not characters:
+        return {"portraits": {}, "note": "No named characters in voice_cast; nothing to portrait."}
+
+    render = _load_sdxl_renderer()
+    steps = _quality_to_steps(project.meta.config.quality)
+
+    style = project.meta.config.style
+    style_prefix = ("cinematic photorealistic headshot portrait, film grain"
+                    if style == "photoreal"
+                    else "stylized painterly headshot portrait, cinematic")
+
+    portraits: Dict[str, Dict[str, Any]] = {}
+    for char in characters:
+        name = char["name"]
+        bio = char["bio"] or "adult, contemporary casual clothing"
+        prompt = (f"{style_prefix}, {name}: {bio}, "
+                  f"neutral background, soft key light, 85mm lens, "
+                  f"looking slightly off camera, upper body")
+        safe_name = _safe_filename(name)
+        png_path = os.path.join(portraits_dir, f"{safe_name}.png")
+        rendered = False
+        err: Optional[str] = None
+        try:
+            if render is not None:
+                render(prompt, png_path, steps=steps)
+                rendered = True
+            else:
+                _placeholder_png(png_path, name)
+        except Exception as e:
+            logger.exception("Portrait render failed for %s", name)
+            err = str(e)
+            _placeholder_png(png_path, name)
+        portraits[name] = {
+            "path": os.path.relpath(png_path, project.dir).replace(os.sep, "/"),
+            "prompt": prompt,
+            "rendered": rendered,
+            "error": err,
+        }
+    return {"portraits": portraits}
+
+
+def _safe_filename(s: str) -> str:
+    import re as _re
+    return _re.sub(r"[^A-Za-z0-9_-]+", "_", s.strip()) or "unnamed"
+
+
+# ---------------------------------------------------------------------------
+# NEW STAGE — Colorist
+#
+# Applies a mood-driven color grade to the assembled cut. Uses ffmpeg curves
+# and eq filters (no LUT files needed) with per-scene knobs derived from
+# the breakdown's `mood` and `time_of_day` fields. Falls back to identity
+# grade if ffmpeg fails so downstream stages still have a video.
+# ---------------------------------------------------------------------------
+
+def run_colorist(project: Project) -> Dict[str, Any]:
+    """Grade the mixed cut in one ffmpeg pass. Currently applies a single
+    global grade derived from the film's dominant tone. A per-scene grade
+    with segmented filter graphs is a later iteration — this baseline lifts
+    the flat SDXL Turbo look immediately."""
+    mixer_art = project.read_artifact("mixer") or {}
+    editor_art = project.read_artifact("editor") or {}
+    breakdown = project.read_artifact("breakdown") or {}
+    producer  = project.read_artifact("producer") or {}
+
+    # Prefer the mixed cut (has audio) so the graded output keeps sound.
+    src_rel = mixer_art.get("output_path") or editor_art.get("output_path")
+    if not src_rel:
+        raise ValueError("No mixer/editor output to grade.")
+    src_abs = os.path.join(project.dir, src_rel)
+    if not os.path.exists(src_abs):
+        raise ValueError(f"Source cut missing at {src_abs}")
+
+    # Pick a grade from the film's tone + scene moods.
+    tone = ""
+    idx = int(producer.get("chosen_index", 0))
+    loglines = producer.get("loglines") or []
+    if 0 <= idx < len(loglines):
+        tone = str(loglines[idx].get("tone", "")).lower()
+
+    scenes = breakdown.get("scenes") or []
+    night_count = sum(1 for s in scenes if str(s.get("time_of_day", "")).lower() in ("night", "dusk"))
+    mostly_night = night_count > len(scenes) / 2 if scenes else False
+
+    grade = _pick_grade(tone, mostly_night)
+
+    out_abs = os.path.join(project.dir, "final_graded.mp4")
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", src_abs,
+        "-vf", grade["vf"],
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "copy",
+        out_abs,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"colorist ffmpeg failed:\n{(e.stderr or '')[-800:]}") from e
+
+    return {
+        "output_path": os.path.relpath(out_abs, project.dir).replace(os.sep, "/"),
+        "grade_name": grade["name"],
+        "grade_vf": grade["vf"],
+        "source": src_rel,
+    }
+
+
+def _pick_grade(tone: str, mostly_night: bool) -> Dict[str, str]:
+    """Return a named ffmpeg -vf grade suited to the film's tone. All grades
+    end with a slight contrast+saturation lift so SDXL Turbo output looks less
+    flat, then apply a color cast via colorbalance/curves."""
+    base_contrast = "eq=contrast=1.08:saturation=1.05"
+    if tone in ("thriller", "horror", "mystery") or mostly_night:
+        # Cold, teal shadows, crushed blacks
+        vf = f"{base_contrast}:brightness=-0.02,curves=b='0/0 0.5/0.55 1/1':r='0/0 0.5/0.42 1/0.95'"
+        return {"name": "cold_teal", "vf": vf}
+    if tone in ("comedy", "romance"):
+        # Warm, punchy, bright
+        vf = f"{base_contrast}:brightness=0.02,curves=r='0/0 0.5/0.55 1/1':b='0/0 0.5/0.45 1/0.95'"
+        return {"name": "warm_punchy", "vf": vf}
+    if tone in ("action", "sci-fi"):
+        # Teal-and-orange
+        vf = f"{base_contrast},colorbalance=rm=0.05:gm=-0.02:bm=-0.08:rs=-0.05:gs=0.02:bs=0.08"
+        return {"name": "teal_orange", "vf": vf}
+    if tone in ("drama", "documentary"):
+        # Muted, filmic
+        vf = "eq=contrast=1.05:saturation=0.9:gamma=1.02"
+        return {"name": "muted_filmic", "vf": vf}
+    # Default: mild lift
+    return {"name": "neutral_lift", "vf": base_contrast}
+
+
+# ---------------------------------------------------------------------------
+# NEW STAGE — Titles & Credits
+#
+# Generates a front title card (film title over the first shot's frame,
+# fading in and out) and an end credits scroll (crew and cast on black).
+# Prepends and appends to the graded (or mixed) cut.
+# ---------------------------------------------------------------------------
+
+def run_titles(project: Project) -> Dict[str, Any]:
+    """Prepend a title card and append an end credits scroll. The result
+    lands at `final.mp4` — the film's canonical export."""
+    colorist_art = project.read_artifact("colorist") or {}
+    mixer_art    = project.read_artifact("mixer") or {}
+    editor_art   = project.read_artifact("editor") or {}
+    producer     = project.read_artifact("producer") or {}
+    voice_cast   = project.read_artifact("voice_cast") or {}
+
+    src_rel = (colorist_art.get("output_path") or
+               mixer_art.get("output_path") or
+               editor_art.get("output_path"))
+    if not src_rel:
+        raise ValueError("No source cut to title.")
+    src_abs = os.path.join(project.dir, src_rel)
+    if not os.path.exists(src_abs):
+        raise ValueError(f"Source cut missing at {src_abs}")
+
+    # Pull the film title from the picked logline (falls back to project meta).
+    idx = int(producer.get("chosen_index", 0))
+    loglines = producer.get("loglines") or []
+    title = ""
+    tone = ""
+    if 0 <= idx < len(loglines):
+        title = str(loglines[idx].get("title", "")).strip()
+        tone = str(loglines[idx].get("tone", "")).strip()
+    if not title:
+        title = project.meta.title
+
+    # Cast lines for the end credits
+    cast = voice_cast.get("cast") or {}
+    cast_lines = [f"{name.strip()} .... {info.get('voice', 'Voice')}"
+                  for name, info in cast.items() if name.strip()]
+
+    titles_dir = os.path.join(project.artifacts_dir, "titles")
+    os.makedirs(titles_dir, exist_ok=True)
+    title_mp4 = os.path.join(titles_dir, "front_title.mp4")
+    credits_mp4 = os.path.join(titles_dir, "end_credits.mp4")
+
+    # Front title: 3s black card with the film title, fade in/out.
+    _render_title_card(title_mp4, title=title, subtitle=tone.upper() if tone else "", duration=3.0)
+
+    # End credits: 6s scroll of cast + a "made with" line.
+    credits_lines = ["CAST", ""] + cast_lines + ["", "MADE WITH", "STUDIOLITE FILM STUDIO"]
+    _render_credits(credits_mp4, lines=credits_lines, duration=6.0)
+
+    concat_txt = os.path.join(titles_dir, "concat.txt")
+    with open(concat_txt, "w", encoding="utf-8") as f:
+        for p in (title_mp4, src_abs, credits_mp4):
+            f.write(f"file '{p.replace(os.sep, '/')}'\n")
+
+    out_abs = os.path.join(project.dir, "final.mp4")
+    # Re-encode the concat so the front/body/end segments align on codec, fps,
+    # sample rate. Copy-mode would need identical stream params across all
+    # three which the title/credits synths don't guarantee.
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", concat_txt,
+        "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30",
+        "-fps_mode", "cfr",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+        out_abs,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"titles ffmpeg failed:\n{(e.stderr or '')[-800:]}") from e
+
+    return {
+        "output_path": os.path.relpath(out_abs, project.dir).replace(os.sep, "/"),
+        "title": title,
+        "cast_line_count": len(cast_lines),
+        "source": src_rel,
+    }
+
+
+def _render_title_card(out_path: str, *, title: str, subtitle: str, duration: float) -> None:
+    """Black 1280x720 card with the title fading in for the first second,
+    holding, then fading out. Optional subtitle underneath.
+
+    Uses drawtext's `textfile=` mechanism (no shell escaping headaches for
+    apostrophes) plus an explicit `fontfile=` (Windows ffmpeg has no
+    fontconfig by default). Runs with cwd = titles_dir so filter args stay
+    free of colons — Windows drive letters (`C:\\`) get parsed as filter
+    option separators."""
+    parent = os.path.dirname(out_path)
+    _ensure_titles_font(parent)
+    with open(os.path.join(parent, "_title.txt"), "w", encoding="utf-8") as f:
+        f.write(title)
+    if subtitle:
+        with open(os.path.join(parent, "_subtitle.txt"), "w", encoding="utf-8") as f:
+            f.write(subtitle)
+
+    fade_in_end = 1.0
+    hold_end = max(fade_in_end + 0.5, duration - 1.0)
+    vf = (
+        "drawtext=textfile=_title.txt:fontfile=font.ttf:fontcolor=white:fontsize=64:"
+        "x=(w-text_w)/2:y=(h-text_h)/2-40:"
+        f"alpha='if(lt(t,{fade_in_end}),t/{fade_in_end}"
+        f",if(lt(t,{hold_end}),1,max(0,({duration}-t)/1)))'"
+    )
+    if subtitle:
+        vf += (
+            ",drawtext=textfile=_subtitle.txt:fontfile=font.ttf:fontcolor=white:fontsize=22:"
+            "x=(w-text_w)/2:y=(h-text_h)/2+40:"
+            f"alpha='if(lt(t,{fade_in_end}),t/{fade_in_end}"
+            f",if(lt(t,{hold_end}),0.7,max(0,({duration}-t)/1)))'"
+        )
+    out_name = os.path.basename(out_path)
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", f"color=c=black:s=1280x720:d={duration}:r=30",
+        "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={duration}",
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-shortest",
+        out_name,
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True, cwd=parent)
+
+
+def _render_credits(out_path: str, *, lines: List[str], duration: float) -> None:
+    """Black card with lines rising slowly from the bottom over `duration`
+    seconds. Same textfile+fontfile+cwd strategy as _render_title_card."""
+    total_h = 720
+    line_gap = 40
+    stack_h = len(lines) * line_gap
+    speed = (total_h + stack_h) / duration  # pixels per second
+    parent = os.path.dirname(out_path)
+    _ensure_titles_font(parent)
+
+    parts: List[str] = []
+    for i, ln in enumerate(lines):
+        if not ln.strip():
+            continue
+        with open(os.path.join(parent, f"_credit_{i:02d}.txt"), "w", encoding="utf-8") as f:
+            f.write(ln)
+        parts.append(
+            f"drawtext=textfile=_credit_{i:02d}.txt:fontfile=font.ttf:fontcolor=white:fontsize=24:"
+            f"x=(w-text_w)/2:y=h+{i*line_gap}-t*{speed:.2f}"
+        )
+    vf = ",".join(parts) if parts else "null"
+    out_name = os.path.basename(out_path)
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", f"color=c=black:s=1280x720:d={duration}:r=30",
+        "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={duration}",
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-shortest",
+        out_name,
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True, cwd=parent)
+
+
+def _ensure_titles_font(dir_path: str) -> None:
+    """Copy a system font next to the title text files as `font.ttf` so
+    drawtext can find it without fontconfig. Reuses the copy if already
+    present. Tries a few common Windows fonts; falls through silently on
+    non-Windows (drawtext will fall back to any system font Fontconfig can
+    resolve)."""
+    dst = os.path.join(dir_path, "font.ttf")
+    if os.path.exists(dst):
+        return
+    for src in (r"C:\Windows\Fonts\arial.ttf",
+                r"C:\Windows\Fonts\segoeui.ttf",
+                r"C:\Windows\Fonts\calibri.ttf"):
+        if os.path.exists(src):
+            try:
+                shutil.copyfile(src, dst)
+                return
+            except Exception:
+                continue

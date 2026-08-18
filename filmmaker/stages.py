@@ -19,11 +19,14 @@ StageKey = Literal[
     "storyboard",
     "cinematographer",
     "voice_cast",
+    "character_portraits",
     "voice_actor",
     "shots",
     "editor",
     "composer",
     "mixer",
+    "colorist",
+    "titles",
 ]
 
 StageStatus = Literal[
@@ -50,18 +53,21 @@ class StageSpec:
 # Order matters — this is the pipeline. Dialogue voices and music score fold
 # into the final cut via the mixer stage, so the film comes out with sound.
 STAGES: List[StageSpec] = [
-    StageSpec("producer",       "Producer",         "Turns the brief into 3 loglines and picks one.",              gated_by_default=True),
-    StageSpec("screenwriter",   "Screenwriter",     "Writes a first-draft screenplay from the chosen logline."),
-    StageSpec("story_editor",   "Story Editor",     "Critiques and revises the draft."),
-    StageSpec("breakdown",      "Script Breakdown", "Parses the screenplay into scenes + metadata."),
-    StageSpec("storyboard",     "Storyboard",       "Expands each scene into a shot list."),
-    StageSpec("cinematographer","Cinematographer",  "Assigns framing / lens / camera move / duration per shot.",   gated_by_default=True),
-    StageSpec("voice_cast",     "Voice Casting",    "Assigns a Piper voice to each named character."),
-    StageSpec("voice_actor",    "Voice Actor",      "Piper-synthesizes each dialogue line as a wav clip."),
-    StageSpec("shots",          "Shot Generator",   "Renders one SDXL keyframe per shot."),
-    StageSpec("editor",         "Editor",           "Assembles keyframes into the silent cut."),
-    StageSpec("composer",       "Composer",         "LLM writes a score prompt; MusicGen renders one track for the cut."),
-    StageSpec("mixer",          "Mixer",            "Muxes video + dialogue + score with sidechain ducking under speech."),
+    StageSpec("producer",           "Producer",           "Turns the brief into 3 loglines and picks one.",              gated_by_default=True),
+    StageSpec("screenwriter",       "Screenwriter",       "Writes a first-draft screenplay from the chosen logline."),
+    StageSpec("story_editor",       "Story Editor",       "Critiques and revises the draft."),
+    StageSpec("breakdown",          "Script Breakdown",   "Parses the screenplay into scenes + metadata."),
+    StageSpec("storyboard",         "Storyboard",         "Expands each scene into a shot list."),
+    StageSpec("cinematographer",    "Cinematographer",    "Assigns framing / lens / camera move / duration per shot.",   gated_by_default=True),
+    StageSpec("voice_cast",         "Voice Casting",      "Assigns a Piper voice to each named character."),
+    StageSpec("character_portraits","Character Portraits","Renders one canonical portrait per named character; IP-Adapter reference for shot renders."),
+    StageSpec("voice_actor",        "Voice Actor",        "Piper-synthesizes each dialogue line as a wav clip."),
+    StageSpec("shots",              "Shot Generator",     "Renders one SDXL keyframe per shot, conditioned on the character portrait when the shot features a named character."),
+    StageSpec("editor",             "Editor",             "Assembles keyframes into the silent cut."),
+    StageSpec("composer",           "Composer",           "LLM writes a score prompt; MusicGen renders one track for the cut."),
+    StageSpec("mixer",              "Mixer",              "Muxes video + dialogue + score with sidechain ducking under speech."),
+    StageSpec("colorist",           "Colorist",           "Applies per-scene color grading LUT via ffmpeg."),
+    StageSpec("titles",             "Titles & Credits",   "Prepends title card and appends end credits."),
 ]
 
 STAGE_KEYS: List[StageKey] = [s.key for s in STAGES]

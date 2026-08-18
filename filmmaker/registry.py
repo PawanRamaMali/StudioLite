@@ -15,18 +15,21 @@ from .stages import StageKey
 StageRunner = Callable[[Project], Dict]
 
 RUNNERS: Dict[StageKey, StageRunner] = {
-    "producer":        agents.run_producer,
-    "screenwriter":    agents.run_screenwriter,
-    "story_editor":    agents.run_story_editor,
-    "breakdown":       agents.run_breakdown,
-    "storyboard":      agents.run_storyboard,
-    "cinematographer": agents.run_cinematographer,
-    "voice_cast":      agents.run_voice_cast,
-    "voice_actor":     agents.run_voice_actor,
-    "shots":           agents.run_shots,
-    "editor":          agents.run_editor,
-    "composer":        agents.run_composer,
-    "mixer":           agents.run_mixer,
+    "producer":            agents.run_producer,
+    "screenwriter":        agents.run_screenwriter,
+    "story_editor":        agents.run_story_editor,
+    "breakdown":           agents.run_breakdown,
+    "storyboard":          agents.run_storyboard,
+    "cinematographer":     agents.run_cinematographer,
+    "voice_cast":          agents.run_voice_cast,
+    "character_portraits": agents.run_character_portraits,
+    "voice_actor":         agents.run_voice_actor,
+    "shots":               agents.run_shots,
+    "editor":              agents.run_editor,
+    "composer":            agents.run_composer,
+    "mixer":               agents.run_mixer,
+    "colorist":            agents.run_colorist,
+    "titles":              agents.run_titles,
 }
 
 

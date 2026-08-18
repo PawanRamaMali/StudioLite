@@ -2634,6 +2634,23 @@ def _render_audioldm(prompt: str, out_path: str, *, duration_sec: int) -> None:
     pipe = AudioLDM2Pipeline.from_pretrained(
         "cvssp/audioldm2", torch_dtype=_torch.float16,
     ).to("cuda")
+
+    # transformers 5.x removed `_update_model_kwargs_for_generation` from the
+    # base model class, but AudioLDM2 still calls it. Rebind the newer
+    # public equivalent from the generation mixin (or a no-op if that's also
+    # missing) so the pipeline can complete a forward pass.
+    lm = getattr(pipe, "language_model", None)
+    if lm is not None and not hasattr(lm, "_update_model_kwargs_for_generation"):
+        # Try to borrow from GenerationMixin, else stub with identity behaviour.
+        try:
+            from transformers.generation.utils import GenerationMixin
+            lm._update_model_kwargs_for_generation = (
+                GenerationMixin._update_model_kwargs_for_generation.__get__(lm)
+            )
+        except Exception:
+            def _noop(outputs, model_kwargs, *args, **kwargs):
+                return model_kwargs
+            lm._update_model_kwargs_for_generation = _noop
     sr = 16000
     chunk_len_sec = 10
     remaining = duration_sec

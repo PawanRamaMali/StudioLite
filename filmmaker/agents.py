@@ -1049,20 +1049,32 @@ def _placeholder_png(path: str, label: str) -> None:
 def run_editor(project: Project) -> Dict[str, Any]:
     shots_art = project.read_artifact("shots") or {}
     cinema = project.read_artifact("cinematographer") or {}
+    motion_art = project.read_artifact("motion_shots") or {}
     shots: List[Dict[str, Any]] = shots_art.get("shots") or []
     if not shots:
         raise ValueError("No rendered shots to edit.")
 
     dp_by_scene: Dict[str, Dict[str, Any]] = cinema.get("scenes") or {}
 
+    # If motion_shots ran, prefer those mp4s over Ken Burns on the stills.
+    # Build a lookup: (scene_id, shot_id) -> abs mp4 path.
+    motion_by_key: Dict[str, str] = {}
+    for m in motion_art.get("motion_shots", []) or []:
+        p = m.get("path")
+        if not p:
+            continue
+        mp4_abs = os.path.join(project.dir, p)
+        if os.path.exists(mp4_abs):
+            motion_by_key[f"{m['scene_id']}::{m['shot_id']}"] = mp4_abs
+
     clips_dir = os.path.join(project.artifacts_dir, "editor_clips")
     os.makedirs(clips_dir, exist_ok=True)
 
     clip_paths: List[str] = []
+    motion_used = 0
+    kb_used = 0
     for i, s in enumerate(shots):
         img_abs = os.path.join(project.dir, s["path"])
-        # Any missing image? Skip rather than fail — the placeholder writer
-        # already covers the normal missing case.
         if not os.path.exists(img_abs):
             continue
         dur = max(1, int(s.get("duration_sec", 4) or 4))
@@ -1071,13 +1083,25 @@ def run_editor(project: Project) -> Dict[str, Any]:
         camera_move = ((dp_by_scene.get(scene_id) or {})
                        .get(shot_id) or {}).get("camera_move", "static")
         clip_out = os.path.join(clips_dir, f"{i:03d}_{scene_id}_{shot_id}.mp4")
+
+        motion_src = motion_by_key.get(f"{scene_id}::{shot_id}")
+        if motion_src is not None:
+            # Re-encode the Wan clip to our canonical 1280x720 30fps H.264
+            # container so the concat below can stream-copy without seams.
+            try:
+                _standardize_motion_clip(motion_src, clip_out, dur)
+                clip_paths.append(clip_out)
+                motion_used += 1
+                continue
+            except Exception:
+                logger.exception("Motion clip normalize failed for %s/%s; using Ken Burns",
+                                 scene_id, shot_id)
+        # Ken Burns fallback path.
         try:
             _render_kenburns_clip(img_abs, clip_out, dur, camera_move)
         except FileNotFoundError as e:
             raise RuntimeError("ffmpeg not on PATH — cannot assemble the final cut.") from e
         except Exception:
-            # Per-shot fallback: static concat-style clip so a broken zoompan
-            # graph doesn't nuke the whole render.
             logger.exception("Ken Burns render failed for %s/%s; using static clip",
                              scene_id, shot_id)
             try:
@@ -1086,6 +1110,7 @@ def run_editor(project: Project) -> Dict[str, Any]:
                 logger.exception("Static fallback failed for %s/%s; skipping", scene_id, shot_id)
                 continue
         clip_paths.append(clip_out)
+        kb_used += 1
 
     if not clip_paths:
         raise ValueError("No renderable shot images found.")
@@ -1095,9 +1120,10 @@ def run_editor(project: Project) -> Dict[str, Any]:
         for p in clip_paths:
             f.write(f"file '{p.replace(os.sep, '/')}'\n")
 
-    out_path = os.path.join(project.dir, "final.mp4")
-    # All per-shot clips share codec/pix_fmt/size/fps by construction, so
-    # concat with stream copy — no re-encode, no framerate rewriting.
+    # Editor writes to silent_cut.mp4 rather than final.mp4 so it doesn't
+    # collide with the titles stage output (which IS final.mp4). Every stage
+    # from here on reads editor.output_path explicitly.
+    out_path = os.path.join(project.dir, "silent_cut.mp4")
     cmd = [
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0",
@@ -1117,7 +1143,31 @@ def run_editor(project: Project) -> Dict[str, Any]:
         "output_path": os.path.relpath(out_path, project.dir).replace(os.sep, "/"),
         "duration_sec": total,
         "shot_count": len(shots),
+        "motion_clips_used": motion_used,
+        "kenburns_clips_used": kb_used,
     }
+
+
+def _standardize_motion_clip(src: str, dst: str, duration_sec: int) -> None:
+    """Re-encode a Wan I2V mp4 to the editor's canonical 1280x720 30fps H.264
+    (yuv420p) container so all clips concat with stream copy. Duration is
+    padded or trimmed to `duration_sec`."""
+    fps = 30
+    vf = ("scale=1280:720:force_original_aspect_ratio=decrease,"
+          "pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30")
+    cmd = [
+        "ffmpeg", "-y",
+        "-stream_loop", "-1",
+        "-i", src,
+        "-t", str(duration_sec),
+        "-vf", vf,
+        "-fps_mode", "cfr",
+        "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-an",
+        dst,
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
 
 
 def _render_kenburns_clip(img: str, out_path: str, duration_sec: int, camera_move: str) -> None:
@@ -1677,18 +1727,28 @@ def run_composer(project: Project) -> Dict[str, Any]:
 
 
 def _render_musicgen(prompt: str, out_path: str, *, duration_sec: int) -> None:
-    """Render a single MusicGen track. Uses facebook/musicgen-small — first
-    call pulls ~2 GB from HF Hub; subsequent calls hit the local cache."""
+    """Render a single MusicGen track. Tries the `medium` variant first for
+    a noticeably richer arrangement, falls back to `small` on any load error
+    (OOM, missing weights). First-time download is ~1.5-4 GB depending on
+    variant; subsequent runs hit the local cache."""
     import numpy as np
     import soundfile as sf
     from transformers import AutoProcessor, MusicgenForConditionalGeneration
     import torch as _torch
 
-    model_id = "facebook/musicgen-small"
-    processor = AutoProcessor.from_pretrained(model_id)
-    model = MusicgenForConditionalGeneration.from_pretrained(model_id)
-    device = "cuda" if _torch.cuda.is_available() else "cpu"
-    model = model.to(device)
+    for model_id in ("facebook/musicgen-medium", "facebook/musicgen-small"):
+        try:
+            processor = AutoProcessor.from_pretrained(model_id)
+            model = MusicgenForConditionalGeneration.from_pretrained(model_id)
+            device = "cuda" if _torch.cuda.is_available() else "cpu"
+            model = model.to(device)
+            logger.info("MusicGen loaded (%s) on %s", model_id, device)
+            break
+        except Exception as e:
+            logger.warning("MusicGen %s failed to load (%s); trying next tier", model_id, e)
+            model = None  # type: ignore
+    if model is None:
+        raise RuntimeError("No MusicGen variant could be loaded")
 
     # MusicGen small is capped at ~30 s per generate call. Chain multiple
     # generations back-to-back to cover the full film length. Overlap-request
@@ -1752,6 +1812,7 @@ def _crossfade_concat(chunks: List["np.ndarray"], *, sr: int, xfade_sec: float) 
 def run_mixer(project: Project) -> Dict[str, Any]:
     editor_art   = project.read_artifact("editor") or {}
     composer_art = project.read_artifact("composer") or {}
+    ambient_art  = project.read_artifact("ambient") or {}
     voice_art    = project.read_artifact("voice_actor") or {}
     shots_art    = project.read_artifact("shots") or {}
 
@@ -1801,12 +1862,17 @@ def run_mixer(project: Project) -> Dict[str, Any]:
     have_score = bool(score_abs and os.path.exists(score_abs))
     have_speech = bool(dialogue)
 
+    ambient_rel = ambient_art.get("path")
+    ambient_abs = os.path.join(project.dir, ambient_rel) if ambient_rel else None
+    have_ambient = bool(ambient_abs and os.path.exists(ambient_abs))
+
     out_abs = os.path.join(project.dir, "final_mixed.mp4")
     total_dur = float(editor_art.get("duration_sec", 0) or 0)
     _run_mixer_ffmpeg(
         silent_video=silent_abs,
         dialogue=dialogue,
         score=score_abs if have_score else None,
+        ambient=ambient_abs if have_ambient else None,
         out_path=out_abs,
         duration_sec=total_dur if total_dur > 0 else None,
     )
@@ -1814,26 +1880,36 @@ def run_mixer(project: Project) -> Dict[str, Any]:
         "output_path":  os.path.relpath(out_abs, project.dir).replace(os.sep, "/"),
         "has_dialogue": have_speech,
         "has_score":    have_score,
+        "has_ambient":  have_ambient,
         "dialogue_lines": len(dialogue),
     }
 
 
 def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
-                      score: Optional[str], out_path: str,
-                      duration_sec: Optional[float] = None) -> None:
-    """Build and run the ffmpeg mux. Handles four cases: dialogue+score,
-    dialogue only, score only, and neither (in which case we just remux
-    the silent cut through the same encoder settings for consistency)."""
+                      score: Optional[str], ambient: Optional[str] = None,
+                      out_path: str, duration_sec: Optional[float] = None) -> None:
+    """Build and run the ffmpeg mux. Four sources: silent video, optional
+    score, optional ambient bed, and 0..N dialogue wavs. Speech ducks the
+    score via sidechain compression. Ambient sits at a low fixed level and
+    is not ducked (it's atmospheric, not focal). Output length is pinned to
+    the video's duration."""
     inputs: List[str] = ["-i", silent_video]
+    input_idx = 1
+    score_idx: Optional[int] = None
     if score:
         inputs += ["-i", score]
+        score_idx = input_idx
+        input_idx += 1
+    ambient_idx: Optional[int] = None
+    if ambient:
+        inputs += ["-i", ambient]
+        ambient_idx = input_idx
+        input_idx += 1
+    dlg_start = input_idx
     for d in dialogue:
         inputs += ["-i", d["wav"]]
 
     filter_parts: List[str] = []
-    # Input indices — 0 = video; 1 = score (if any); N = dialogue lines after.
-    score_idx = 1 if score else None
-    dlg_start = (2 if score else 1)
 
     dlg_labels: List[str] = []
     for i, d in enumerate(dialogue):
@@ -1869,6 +1945,12 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
                                 if not sep
                                 else f"{mix_expr}{sep}anull[speech]")
 
+    # Ambient sits low, no ducking (it's atmosphere), stereo-normalised.
+    if ambient is not None:
+        filter_parts.append(
+            f"[{ambient_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.35[ambient_bus]"
+        )
+
     if score is not None:
         filter_parts.append(
             f"[{score_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.45[music_raw]"
@@ -1878,11 +1960,31 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
                 "[music_raw][speech_side]sidechaincompress="
                 "threshold=0.04:ratio=8:attack=5:release=250[music_ducked]"
             )
-            filter_parts.append("[speech][music_ducked]amix=inputs=2:normalize=0:duration=longest[audio]")
+            if ambient is not None:
+                filter_parts.append(
+                    "[speech][music_ducked][ambient_bus]amix=inputs=3:normalize=0:duration=longest[audio]"
+                )
+            else:
+                filter_parts.append(
+                    "[speech][music_ducked]amix=inputs=2:normalize=0:duration=longest[audio]"
+                )
         else:
-            filter_parts.append("[music_raw]anull[audio]")
+            # No speech to duck. If we have ambient, mix it under the music.
+            if ambient is not None:
+                filter_parts.append(
+                    "[music_raw][ambient_bus]amix=inputs=2:normalize=0:duration=longest[audio]"
+                )
+            else:
+                filter_parts.append("[music_raw]anull[audio]")
     elif dlg_labels:
-        filter_parts.append("[speech]anull[audio]")
+        if ambient is not None:
+            filter_parts.append(
+                "[speech][ambient_bus]amix=inputs=2:normalize=0:duration=longest[audio]"
+            )
+        else:
+            filter_parts.append("[speech]anull[audio]")
+    elif ambient is not None:
+        filter_parts.append("[ambient_bus]anull[audio]")
 
     # Pin the output length to the editor's video duration when we know it.
     # Without this, a short dialogue chain (e.g. one line early in the film)
@@ -2308,3 +2410,261 @@ def _ensure_titles_font(dir_path: str) -> None:
                 return
             except Exception:
                 continue
+
+
+# ---------------------------------------------------------------------------
+# NEW STAGE — Motion Shots (Phase B)
+#
+# Wan 2.1 T2V-1.3B turns each SDXL keyframe into a short motion clip. Uses
+# the image-to-video pathway when the keyframe exists so composition and
+# character look are preserved from the still. Falls back to a per-shot
+# Ken Burns clip on OOM or missing model.
+# ---------------------------------------------------------------------------
+
+_WAN_PIPE = None
+_WAN_STATE = "unknown"   # unknown | loaded | disabled
+
+
+_WAN_MODE = "unknown"  # unknown | i2v | t2v — set by _load_wan_pipeline
+
+
+def _load_wan_pipeline():
+    """Load a Wan 2.1 pipeline lazily. Prefers T2V-1.3B (~7 GB at fp16) which
+    fits alongside SDXL and MusicGen on a 12 GB card. The 14B I2V variant
+    needs ~28 GB and segfaults loading here, so we skip it entirely. Returns
+    the pipeline handle on success, None on any failure. Weights come from
+    the local HF cache — nothing is downloaded from here."""
+    global _WAN_PIPE, _WAN_STATE, _WAN_MODE
+    if _WAN_STATE == "disabled":
+        return None
+    if _WAN_STATE == "loaded":
+        return _WAN_PIPE
+    try:
+        import torch as _torch
+        from diffusers import WanPipeline
+        # T2V 1.3B — composition-conditions from the SDXL keyframe via the
+        # prompt only (the pipeline is text-to-video). We still get real
+        # motion; character consistency comes from the same descriptors
+        # baked into every shot prompt.
+        pipe = WanPipeline.from_pretrained(
+            "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+            torch_dtype=_torch.float16,
+        )
+        pipe.enable_model_cpu_offload()  # keeps peak VRAM under ~7 GB
+        pipe.set_progress_bar_config(disable=True)
+        _WAN_PIPE = pipe
+        _WAN_STATE = "loaded"
+        _WAN_MODE = "t2v"
+        logger.info("Wan T2V-1.3B pipeline loaded")
+        return pipe
+    except Exception as e:
+        _WAN_STATE = "disabled"
+        logger.warning("Wan pipeline unavailable (%s); motion_shots will fall back to Ken Burns", e)
+        return None
+
+
+def _disable_wan() -> None:
+    global _WAN_PIPE, _WAN_STATE
+    _WAN_PIPE = None
+    _WAN_STATE = "disabled"
+    try:
+        import torch as _torch
+        if _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
+    except Exception:
+        pass
+    logger.warning("Wan pipeline disabled for the rest of the session")
+
+
+def run_motion_shots(project: Project) -> Dict[str, Any]:
+    """For each shot with a rendered SDXL keyframe, generate a short motion
+    clip conditioned on the keyframe. On OOM or missing model, fall back to
+    Ken Burns pan on the still. Output is `artifacts/motion/<sid>_<shot>.mp4`
+    per shot; the Editor picks these up and concatenates them."""
+    shots_art = project.read_artifact("shots") or {}
+    cinema    = project.read_artifact("cinematographer") or {}
+    shots: List[Dict[str, Any]] = shots_art.get("shots") or []
+    dp_by_scene: Dict[str, Dict[str, Any]] = cinema.get("scenes") or {}
+
+    motion_dir = os.path.join(project.artifacts_dir, "motion")
+    os.makedirs(motion_dir, exist_ok=True)
+
+    pipe = _load_wan_pipeline()
+    used_wan = 0
+    total = len(shots)
+    project.append_event({"type": "motion_progress", "done": 0, "total": total})
+
+    result: List[Dict[str, Any]] = []
+    for i, s in enumerate(shots):
+        sid = s["scene_id"]; shot_id = s["shot_id"]
+        keyframe_abs = os.path.join(project.dir, s["path"])
+        dur = max(2, int(s.get("duration_sec", 4) or 4))
+        # Motion clip length capped at 5s — Wan gets slow past there and the
+        # editor tiles multiple clips per shot only when the shot itself
+        # runs longer than the clip.
+        clip_dur = min(dur, 5)
+        mp4_abs = os.path.join(motion_dir, f"{sid}_{shot_id}.mp4")
+        dp_shot = (dp_by_scene.get(sid) or {}).get(shot_id, {})
+        move = dp_shot.get("camera_move", "static")
+
+        rendered = False
+        error: Optional[str] = None
+        if pipe is not None and os.path.exists(keyframe_abs):
+            try:
+                _render_wan_i2v(
+                    pipe, keyframe_abs, mp4_abs,
+                    prompt=s.get("prompt", "") or "",
+                    duration_sec=clip_dur,
+                    camera_move=move,
+                )
+                rendered = True
+                used_wan += 1
+            except Exception as e:
+                logger.exception("Wan I2V failed for %s/%s", sid, shot_id)
+                error = str(e)
+                if "out of memory" in str(e).lower():
+                    _disable_wan()
+                    pipe = None
+        if not rendered:
+            try:
+                _render_kenburns_clip(keyframe_abs, mp4_abs, dur, move)
+            except Exception as e:
+                logger.exception("Ken Burns fallback failed for %s/%s", sid, shot_id)
+                error = f"{error}; kb fallback: {e}" if error else str(e)
+
+        result.append({
+            "scene_id": sid, "shot_id": shot_id,
+            "path": os.path.relpath(mp4_abs, project.dir).replace(os.sep, "/"),
+            "duration_sec": dur,
+            "backend": "wan" if rendered else "kenburns",
+            "rendered": rendered,
+            "error": error,
+        })
+        project.append_event({"type": "motion_progress", "done": i + 1, "total": total,
+                              "backend": ("wan" if rendered else "kenburns")})
+
+    return {"motion_shots": result, "wan_count": used_wan, "kb_count": total - used_wan}
+
+
+def _render_wan_i2v(pipe, image_path: str, out_path: str, *,
+                    prompt: str, duration_sec: int, camera_move: str) -> None:
+    """Generate a motion clip for the shot. The T2V pipeline can't take the
+    keyframe as input, so we lean on the prompt (which is the same prompt
+    that produced the keyframe, plus a motion hint from camera_move) to
+    reproduce a similar frame."""
+    import torch as _torch
+    from diffusers.utils import export_to_video
+    motion_hint = {
+        "pan":     "smooth horizontal camera pan",
+        "dolly":   "slow dolly-in, subject gets closer",
+        "crane":   "camera cranes upward",
+        "handheld":"subtle handheld shake",
+        "whip":    "fast whip pan",
+        "static":  "gentle atmospheric motion, minimal camera",
+    }.get(camera_move, "gentle atmospheric motion")
+    full_prompt = f"{prompt}. {motion_hint}."
+    fps = 15
+    num_frames = duration_sec * fps
+    with _torch.no_grad():
+        frames = pipe(
+            prompt=full_prompt,
+            height=480, width=832,
+            num_frames=num_frames,
+            guidance_scale=5.0,
+            num_inference_steps=15,
+        ).frames[0]
+    export_to_video(frames, out_path, fps=fps)
+
+
+# ---------------------------------------------------------------------------
+# NEW STAGE — Ambient Bed (Phase C)
+#
+# AudioLDM 2 renders a per-scene atmosphere loop (rain, café hum, night wind).
+# Layered under dialogue and score by the mixer. On any failure the stage
+# writes a silent wav so the mixer has something to key off.
+# ---------------------------------------------------------------------------
+
+def run_ambient(project: Project) -> Dict[str, Any]:
+    """Generate a single film-length ambient bed keyed off the film's tone
+    and location moods. Uses AudioLDM 2 if importable; falls back to
+    silence otherwise. Mixer layers it under dialogue and score."""
+    editor_art = project.read_artifact("editor") or {}
+    breakdown  = project.read_artifact("breakdown") or {}
+    producer   = project.read_artifact("producer") or {}
+    total_dur = int(editor_art.get("duration_sec", 0) or 0)
+    if total_dur <= 0:
+        raise ValueError("Editor artifact missing duration_sec")
+
+    # Derive an ambience prompt from tone + moods.
+    tone = ""
+    idx = int(producer.get("chosen_index", 0))
+    loglines = producer.get("loglines") or []
+    if 0 <= idx < len(loglines):
+        tone = str(loglines[idx].get("tone", "")).lower()
+    scenes = breakdown.get("scenes") or []
+    moods = " ".join(str(s.get("mood", "")) for s in scenes)[:200]
+    locations = " ".join(str(s.get("location", "")).replace("-", " ") for s in scenes)[:200]
+    prompt = f"{tone} film ambience, {moods}, {locations}, subtle atmospheric background".strip(", ")
+
+    out_abs = os.path.join(project.artifacts_dir, "ambient.wav")
+    ok = False; err: Optional[str] = None
+    try:
+        _render_audioldm(prompt, out_abs, duration_sec=total_dur)
+        ok = True
+    except Exception as e:
+        logger.warning("AudioLDM unavailable/failed (%s); ambient will be silent", e)
+        err = str(e)
+        _write_silent_wav(out_abs, float(total_dur))
+    return {
+        "prompt": prompt,
+        "path": os.path.relpath(out_abs, project.dir).replace(os.sep, "/"),
+        "duration_sec": total_dur,
+        "rendered": ok,
+        "error": err,
+    }
+
+
+def _render_audioldm(prompt: str, out_path: str, *, duration_sec: int) -> None:
+    """Render a single ambient clip. AudioLDM 2 tops out at ~10s per call;
+    we chain multiple with a short crossfade to cover the film's length."""
+    import numpy as np
+    import soundfile as sf
+    import torch as _torch
+    from diffusers import AudioLDM2Pipeline
+    pipe = AudioLDM2Pipeline.from_pretrained(
+        "cvssp/audioldm2", torch_dtype=_torch.float16,
+    ).to("cuda")
+    sr = 16000
+    chunk_len_sec = 10
+    remaining = duration_sec
+    chunks: List = []
+    while remaining > 0:
+        this = min(chunk_len_sec, remaining)
+        out = pipe(
+            prompt=prompt,
+            negative_prompt="dialogue, speech, vocals",
+            num_inference_steps=25,
+            audio_length_in_s=this,
+        ).audios[0]
+        chunks.append(np.asarray(out, dtype=np.float32))
+        remaining -= this
+
+    if len(chunks) == 1:
+        combined = chunks[0]
+    else:
+        xfade = int(0.5 * sr)
+        combined = chunks[0].copy()
+        for nxt in chunks[1:]:
+            n = min(xfade, len(combined), len(nxt))
+            t = np.linspace(0, np.pi / 2, n, dtype=np.float32)
+            fade_out = np.cos(t); fade_in = np.sin(t)
+            seam = combined[-n:] * fade_out + nxt[:n] * fade_in
+            combined = np.concatenate([combined[:-n], seam, nxt[n:]])
+
+    # Keep the ambient quiet so it doesn't step on dialogue and score.
+    peak = float(np.max(np.abs(combined))) or 1.0
+    combined = (combined / peak) * 0.35
+    max_samples = int(duration_sec * sr)
+    if len(combined) > max_samples:
+        combined = combined[:max_samples]
+    sf.write(out_path, combined, sr)

@@ -4421,6 +4421,7 @@ def _film_meta_dict(project) -> Dict:
             "llm_host": m.config.llm_host,
             "style": m.config.style,
             "target_minutes": m.config.target_minutes,
+            "quality": m.config.quality,
             "per_stage": m.config.per_stage,
         },
     }

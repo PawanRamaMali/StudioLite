@@ -341,7 +341,7 @@ def run_storyboard(project: Project) -> Dict[str, Any]:
             "screenplay": scene_scripts.get(sid) or full_screenplay,
         }, ensure_ascii=False, indent=2)
         raw = _chat(project, "storyboard", _STORYBOARD_SYSTEM, user_msg,
-                    want_json=True, temperature=0.4, max_tokens=3000)
+                    want_json=True, temperature=0.4, max_tokens=5000)
         data = llm.parse_json(raw)
         shots = data.get("shots") or []
         norm: List[Dict[str, Any]] = []
@@ -473,7 +473,7 @@ def run_cinematographer(project: Project) -> Dict[str, Any]:
             "shots": shots,
         }, ensure_ascii=False, indent=2)
         raw = _chat(project, "cinematographer", _CINEMATOGRAPHER_SYSTEM, user_msg,
-                    want_json=True, temperature=0.4, max_tokens=2500)
+                    want_json=True, temperature=0.4, max_tokens=8000)
         data = llm.parse_json(raw)
         by_id: Dict[str, Any] = {}
         for item in data.get("shots") or []:
@@ -1736,10 +1736,24 @@ def _render_musicgen(prompt: str, out_path: str, *, duration_sec: int) -> None:
     from transformers import AutoProcessor, MusicgenForConditionalGeneration
     import torch as _torch
 
-    for model_id in ("facebook/musicgen-medium", "facebook/musicgen-small"):
+    # Try local caches ONLY — don't hit HF Hub live, unauthenticated pulls
+    # are throttled to a crawl and can hang a run for hours waiting on a
+    # 3+ GB model. Anyone who wants medium/large should pull it out of
+    # band with `huggingface-cli download`.
+    from pathlib import Path
+    cache_root = Path(os.environ.get("HF_HOME") or
+                      Path.home() / ".cache" / "huggingface" / "hub")
+    def _cached(model_id: str) -> bool:
+        return (cache_root / f"models--{model_id.replace('/', '--')}" / "snapshots").exists()
+    candidates = [m for m in ("facebook/musicgen-medium", "facebook/musicgen-small")
+                  if _cached(m)]
+    if not candidates:
+        candidates = ["facebook/musicgen-small"]  # last-ditch download attempt
+    for model_id in candidates:
         try:
-            processor = AutoProcessor.from_pretrained(model_id)
-            model = MusicgenForConditionalGeneration.from_pretrained(model_id)
+            processor = AutoProcessor.from_pretrained(model_id, local_files_only=_cached(model_id))
+            model = MusicgenForConditionalGeneration.from_pretrained(
+                model_id, local_files_only=_cached(model_id))
             device = "cuda" if _torch.cuda.is_available() else "cpu"
             model = model.to(device)
             logger.info("MusicGen loaded (%s) on %s", model_id, device)
@@ -2476,11 +2490,20 @@ def _disable_wan() -> None:
     logger.warning("Wan pipeline disabled for the rest of the session")
 
 
+_MOTION_SHOTS_MAX = 40   # Wan runs ~260s per 3s clip on 12GB; 40+ shots means
+                          # 3+ hours of pure motion render. Cap the count and let
+                          # the excess ride Ken Burns, else this stage never ends.
+
+
 def run_motion_shots(project: Project) -> Dict[str, Any]:
     """For each shot with a rendered SDXL keyframe, generate a short motion
     clip conditioned on the keyframe. On OOM or missing model, fall back to
     Ken Burns pan on the still. Output is `artifacts/motion/<sid>_<shot>.mp4`
-    per shot; the Editor picks these up and concatenates them."""
+    per shot; the Editor picks these up and concatenates them.
+
+    If the film has more shots than `_MOTION_SHOTS_MAX`, motion generation
+    is skipped entirely — Ken Burns on every shot in the editor is a much
+    faster and still-decent fallback than a partial motion render."""
     shots_art = project.read_artifact("shots") or {}
     cinema    = project.read_artifact("cinematographer") or {}
     shots: List[Dict[str, Any]] = shots_art.get("shots") or []
@@ -2488,6 +2511,19 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
 
     motion_dir = os.path.join(project.artifacts_dir, "motion")
     os.makedirs(motion_dir, exist_ok=True)
+
+    if len(shots) > _MOTION_SHOTS_MAX:
+        logger.warning(
+            "Skipping motion_shots — %d shots would take ~%d minutes on 12GB. "
+            "Editor will use Ken Burns on stills instead.",
+            len(shots), (len(shots) * 260) // 60,
+        )
+        return {
+            "motion_shots": [],
+            "wan_count": 0,
+            "kb_count": 0,
+            "skipped_reason": f"{len(shots)} shots > cap {_MOTION_SHOTS_MAX}",
+        }
 
     pipe = _load_wan_pipeline()
     used_wan = 0

@@ -4422,6 +4422,7 @@ def _film_meta_dict(project) -> Dict:
             "style": m.config.style,
             "target_minutes": m.config.target_minutes,
             "quality": m.config.quality,
+            "sdxl_variant": m.config.sdxl_variant,
             "per_stage": m.config.per_stage,
         },
     }

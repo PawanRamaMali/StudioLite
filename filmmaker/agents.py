@@ -550,9 +550,12 @@ def run_shots(project: Project) -> Dict[str, Any]:
     dp_by_scene = cinema.get("scenes") or {}
     style = project.meta.config.style
     steps = _quality_to_steps(project.meta.config.quality)
+    variant = project.meta.config.sdxl_variant
 
-    render_one = _load_sdxl_renderer()
-    render_batch = _load_sdxl_batch_renderer()
+    render_one = _load_sdxl_renderer(variant=variant)
+    # Batch renderer is Turbo-only for now (SDXL base uses CPU offload; batching
+    # forces the whole pipeline back to GPU and pushes us into OOM territory).
+    render_batch = _load_sdxl_batch_renderer() if variant == "turbo" else None
 
     # Parse character bios from the screenplay so we can bake them into
     # every shot prompt where the character appears. Same physical descriptors
@@ -913,10 +916,62 @@ def _disable_ip_adapter() -> None:
     logger.warning("IP-Adapter disabled for the rest of the session")
 
 
-def _load_sdxl_renderer():
+_SDXL_BASE_PIPE = None  # module-level cache so we load SDXL base once per session
+
+
+def _load_sdxl_base_pipeline():
+    """Load `stabilityai/stable-diffusion-xl-base-1.0` on demand. Returns the
+    diffusers pipeline or None if unavailable. Uses fp16 + CPU offload so it
+    fits alongside Ollama and Wan on a 12GB card."""
+    global _SDXL_BASE_PIPE
+    if _SDXL_BASE_PIPE is not None:
+        return _SDXL_BASE_PIPE
+    try:
+        import torch as _torch
+        from diffusers import StableDiffusionXLPipeline
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            torch_dtype=_torch.float16,
+            variant="fp16",
+        )
+        pipe.enable_model_cpu_offload()
+        pipe.set_progress_bar_config(disable=True)
+        _SDXL_BASE_PIPE = pipe
+        logger.info("SDXL 1.0 base pipeline loaded (fp16 + CPU offload)")
+        return pipe
+    except Exception as e:
+        logger.warning("SDXL base unavailable (%s); falling back to reelforge Turbo path", e)
+        return None
+
+
+def _load_sdxl_renderer(variant: str = "turbo"):
     """Return a callable `(prompt, out_path, *, steps=None, ref_image=None) -> None`,
-    or None if unavailable. When `ref_image` is a PIL image, IP-Adapter is loaded
-    (once) on the pipeline and the image is passed as the character reference."""
+    or None if unavailable. `variant` selects the SDXL flavour:
+    - "turbo": reelforge SDXL Turbo (fast, distilled — faces are flat)
+    - "base":  SDXL 1.0 base at 30+ steps (slow, much higher fidelity)"""
+    if variant == "base":
+        pipe = _load_sdxl_base_pipeline()
+        if pipe is None:
+            variant = "turbo"  # fall through
+        else:
+            def _render_base(prompt: str, out_path: str, *,
+                             steps: Optional[int] = None, ref_image=None) -> None:
+                import torch as _torch
+                # SDXL base without a refiner needs 30+ steps to look good.
+                # Bake in a generic quality suffix so callers don't have to.
+                enriched = (prompt + ", cinematic, sharp focus, high detail, film still")
+                negative = ("low quality, distorted, deformed hands, extra fingers, "
+                            "blurry, mangled face, watermark, text")
+                with _torch.no_grad():
+                    img = pipe(
+                        prompt=enriched, negative_prompt=negative,
+                        num_inference_steps=max(30, steps or 30),
+                        guidance_scale=7.5, width=1024, height=576,
+                    ).images[0]
+                img.save(out_path, "PNG")
+            return _render_base
+
+    # Turbo path via reelforge.
     try:
         from reelforge import rf_generate_image
         import reelforge as _rf
@@ -2105,7 +2160,7 @@ def run_character_portraits(project: Project) -> Dict[str, Any]:
     if not characters:
         return {"portraits": {}, "note": "No named characters in voice_cast; nothing to portrait."}
 
-    render = _load_sdxl_renderer()
+    render = _load_sdxl_renderer(variant=project.meta.config.sdxl_variant)
     steps = _quality_to_steps(project.meta.config.quality)
 
     style = project.meta.config.style
@@ -2442,6 +2497,76 @@ _WAN_STATE = "unknown"   # unknown | loaded | disabled
 _WAN_MODE = "unknown"  # unknown | i2v | t2v — set by _load_wan_pipeline
 
 
+_SVD_PIPE = None
+_SVD_STATE = "unknown"   # unknown | loaded | disabled
+
+
+def _load_svd_pipeline():
+    """Load Stable Video Diffusion img2vid_xt. ~10 GB weights + fp16 fits
+    on 12 GB with CPU offload. Takes a still image and produces ~4 seconds
+    of true motion. This is the primary motion backend when a keyframe
+    exists — Wan T2V is a fallback that discards composition."""
+    global _SVD_PIPE, _SVD_STATE
+    if _SVD_STATE == "disabled":
+        return None
+    if _SVD_STATE == "loaded":
+        return _SVD_PIPE
+    try:
+        import torch as _torch
+        from diffusers import StableVideoDiffusionPipeline
+        pipe = StableVideoDiffusionPipeline.from_pretrained(
+            "stabilityai/stable-video-diffusion-img2vid-xt",
+            torch_dtype=_torch.float16,
+            variant="fp16",
+        )
+        pipe.enable_model_cpu_offload()
+        pipe.set_progress_bar_config(disable=True)
+        _SVD_PIPE = pipe
+        _SVD_STATE = "loaded"
+        logger.info("SVD img2vid-xt pipeline loaded (fp16 + CPU offload)")
+        return pipe
+    except Exception as e:
+        _SVD_STATE = "disabled"
+        logger.warning("SVD unavailable (%s); motion_shots will use Wan T2V or Ken Burns", e)
+        return None
+
+
+def _disable_svd() -> None:
+    global _SVD_PIPE, _SVD_STATE
+    _SVD_PIPE = None
+    _SVD_STATE = "disabled"
+    try:
+        import torch as _torch
+        if _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def _render_svd_i2v(pipe, image_path: str, out_path: str, *,
+                    duration_sec: int) -> None:
+    """Generate a motion clip from the SDXL keyframe. SVD is fixed-format:
+    1024x576 output, 25 frames at 6-7 fps for a ~4-second clip. We over-
+    generate then trim/tile to the shot's `duration_sec` in the Editor."""
+    import torch as _torch
+    from PIL import Image as _PILImage
+    from diffusers.utils import export_to_video
+    img = _PILImage.open(image_path).convert("RGB").resize((1024, 576))
+    # motion_bucket_id controls motion intensity (127 = medium; 180 = punchier).
+    # noise_aug_strength = adds a hair of image noise which helps SVD move
+    # rather than stay locked to the still.
+    with _torch.no_grad():
+        frames = pipe(
+            img,
+            num_frames=25,
+            fps=7,
+            motion_bucket_id=150,
+            noise_aug_strength=0.05,
+            num_inference_steps=25,
+        ).frames[0]
+    export_to_video(frames, out_path, fps=7)
+
+
 def _load_wan_pipeline():
     """Load a Wan 2.1 pipeline lazily. Prefers T2V-1.3B (~7 GB at fp16) which
     fits alongside SDXL and MusicGen on a 12 GB card. The 14B I2V variant
@@ -2490,20 +2615,17 @@ def _disable_wan() -> None:
     logger.warning("Wan pipeline disabled for the rest of the session")
 
 
-_MOTION_SHOTS_MAX = 40   # Wan runs ~260s per 3s clip on 12GB; 40+ shots means
-                          # 3+ hours of pure motion render. Cap the count and let
-                          # the excess ride Ken Burns, else this stage never ends.
+_MOTION_SHOTS_MAX_WAN = 40   # Wan T2V is ~260s per 3s clip. Cap when Wan is
+                              # the only motion backend so long films finish.
 
 
 def run_motion_shots(project: Project) -> Dict[str, Any]:
     """For each shot with a rendered SDXL keyframe, generate a short motion
-    clip conditioned on the keyframe. On OOM or missing model, fall back to
-    Ken Burns pan on the still. Output is `artifacts/motion/<sid>_<shot>.mp4`
-    per shot; the Editor picks these up and concatenates them.
+    clip. Tries SVD img2vid_xt first (takes the keyframe as input, preserves
+    composition, ~50-90s per 4s clip on 12GB), falls back to Wan T2V (text
+    only, ~260s), falls back to Ken Burns (instant).
 
-    If the film has more shots than `_MOTION_SHOTS_MAX`, motion generation
-    is skipped entirely — Ken Burns on every shot in the editor is a much
-    faster and still-decent fallback than a partial motion render."""
+    The Wan-only cap of 40 shots only applies when SVD isn't available."""
     shots_art = project.read_artifact("shots") or {}
     cinema    = project.read_artifact("cinematographer") or {}
     shots: List[Dict[str, Any]] = shots_art.get("shots") or []
@@ -2512,21 +2634,26 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
     motion_dir = os.path.join(project.artifacts_dir, "motion")
     os.makedirs(motion_dir, exist_ok=True)
 
-    if len(shots) > _MOTION_SHOTS_MAX:
-        logger.warning(
-            "Skipping motion_shots — %d shots would take ~%d minutes on 12GB. "
-            "Editor will use Ken Burns on stills instead.",
-            len(shots), (len(shots) * 260) // 60,
-        )
-        return {
-            "motion_shots": [],
-            "wan_count": 0,
-            "kb_count": 0,
-            "skipped_reason": f"{len(shots)} shots > cap {_MOTION_SHOTS_MAX}",
-        }
+    svd_pipe = _load_svd_pipeline()
+    wan_pipe = None
+    if svd_pipe is None:
+        # No SVD? Try Wan T2V, but respect the cap because it's slow.
+        if len(shots) > _MOTION_SHOTS_MAX_WAN:
+            logger.warning(
+                "Skipping motion_shots — SVD unavailable and %d shots is over "
+                "the Wan-only cap of %d. Editor will use Ken Burns.",
+                len(shots), _MOTION_SHOTS_MAX_WAN,
+            )
+            return {
+                "motion_shots": [],
+                "svd_count": 0, "wan_count": 0, "kb_count": 0,
+                "skipped_reason": f"no SVD, {len(shots)} > wan cap {_MOTION_SHOTS_MAX_WAN}",
+            }
+        wan_pipe = _load_wan_pipeline()
 
-    pipe = _load_wan_pipeline()
+    used_svd = 0
     used_wan = 0
+    used_kb = 0
     total = len(shots)
     project.append_event({"type": "motion_progress", "done": 0, "total": total})
 
@@ -2535,51 +2662,70 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
         sid = s["scene_id"]; shot_id = s["shot_id"]
         keyframe_abs = os.path.join(project.dir, s["path"])
         dur = max(2, int(s.get("duration_sec", 4) or 4))
-        # Motion clip length capped at 5s — Wan gets slow past there and the
-        # editor tiles multiple clips per shot only when the shot itself
-        # runs longer than the clip.
         clip_dur = min(dur, 5)
         mp4_abs = os.path.join(motion_dir, f"{sid}_{shot_id}.mp4")
         dp_shot = (dp_by_scene.get(sid) or {}).get(shot_id, {})
         move = dp_shot.get("camera_move", "static")
 
         rendered = False
+        backend = "kenburns"
         error: Optional[str] = None
-        if pipe is not None and os.path.exists(keyframe_abs):
+
+        # Try SVD first (best quality, keyframe-conditioned)
+        if svd_pipe is not None and os.path.exists(keyframe_abs):
+            try:
+                _render_svd_i2v(svd_pipe, keyframe_abs, mp4_abs, duration_sec=clip_dur)
+                rendered = True; backend = "svd"; used_svd += 1
+            except Exception as e:
+                logger.exception("SVD failed for %s/%s", sid, shot_id)
+                error = f"svd: {e}"
+                if "out of memory" in str(e).lower():
+                    _disable_svd()
+                    svd_pipe = None
+
+        # Fallback to Wan T2V (text-only, discards keyframe)
+        if not rendered and wan_pipe is not None and os.path.exists(keyframe_abs):
             try:
                 _render_wan_i2v(
-                    pipe, keyframe_abs, mp4_abs,
+                    wan_pipe, keyframe_abs, mp4_abs,
                     prompt=s.get("prompt", "") or "",
-                    duration_sec=clip_dur,
-                    camera_move=move,
+                    duration_sec=clip_dur, camera_move=move,
                 )
-                rendered = True
-                used_wan += 1
+                rendered = True; backend = "wan"; used_wan += 1
+                error = None
             except Exception as e:
                 logger.exception("Wan I2V failed for %s/%s", sid, shot_id)
-                error = str(e)
+                error = f"{error or ''}; wan: {e}"
                 if "out of memory" in str(e).lower():
                     _disable_wan()
-                    pipe = None
+                    wan_pipe = None
+
+        # Final fallback: Ken Burns on the still
         if not rendered:
             try:
                 _render_kenburns_clip(keyframe_abs, mp4_abs, dur, move)
+                backend = "kenburns"; used_kb += 1
             except Exception as e:
                 logger.exception("Ken Burns fallback failed for %s/%s", sid, shot_id)
-                error = f"{error}; kb fallback: {e}" if error else str(e)
+                error = f"{error or ''}; kb: {e}"
 
         result.append({
             "scene_id": sid, "shot_id": shot_id,
             "path": os.path.relpath(mp4_abs, project.dir).replace(os.sep, "/"),
             "duration_sec": dur,
-            "backend": "wan" if rendered else "kenburns",
+            "backend": backend,
             "rendered": rendered,
             "error": error,
         })
-        project.append_event({"type": "motion_progress", "done": i + 1, "total": total,
-                              "backend": ("wan" if rendered else "kenburns")})
+        project.append_event({"type": "motion_progress", "done": i + 1,
+                              "total": total, "backend": backend})
 
-    return {"motion_shots": result, "wan_count": used_wan, "kb_count": total - used_wan}
+    return {
+        "motion_shots": result,
+        "svd_count": used_svd,
+        "wan_count": used_wan,
+        "kb_count": used_kb,
+    }
 
 
 def _render_wan_i2v(pipe, image_path: str, out_path: str, *,

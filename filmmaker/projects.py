@@ -39,4 +39,5 @@ def _config_from_dict(d: Dict[str, Any]) -> ProjectConfig:
         style=str(d.get("style", "stylized")),
         target_minutes=float(d.get("target_minutes", 2.0)),
         quality=str(d.get("quality", "standard")).lower(),
+        sdxl_variant=str(d.get("sdxl_variant", "turbo")).lower(),
     )

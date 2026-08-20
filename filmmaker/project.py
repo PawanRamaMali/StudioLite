@@ -38,6 +38,10 @@ class ProjectConfig:
     # Values: "draft" (fast iteration), "standard" (default),
     # "high" (finishing look), "ultra" (final render).
     quality: str = "standard"
+    # SDXL variant. "turbo" is fast (12 steps, distilled) but faces come
+    # out flat and hands often mangle. "base" uses SDXL 1.0 (30-50 steps,
+    # much higher fidelity, slower). "flux" is not wired yet.
+    sdxl_variant: str = "turbo"
 
 
 @dataclass
@@ -285,6 +289,7 @@ def _meta_from_json(d: Dict[str, Any]) -> ProjectMeta:
         style=cfg_raw.get("style", "stylized"),
         target_minutes=float(cfg_raw.get("target_minutes", 2.0)),
         quality=str(cfg_raw.get("quality", "standard")).lower(),
+        sdxl_variant=str(cfg_raw.get("sdxl_variant", "turbo")).lower(),
     )
     return ProjectMeta(
         id=d["id"],

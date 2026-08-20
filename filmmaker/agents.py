@@ -2514,11 +2514,31 @@ def _load_svd_pipeline():
     try:
         import torch as _torch
         from diffusers import StableVideoDiffusionPipeline
-        pipe = StableVideoDiffusionPipeline.from_pretrained(
+        # local_files_only avoids Hub round-trips for non-fp16 duplicate
+        # files whose absence would stall a fresh cache anonymously. Once
+        # the variant shards are on disk they're all we need.
+        #
+        # Prefer the smaller `stable-video-diffusion-img2vid` (14-frame)
+        # over the `img2vid-xt` (25-frame) — the xt variant loads OK on 12GB
+        # with cpu offload but the swap thrashing makes every 4s clip take
+        # 5-10 minutes. Fall back to xt when the small variant isn't cached.
+        for repo in (
+            "stabilityai/stable-video-diffusion-img2vid",
             "stabilityai/stable-video-diffusion-img2vid-xt",
-            torch_dtype=_torch.float16,
-            variant="fp16",
-        )
+        ):
+            try:
+                pipe = StableVideoDiffusionPipeline.from_pretrained(
+                    repo, torch_dtype=_torch.float16, variant="fp16",
+                    local_files_only=True,
+                )
+                logger.info("SVD loaded from %s", repo)
+                break
+            except Exception:
+                pipe = None
+        if pipe is None:
+            _SVD_STATE = "disabled"
+            logger.warning("No cached SVD variant found; motion_shots will fall back to Wan/Ken Burns")
+            return None
         pipe.enable_model_cpu_offload()
         pipe.set_progress_bar_config(disable=True)
         _SVD_PIPE = pipe

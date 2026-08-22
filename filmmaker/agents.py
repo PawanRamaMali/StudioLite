@@ -916,6 +916,13 @@ def _disable_ip_adapter() -> None:
     logger.warning("IP-Adapter disabled for the rest of the session")
 
 
+def _hf_token() -> Optional[str]:
+    """Return the user's HuggingFace token from `HF_TOKEN` or the standard
+    `HUGGING_FACE_HUB_TOKEN` env var. None means anonymous — subject to the
+    aggressive rate limit that stalls fresh model pulls after 1-3 GB."""
+    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+
+
 _SDXL_BASE_PIPE = None  # module-level cache so we load SDXL base once per session
 
 
@@ -933,6 +940,7 @@ def _load_sdxl_base_pipeline():
             "stabilityai/stable-diffusion-xl-base-1.0",
             torch_dtype=_torch.float16,
             variant="fp16",
+            token=_hf_token(),
         )
         pipe.enable_model_cpu_offload()
         pipe.set_progress_bar_config(disable=True)
@@ -1806,9 +1814,10 @@ def _render_musicgen(prompt: str, out_path: str, *, duration_sec: int) -> None:
         candidates = ["facebook/musicgen-small"]  # last-ditch download attempt
     for model_id in candidates:
         try:
-            processor = AutoProcessor.from_pretrained(model_id, local_files_only=_cached(model_id))
+            processor = AutoProcessor.from_pretrained(
+                model_id, local_files_only=_cached(model_id), token=_hf_token())
             model = MusicgenForConditionalGeneration.from_pretrained(
-                model_id, local_files_only=_cached(model_id))
+                model_id, local_files_only=_cached(model_id), token=_hf_token())
             device = "cuda" if _torch.cuda.is_available() else "cpu"
             model = model.to(device)
             logger.info("MusicGen loaded (%s) on %s", model_id, device)
@@ -2529,7 +2538,7 @@ def _load_svd_pipeline():
             try:
                 pipe = StableVideoDiffusionPipeline.from_pretrained(
                     repo, torch_dtype=_torch.float16, variant="fp16",
-                    local_files_only=True,
+                    local_files_only=True, token=_hf_token(),
                 )
                 logger.info("SVD loaded from %s", repo)
                 break
@@ -2608,6 +2617,7 @@ def _load_wan_pipeline():
         pipe = WanPipeline.from_pretrained(
             "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
             torch_dtype=_torch.float16,
+            token=_hf_token(),
         )
         pipe.enable_model_cpu_offload()  # keeps peak VRAM under ~7 GB
         pipe.set_progress_bar_config(disable=True)
@@ -2834,7 +2844,7 @@ def _render_audioldm(prompt: str, out_path: str, *, duration_sec: int) -> None:
     import torch as _torch
     from diffusers import AudioLDM2Pipeline
     pipe = AudioLDM2Pipeline.from_pretrained(
-        "cvssp/audioldm2", torch_dtype=_torch.float16,
+        "cvssp/audioldm2", torch_dtype=_torch.float16, token=_hf_token(),
     ).to("cuda")
 
     # transformers 5.x removed `_update_model_kwargs_for_generation` from the

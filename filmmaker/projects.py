@@ -40,4 +40,5 @@ def _config_from_dict(d: Dict[str, Any]) -> ProjectConfig:
         target_minutes=float(d.get("target_minutes", 2.0)),
         quality=str(d.get("quality", "standard")).lower(),
         sdxl_variant=str(d.get("sdxl_variant", "turbo")).lower(),
+        motion_backend=str(d.get("motion_backend", "auto")).lower(),
     )

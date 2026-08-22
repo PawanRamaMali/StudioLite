@@ -42,6 +42,12 @@ class ProjectConfig:
     # out flat and hands often mangle. "base" uses SDXL 1.0 (30-50 steps,
     # much higher fidelity, slower). "flux" is not wired yet.
     sdxl_variant: str = "turbo"
+    # Motion backend for motion_shots. "auto" tries SVD -> Wan -> Ken Burns.
+    # "animatediff" is faster (~30s per 16 frames) but style drifts from
+    # the SDXL keyframe. "svd" locks composition to the keyframe but is
+    # slow on 12GB (5-10 min per clip). "wan" is text-only T2V. "kenburns"
+    # skips motion entirely and pans on the stills.
+    motion_backend: str = "auto"
 
 
 @dataclass
@@ -290,6 +296,7 @@ def _meta_from_json(d: Dict[str, Any]) -> ProjectMeta:
         target_minutes=float(cfg_raw.get("target_minutes", 2.0)),
         quality=str(cfg_raw.get("quality", "standard")).lower(),
         sdxl_variant=str(cfg_raw.get("sdxl_variant", "turbo")).lower(),
+        motion_backend=str(cfg_raw.get("motion_backend", "auto")).lower(),
     )
     return ProjectMeta(
         id=d["id"],

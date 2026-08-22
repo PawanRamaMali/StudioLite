@@ -2596,6 +2596,98 @@ def _render_svd_i2v(pipe, image_path: str, out_path: str, *,
     export_to_video(frames, out_path, fps=7)
 
 
+_ANIMATEDIFF_PIPE = None
+_ANIMATEDIFF_STATE = "unknown"   # unknown | loaded | disabled
+
+
+def _load_animatediff_pipeline():
+    """Load AnimateDiff on top of an SD 1.5 base. Uses guoyww's motion
+    adapter v1.5 (~2 GB). We DON'T stack on SDXL — the SDXL motion module
+    is larger (~7 GB) and slower; SD 1.5 + AnimateDiff runs a 16-frame
+    clip in ~30 seconds on a 12 GB card versus SVD's 5-10 minutes.
+
+    Motion adapter modulates temporal attention on the pretrained UNet.
+    Because it uses a different base than our SDXL Turbo shot generator,
+    the output style will differ from the keyframe — that's a known limit
+    of this backend. The trade-off is speed."""
+    global _ANIMATEDIFF_PIPE, _ANIMATEDIFF_STATE
+    if _ANIMATEDIFF_STATE == "disabled":
+        return None
+    if _ANIMATEDIFF_STATE == "loaded":
+        return _ANIMATEDIFF_PIPE
+    try:
+        import torch as _torch
+        from diffusers import AnimateDiffPipeline, MotionAdapter, DDIMScheduler
+        adapter = MotionAdapter.from_pretrained(
+            "guoyww/animatediff-motion-adapter-v1-5-2",
+            torch_dtype=_torch.float16, token=_hf_token(),
+        )
+        pipe = AnimateDiffPipeline.from_pretrained(
+            "runwayml/stable-diffusion-v1-5",
+            motion_adapter=adapter,
+            torch_dtype=_torch.float16, token=_hf_token(),
+        )
+        pipe.scheduler = DDIMScheduler.from_config(
+            pipe.scheduler.config,
+            clip_sample=False, timestep_spacing="linspace",
+            beta_schedule="linear", steps_offset=1,
+        )
+        pipe.enable_vae_slicing()
+        pipe.enable_model_cpu_offload()
+        pipe.set_progress_bar_config(disable=True)
+        _ANIMATEDIFF_PIPE = pipe
+        _ANIMATEDIFF_STATE = "loaded"
+        logger.info("AnimateDiff pipeline loaded (SD 1.5 + guoyww v1.5-2)")
+        return pipe
+    except Exception as e:
+        _ANIMATEDIFF_STATE = "disabled"
+        logger.warning("AnimateDiff unavailable (%s); motion_shots will use SVD or Wan", e)
+        return None
+
+
+def _disable_animatediff() -> None:
+    global _ANIMATEDIFF_PIPE, _ANIMATEDIFF_STATE
+    _ANIMATEDIFF_PIPE = None
+    _ANIMATEDIFF_STATE = "disabled"
+    try:
+        import torch as _torch
+        if _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def _render_animatediff_t2v(pipe, out_path: str, *, prompt: str,
+                            duration_sec: int, camera_move: str) -> None:
+    """Text-to-video via AnimateDiff. Doesn't consume the SDXL keyframe
+    directly (init_image support requires the img2img variant which isn't
+    loaded here). We lean on the same prompt that produced the keyframe
+    plus a motion hint, similar to Wan T2V."""
+    import torch as _torch
+    from diffusers.utils import export_to_video
+    motion_hint = {
+        "pan":     "smooth horizontal camera pan",
+        "dolly":   "slow dolly-in",
+        "crane":   "camera cranes upward",
+        "handheld":"subtle handheld shake",
+        "whip":    "fast whip pan",
+        "static":  "gentle atmospheric motion, minimal camera",
+    }.get(camera_move, "gentle atmospheric motion")
+    full_prompt = f"{prompt}. {motion_hint}."
+    fps = 8   # AnimateDiff native
+    num_frames = min(16, max(8, duration_sec * fps))
+    with _torch.no_grad():
+        out = pipe(
+            prompt=full_prompt,
+            negative_prompt="low quality, distorted, deformed, watermark",
+            num_frames=num_frames,
+            guidance_scale=7.5,
+            num_inference_steps=20,
+        )
+    frames = out.frames[0]
+    export_to_video(frames, out_path, fps=fps)
+
+
 def _load_wan_pipeline():
     """Load a Wan 2.1 pipeline lazily. Prefers T2V-1.3B (~7 GB at fp16) which
     fits alongside SDXL and MusicGen on a 12 GB card. The 14B I2V variant
@@ -2651,11 +2743,15 @@ _MOTION_SHOTS_MAX_WAN = 40   # Wan T2V is ~260s per 3s clip. Cap when Wan is
 
 def run_motion_shots(project: Project) -> Dict[str, Any]:
     """For each shot with a rendered SDXL keyframe, generate a short motion
-    clip. Tries SVD img2vid_xt first (takes the keyframe as input, preserves
-    composition, ~50-90s per 4s clip on 12GB), falls back to Wan T2V (text
-    only, ~260s), falls back to Ken Burns (instant).
+    clip. Backend chosen by `motion_backend` config:
+    - "auto": SVD -> AnimateDiff -> Wan -> Ken Burns (best quality first)
+    - "animatediff": SD 1.5 + AnimateDiff motion module (~30s per clip)
+    - "svd": SVD img2vid keyframe-conditioned (slow on 12GB, 5-10 min)
+    - "wan": Wan 2.1 T2V (text only, discards keyframe)
+    - "kenburns": pan on stills (no motion generation)
 
-    The Wan-only cap of 40 shots only applies when SVD isn't available."""
+    The Wan-only cap of 40 shots only applies when no other motion
+    backend is available."""
     shots_art = project.read_artifact("shots") or {}
     cinema    = project.read_artifact("cinematographer") or {}
     shots: List[Dict[str, Any]] = shots_art.get("shots") or []
@@ -2664,24 +2760,41 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
     motion_dir = os.path.join(project.artifacts_dir, "motion")
     os.makedirs(motion_dir, exist_ok=True)
 
-    svd_pipe = _load_svd_pipeline()
+    backend_cfg = (project.meta.config.motion_backend or "auto").lower()
+
+    # Load only the pipelines we might use, in try-order.
+    svd_pipe = None
+    animatediff_pipe = None
     wan_pipe = None
-    if svd_pipe is None:
-        # No SVD? Try Wan T2V, but respect the cap because it's slow.
-        if len(shots) > _MOTION_SHOTS_MAX_WAN:
-            logger.warning(
-                "Skipping motion_shots — SVD unavailable and %d shots is over "
-                "the Wan-only cap of %d. Editor will use Ken Burns.",
-                len(shots), _MOTION_SHOTS_MAX_WAN,
-            )
-            return {
-                "motion_shots": [],
-                "svd_count": 0, "wan_count": 0, "kb_count": 0,
-                "skipped_reason": f"no SVD, {len(shots)} > wan cap {_MOTION_SHOTS_MAX_WAN}",
-            }
+    if backend_cfg == "kenburns":
+        pass  # nothing to load; every shot falls through
+    elif backend_cfg == "animatediff":
+        animatediff_pipe = _load_animatediff_pipeline()
+    elif backend_cfg == "svd":
+        svd_pipe = _load_svd_pipeline()
+    elif backend_cfg == "wan":
         wan_pipe = _load_wan_pipeline()
+    else:  # auto
+        svd_pipe = _load_svd_pipeline()
+        if svd_pipe is None:
+            animatediff_pipe = _load_animatediff_pipeline()
+        if svd_pipe is None and animatediff_pipe is None:
+            if len(shots) > _MOTION_SHOTS_MAX_WAN:
+                logger.warning(
+                    "Skipping motion_shots — no SVD or AnimateDiff, and %d shots "
+                    "is over the Wan-only cap of %d. Editor will use Ken Burns.",
+                    len(shots), _MOTION_SHOTS_MAX_WAN,
+                )
+                return {
+                    "motion_shots": [],
+                    "svd_count": 0, "animatediff_count": 0,
+                    "wan_count": 0, "kb_count": 0,
+                    "skipped_reason": f"only Wan available and {len(shots)} > {_MOTION_SHOTS_MAX_WAN}",
+                }
+            wan_pipe = _load_wan_pipeline()
 
     used_svd = 0
+    used_animatediff = 0
     used_wan = 0
     used_kb = 0
     total = len(shots)
@@ -2713,7 +2826,24 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
                     _disable_svd()
                     svd_pipe = None
 
-        # Fallback to Wan T2V (text-only, discards keyframe)
+        # AnimateDiff — fast text-to-video via SD 1.5 motion adapter
+        if not rendered and animatediff_pipe is not None:
+            try:
+                _render_animatediff_t2v(
+                    animatediff_pipe, mp4_abs,
+                    prompt=s.get("prompt", "") or "",
+                    duration_sec=clip_dur, camera_move=move,
+                )
+                rendered = True; backend = "animatediff"; used_animatediff += 1
+                error = None
+            except Exception as e:
+                logger.exception("AnimateDiff failed for %s/%s", sid, shot_id)
+                error = f"{error or ''}; animatediff: {e}"
+                if "out of memory" in str(e).lower():
+                    _disable_animatediff()
+                    animatediff_pipe = None
+
+        # Wan T2V (text-only, discards keyframe)
         if not rendered and wan_pipe is not None and os.path.exists(keyframe_abs):
             try:
                 _render_wan_i2v(
@@ -2753,6 +2883,7 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
     return {
         "motion_shots": result,
         "svd_count": used_svd,
+        "animatediff_count": used_animatediff,
         "wan_count": used_wan,
         "kb_count": used_kb,
     }

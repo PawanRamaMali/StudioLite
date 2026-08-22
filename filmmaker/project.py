@@ -48,6 +48,11 @@ class ProjectConfig:
     # slow on 12GB (5-10 min per clip). "wan" is text-only T2V. "kenburns"
     # skips motion entirely and pans on the stills.
     motion_backend: str = "auto"
+    # Voice backend for voice_actor. "piper" (default) is fast, offline,
+    # reads at a flat register. "xtts" uses Coqui XTTS-v2 which supports
+    # voice cloning from a 6s reference clip and emotion, at the cost of
+    # slower synth (~5-10x Piper) and a ~2GB model download on first use.
+    voice_backend: str = "piper"
 
 
 @dataclass
@@ -297,6 +302,7 @@ def _meta_from_json(d: Dict[str, Any]) -> ProjectMeta:
         quality=str(cfg_raw.get("quality", "standard")).lower(),
         sdxl_variant=str(cfg_raw.get("sdxl_variant", "turbo")).lower(),
         motion_backend=str(cfg_raw.get("motion_backend", "auto")).lower(),
+        voice_backend=str(cfg_raw.get("voice_backend", "piper")).lower(),
     )
     return ProjectMeta(
         id=d["id"],

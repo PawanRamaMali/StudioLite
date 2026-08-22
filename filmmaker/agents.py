@@ -1412,6 +1412,13 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
 
     os.makedirs(os.path.join(project.artifacts_dir, "voice"), exist_ok=True)
 
+    voice_backend = (project.meta.config.voice_backend or "piper").lower()
+
+    # XTTS-v2 path — one shared model, per-character speaker embeddings via
+    # reference clips or the built-in speaker library. Falls through to
+    # Piper on any load failure.
+    xtts_wrap = _load_xtts_if_requested(voice_backend, project)
+
     tts_cache: Dict[str, Any] = {}
     try:
         from mpv2.classes.PiperTts import PiperTTS
@@ -1517,8 +1524,19 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
                                    f"{sid}_{shot['id']}.wav")
             ok = False
             err: Optional[str] = None
-            tts = get_tts(voice_name)
-            if tts is not None:
+            # XTTS first if requested — cloned voice with more prosody.
+            if xtts_wrap is not None:
+                try:
+                    xtts_wrap.synthesize(line["text"], wav_abs, speaker=speaker)
+                    _pad_wav_with_silence(wav_abs, head_sec=0.25, tail_sec=0.45)
+                    ok = True
+                except Exception as e:
+                    logger.warning("XTTS synth failed for %s/%s (%s); falling back to Piper",
+                                   sid, shot["id"], e)
+                    err = f"xtts: {e}"
+
+            tts = get_tts(voice_name) if not ok else None
+            if not ok and tts is not None:
                 try:
                     tts.synthesize(line["text"], wav_abs)
                     # Piper voices land tight against the file boundaries and
@@ -1526,10 +1544,11 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
                     # in so the line has breathing room when mixed.
                     _pad_wav_with_silence(wav_abs, head_sec=0.25, tail_sec=0.45)
                     ok = True
+                    err = None
                 except Exception as e:
                     logger.warning("Piper synth failed for %s/%s (%s); writing silence",
                                    sid, shot["id"], e)
-                    err = str(e)
+                    err = f"{err or ''}; piper: {e}"
             if not ok:
                 _write_silent_wav(wav_abs, 1.0)
             lines.append({
@@ -1696,6 +1715,65 @@ def _parse_screenplay_dialogue(text: str) -> List[Dict[str, str]]:
         prev_was_dialogue = False
         i += 1
     return out
+
+
+class _XTTSWrap:
+    """Thin adapter over Coqui XTTS-v2. Held on-demand from
+    `_load_xtts_if_requested` so the pipeline never imports TTS when the
+    user asked for Piper.
+
+    Speaker selection: prefer a per-character reference clip at
+    `<project.dir>/artifacts/voice_refs/<safe_name>.wav`; fall back to one
+    of the built-in library speakers picked by hashing the character name."""
+
+    _BUILTIN_SPEAKERS = [
+        "Damien Black", "Gilberto Mathias", "Ige Behringer",
+        "Sofia Hellen", "Tanja Adelina", "Uta Obando",
+    ]
+
+    def __init__(self, tts, project):
+        self._tts = tts
+        self._project = project
+        self._voice_refs_dir = os.path.join(project.artifacts_dir, "voice_refs")
+
+    def _speaker_for(self, speaker: str) -> Dict[str, Any]:
+        """Return kwargs for TTS.tts_to_file that pick the right voice."""
+        ref = os.path.join(self._voice_refs_dir, f"{_safe_filename(speaker)}.wav")
+        if os.path.exists(ref):
+            return {"speaker_wav": ref}
+        # Deterministic library speaker per character so a name always maps
+        # to the same voice within a film.
+        idx = abs(hash(speaker.upper())) % len(self._BUILTIN_SPEAKERS)
+        return {"speaker": self._BUILTIN_SPEAKERS[idx]}
+
+    def synthesize(self, text: str, out_path: str, *, speaker: str = "") -> None:
+        kwargs = self._speaker_for(speaker)
+        # language="en" locks XTTS to English output. Multi-language films
+        # would need a per-line language tag; not wired yet.
+        self._tts.tts_to_file(text=text, file_path=out_path, language="en", **kwargs)
+
+
+def _load_xtts_if_requested(voice_backend: str, project) -> Optional[_XTTSWrap]:
+    """Load Coqui XTTS-v2 when the project asks for `voice_backend="xtts"`.
+    Returns None on any failure — including the common one of `coqui-tts`
+    not being installed — so the caller falls back to Piper cleanly."""
+    if voice_backend != "xtts":
+        return None
+    try:
+        from TTS.api import TTS
+        import torch as _torch
+        device = "cuda" if _torch.cuda.is_available() else "cpu"
+        # XTTS-v2 downloads ~2GB on first use; subsequent runs hit the local cache.
+        tts = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2",
+                  progress_bar=False).to(device)
+        logger.info("XTTS-v2 loaded on %s", device)
+        return _XTTSWrap(tts, project)
+    except ImportError:
+        logger.warning("coqui-tts not installed (pip install coqui-tts); XTTS disabled")
+        return None
+    except Exception as e:
+        logger.warning("XTTS load failed (%s); falling back to Piper", e)
+        return None
 
 
 def _pad_wav_with_silence(path: str, *, head_sec: float, tail_sec: float) -> None:

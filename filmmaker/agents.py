@@ -1769,6 +1769,12 @@ def _load_xtts_if_requested(voice_backend: str, project) -> Optional[_XTTSWrap]:
             def _isin(elements, test_elements):
                 return _torch.isin(elements, test_elements)
             _pu.isin_mps_friendly = _isin
+        # XTTS-v2 model gates its download behind a CPML license prompt that
+        # blocks on stdin. Setting COQUI_TOS_AGREED=1 tells the loader the
+        # user has read and accepted the Coqui Public Model License terms
+        # (see https://coqui.ai/cpml). Set explicitly here so background
+        # runs don't hang waiting for a Y/N.
+        os.environ.setdefault("COQUI_TOS_AGREED", "1")
         from TTS.api import TTS
         device = "cuda" if _torch.cuda.is_available() else "cpu"
         # XTTS-v2 downloads ~2GB on first use; subsequent runs hit the local cache.

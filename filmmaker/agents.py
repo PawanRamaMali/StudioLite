@@ -1760,16 +1760,24 @@ def _load_xtts_if_requested(voice_backend: str, project) -> Optional[_XTTSWrap]:
     if voice_backend != "xtts":
         return None
     try:
-        from TTS.api import TTS
+        # transformers 5.x renamed `isin_mps_friendly` out of pytorch_utils.
+        # coqui-tts 0.27.5 still imports it. Provide the shim before the
+        # first `from TTS...` import so the module loads.
         import torch as _torch
+        import transformers.pytorch_utils as _pu
+        if not hasattr(_pu, "isin_mps_friendly"):
+            def _isin(elements, test_elements):
+                return _torch.isin(elements, test_elements)
+            _pu.isin_mps_friendly = _isin
+        from TTS.api import TTS
         device = "cuda" if _torch.cuda.is_available() else "cpu"
         # XTTS-v2 downloads ~2GB on first use; subsequent runs hit the local cache.
         tts = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2",
                   progress_bar=False).to(device)
         logger.info("XTTS-v2 loaded on %s", device)
         return _XTTSWrap(tts, project)
-    except ImportError:
-        logger.warning("coqui-tts not installed (pip install coqui-tts); XTTS disabled")
+    except ImportError as e:
+        logger.warning("XTTS unavailable (%s); disabled. Install with: pip install \"coqui-tts[codec]\"", e)
         return None
     except Exception as e:
         logger.warning("XTTS load failed (%s); falling back to Piper", e)

@@ -59,7 +59,8 @@ def run_producer(project: Project) -> Dict[str, Any]:
         f"Target runtime: {cfg.target_minutes:.1f} minutes\n"
         f"Visual style: {cfg.style}\n"
     )
-    raw = _chat(project, "producer", _PRODUCER_SYSTEM, user_msg, want_json=True, temperature=0.9)
+    raw = _chat(project, "producer", _PRODUCER_SYSTEM, user_msg,
+                want_json=True, temperature=0.9, max_tokens=2000)
     data = llm.parse_json(raw)
     loglines = data.get("loglines") or []
     if not isinstance(loglines, list) or len(loglines) == 0:

@@ -439,7 +439,7 @@ Return JSON:
       "camera_move": "static" | "pan" | "dolly" | "handheld" | "crane" | "whip",
       "lighting": "one-line description of key light + mood",
       "palette": "3-5 color words separated by commas",
-      "duration_sec": integer 4..15
+      "duration_sec": integer 6..18
     }, ...
   ]
 }
@@ -447,9 +447,11 @@ Return JSON:
 DURATION — the sum of `duration_sec` across all shots in a scene should
 roughly equal the scene's `estimated_seconds`. So if the scene runs 90
 seconds and has 12 shots, each shot averages about 7 to 8 seconds. Do
-NOT default every shot to the low end (4). Vary duration to match the
-beat — quick reaction shots can be shorter, dialogue and establishing
-shots longer. Match the scene mood and the film's visual style.
+NOT default every shot to 6. Vary duration to match the beat — quick
+reaction cutaways can be 6 seconds, dialogue and establishing shots
+should run 10 to 15 seconds so they can breathe. Match the scene mood
+and the film's visual style. Prefer fewer, longer shots over many short
+ones — held frames read as intentional; rapid cutting reads as churn.
 """
 
 
@@ -489,13 +491,13 @@ def run_cinematographer(project: Project) -> Dict[str, Any]:
                 "camera_move":_normalize_camera_move(item.get("camera_move")),
                 "lighting":   str(item.get("lighting", "natural key light")).strip(),
                 "palette":    str(item.get("palette", "neutral")).strip(),
-                "duration_sec": max(3, min(20, int(item.get("duration_sec", 4) or 4))),
+                "duration_sec": max(6, min(20, int(item.get("duration_sec", 8) or 8))),
             }
         # Fill defaults for any missing shots.
         for sh in shots:
             by_id.setdefault(sh["id"], {
                 "framing": "MS", "lens_mm": 35, "camera_move": "static",
-                "lighting": "natural key light", "palette": "neutral", "duration_sec": 4,
+                "lighting": "natural key light", "palette": "neutral", "duration_sec": 8,
             })
         out[sid] = by_id
     return {"scenes": out}
@@ -2768,15 +2770,30 @@ def _render_animatediff_t2v(pipe, out_path: str, *, prompt: str,
     }.get(camera_move, "gentle atmospheric motion")
     full_prompt = f"{prompt}. {motion_hint}."
     fps = 8   # AnimateDiff native
-    num_frames = min(16, max(8, duration_sec * fps))
-    with _torch.no_grad():
-        out = pipe(
-            prompt=full_prompt,
-            negative_prompt="low quality, distorted, deformed, watermark",
-            num_frames=num_frames,
-            guidance_scale=7.5,
-            num_inference_steps=20,
-        )
+    # 32 frames = 4s of native motion. Kills the visible looping the
+    # editor's tile-to-fit does when a 2s clip is stretched over a
+    # 5-8s shot. If VRAM chokes we retry once at 24 frames (3s), which
+    # still doubles what 16-frame clips gave us.
+    num_frames = min(32, max(16, duration_sec * fps))
+    try:
+        with _torch.no_grad():
+            out = pipe(
+                prompt=full_prompt,
+                negative_prompt="low quality, distorted, deformed, watermark",
+                num_frames=num_frames,
+                guidance_scale=7.5,
+                num_inference_steps=20,
+            )
+    except _torch.cuda.OutOfMemoryError:
+        _torch.cuda.empty_cache()
+        with _torch.no_grad():
+            out = pipe(
+                prompt=full_prompt,
+                negative_prompt="low quality, distorted, deformed, watermark",
+                num_frames=24,
+                guidance_scale=7.5,
+                num_inference_steps=20,
+            )
     frames = out.frames[0]
     export_to_video(frames, out_path, fps=fps)
 

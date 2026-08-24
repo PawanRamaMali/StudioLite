@@ -2783,14 +2783,14 @@ def _render_animatediff_t2v(pipe, out_path: str, *, prompt: str,
     }.get(camera_move, "gentle atmospheric motion")
     full_prompt = f"{prompt}. {motion_hint}."
     fps = 8   # AnimateDiff native
-    # Target: match the shot's duration so the editor doesn't need to
-    # tile the clip and produce visible loop restarts. Capped at 48
-    # frames (6s) because 12GB VRAM with CPU offload starts thrashing
-    # beyond that on SD 1.5. On OOM we step down 48 -> 32 -> 24 rather
-    # than fail the shot.
-    target_frames = min(48, max(16, duration_sec * fps))
+    # 32 is the motion module's hard pos-embed cap on the guoyww v1.5
+    # adapter — the pe tensor is shape [1, 32, d] and pushing past that
+    # raises a size-mismatch, not an OOM. So we clamp at 32 (=4s at 8fps)
+    # and let the editor tile the rest. Shorter shots ask for fewer
+    # frames so the tile is minimal.
+    target_frames = min(32, max(16, duration_sec * fps))
     ladder = []
-    for f in (target_frames, 32, 24):
+    for f in (target_frames, 24, 16):
         if f > 0 and f not in ladder:
             ladder.append(f)
     out = None
@@ -2806,7 +2806,11 @@ def _render_animatediff_t2v(pipe, out_path: str, *, prompt: str,
                     num_inference_steps=20,
                 )
             break
-        except _torch.cuda.OutOfMemoryError as e:
+        except (_torch.cuda.OutOfMemoryError, RuntimeError) as e:
+            # RuntimeError catches both OOMs (older torch) and the
+            # tensor-size mismatch that arises if the adapter's max is
+            # actually below 32. We step down and retry rather than
+            # dumping the whole shot to fallback.
             last_err = e
             _torch.cuda.empty_cache()
             continue

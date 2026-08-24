@@ -653,10 +653,23 @@ def run_shots(project: Project) -> Dict[str, Any]:
     # We split by whether the chunk has any character references — mixed
     # batches technically work (diffusers accepts per-slot None) but keep it
     # simple: character-heavy chunks tend to run smoothly grouped.
+    # Idempotency: skip any shot whose PNG is already on disk. Lets us
+    # re-run this stage to refresh durations from a new cinematographer
+    # pass without paying for 15+ min of SDXL work again. Nothing else in
+    # the artifact depends on the pixels having been re-rendered.
+    for j in jobs:
+        if os.path.exists(j["png_path"]) and os.path.getsize(j["png_path"]) > 0:
+            j["rendered"] = True
+    pending = [j for j in jobs if not j["rendered"]]
+    skipped = total - len(pending)
+    if skipped:
+        logger.info("shots: reusing %d existing keyframes, rendering %d", skipped, len(pending))
+        project.append_event({"type": "shots_progress", "done": skipped, "total": total, "reused": skipped})
+    done = skipped
     i = 0
-    done = 0
-    while i < total:
-        chunk = jobs[i:i + _SDXL_BATCH_SIZE]
+    total_pending = len(pending)
+    while i < total_pending:
+        chunk = pending[i:i + _SDXL_BATCH_SIZE]
         used_batch = False
         chunk_has_refs = any(j["ref_image"] is not None for j in chunk)
         if render_batch is not None and len(chunk) > 1:
@@ -2770,30 +2783,35 @@ def _render_animatediff_t2v(pipe, out_path: str, *, prompt: str,
     }.get(camera_move, "gentle atmospheric motion")
     full_prompt = f"{prompt}. {motion_hint}."
     fps = 8   # AnimateDiff native
-    # 32 frames = 4s of native motion. Kills the visible looping the
-    # editor's tile-to-fit does when a 2s clip is stretched over a
-    # 5-8s shot. If VRAM chokes we retry once at 24 frames (3s), which
-    # still doubles what 16-frame clips gave us.
-    num_frames = min(32, max(16, duration_sec * fps))
-    try:
-        with _torch.no_grad():
-            out = pipe(
-                prompt=full_prompt,
-                negative_prompt="low quality, distorted, deformed, watermark",
-                num_frames=num_frames,
-                guidance_scale=7.5,
-                num_inference_steps=20,
-            )
-    except _torch.cuda.OutOfMemoryError:
-        _torch.cuda.empty_cache()
-        with _torch.no_grad():
-            out = pipe(
-                prompt=full_prompt,
-                negative_prompt="low quality, distorted, deformed, watermark",
-                num_frames=24,
-                guidance_scale=7.5,
-                num_inference_steps=20,
-            )
+    # Target: match the shot's duration so the editor doesn't need to
+    # tile the clip and produce visible loop restarts. Capped at 48
+    # frames (6s) because 12GB VRAM with CPU offload starts thrashing
+    # beyond that on SD 1.5. On OOM we step down 48 -> 32 -> 24 rather
+    # than fail the shot.
+    target_frames = min(48, max(16, duration_sec * fps))
+    ladder = []
+    for f in (target_frames, 32, 24):
+        if f > 0 and f not in ladder:
+            ladder.append(f)
+    out = None
+    last_err = None
+    for f in ladder:
+        try:
+            with _torch.no_grad():
+                out = pipe(
+                    prompt=full_prompt,
+                    negative_prompt="low quality, distorted, deformed, watermark",
+                    num_frames=f,
+                    guidance_scale=7.5,
+                    num_inference_steps=20,
+                )
+            break
+        except _torch.cuda.OutOfMemoryError as e:
+            last_err = e
+            _torch.cuda.empty_cache()
+            continue
+    if out is None:
+        raise last_err or RuntimeError("AnimateDiff produced no output")
     frames = out.frames[0]
     export_to_video(frames, out_path, fps=fps)
 

@@ -1354,11 +1354,16 @@ match gender / register where reasonable.
 Return JSON:
 {
   "cast": [
-    {"character": "MARGO", "voice": "Amy",  "why": "warm mid-range for the narrator"},
+    {"character": "MARGO", "voice": "Amy", "gender": "female",
+     "why": "warm mid-range for the narrator"},
     ...
   ]
 }
-The `voice` field MUST be one of the pool names. No commentary.
+The `voice` field MUST be one of the pool names.
+`gender` MUST be "male", "female", or "neutral" — the XTTS backend uses
+this to pick from a gender-split library-speaker pool when no per-character
+reference clip is available. If a character's gender isn't explicit in the
+screenplay, infer from name conventions or pick "neutral". No commentary.
 """
 
 
@@ -1397,8 +1402,54 @@ def run_voice_cast(project: Project) -> Dict[str, Any]:
         picked = str((item or {}).get("voice", "")).strip()
         if picked not in _PIPER_NAMES:
             picked = fallback[i % len(fallback)]
-        cast[char] = {"voice": picked, "why": str((item or {}).get("why", "")).strip()}
+        gender = str((item or {}).get("gender", "")).strip().lower()
+        if gender not in ("male", "female", "neutral"):
+            gender = _guess_gender_from_name(char)
+        cast[char] = {
+            "voice": picked,
+            "gender": gender,
+            "why": str((item or {}).get("why", "")).strip(),
+        }
     return {"cast": cast}
+
+
+# Fallback used only when the LLM omits gender and we still want XTTS
+# to pick a same-gender library speaker. Not meant to be authoritative;
+# just enough to keep MARGO from sounding like Damien Black.
+_FEMALE_NAME_HINTS = {
+    "MARGO","LENA","KATE","MARIA","ANNA","EMMA","LILY","ROSE","MARY","JANE",
+    "SARAH","SOPHIA","OLIVIA","AMELIA","ISABELLA","CHARLOTTE","AVA","MIA",
+    "ELLA","ELENA","AMY","BETH","CLAIRE","GRACE","HANNAH","JULIA","LAURA",
+    "NORA","RUTH","SOFIA","IRIS","VERA","MEG","JO","LYDIA","MEREDITH",
+    "ALICE","EVE","HELEN","PAULA","DIANA","LUCY","NORA","MAGGIE","RITA",
+    "LINDA","CATHERINE","CATHY","KATIE","JEN","JENNY","JESS","JESSICA",
+    "MOM","MOTHER","GRANDMOTHER","GRANDMA","AUNT","SISTER","WIFE","DAUGHTER",
+    "NURSE","QUEEN","PRINCESS",
+}
+_MALE_NAME_HINTS = {
+    "BOB","JOHN","JAMES","JACK","TOM","MIKE","DAVE","DAVID","PAUL","MARK",
+    "PETER","STEVE","STEVEN","BRIAN","KEVIN","BILL","BEN","MATT","CHRIS",
+    "GARY","LARRY","HARRY","ROBERT","MICHAEL","WILLIAM","THOMAS","GEORGE",
+    "JOSEPH","CHARLES","RICHARD","DANIEL","EDWARD","HENRY","FRANK","RAY",
+    "ARTHUR","ALEX","ANDREW","ANTHONY","JASON","JEFF","JOHNNY","LEE",
+    "MARTIN","NICK","PATRICK","PHILIP","RALPH","RONNIE","SCOTT","STANLEY",
+    "TERRY","TONY","VINCENT","WALTER","WAYNE","MAX","IVAN","LUKE","LUCAS",
+    "DAD","FATHER","GRANDFATHER","GRANDPA","UNCLE","BROTHER","HUSBAND","SON",
+    "KING","PRINCE","DOCTOR","SHERIFF","CAPTAIN","OFFICER",
+}
+
+
+def _guess_gender_from_name(name: str) -> str:
+    """Cheap English-name-first-token gender guess. Returns 'neutral' when
+    the name isn't in either table so we don't confidently mis-assign."""
+    if not name:
+        return "neutral"
+    first = name.strip().upper().split()[0]
+    if first in _FEMALE_NAME_HINTS:
+        return "female"
+    if first in _MALE_NAME_HINTS:
+        return "male"
+    return "neutral"
 
 
 # ---------------------------------------------------------------------------
@@ -1739,34 +1790,78 @@ class _XTTSWrap:
     user asked for Piper.
 
     Speaker selection: prefer a per-character reference clip at
-    `<project.dir>/artifacts/voice_refs/<safe_name>.wav`; fall back to one
-    of the built-in library speakers picked by hashing the character name."""
+    `<project.dir>/artifacts/voice_refs/<safe_name>.wav`; fall back to a
+    gender-matched library speaker picked deterministically from the
+    character name so the same person keeps the same voice across shots."""
 
-    _BUILTIN_SPEAKERS = [
-        "Damien Black", "Gilberto Mathias", "Ige Behringer",
-        "Sofia Hellen", "Tanja Adelina", "Uta Obando",
+    # Curated subsets of the 58 XTTS-v2 built-in speakers, chosen for
+    # confident English-name-based gender inference and clean output on
+    # short lines. Not exhaustive — plenty of the other 30 speakers work
+    # fine, but these two lists are the safe defaults when we don't have
+    # a reference clip.
+    _FEMALE_SPEAKERS = [
+        "Claribel Dervla", "Daisy Studious", "Gracie Wise", "Tammie Ema",
+        "Alison Dietlinde", "Ana Florence", "Annmarie Nele", "Asya Anara",
+        "Brenda Stern", "Sofia Hellen", "Tanja Adelina", "Uta Obando",
+        "Nova Hogarth", "Chandra MacFarland", "Alexandra Hisakawa",
+        "Rosemary Okafor",
     ]
-
+    _MALE_SPEAKERS = [
+        "Andrew Chipper", "Royston Min", "Viktor Eka", "Craig Gutsy",
+        "Damien Black", "Gilberto Mathias", "Kazuhiko Atallah",
+        "Torcull Diarmuid", "Zacharie Aimilios", "Ige Behringer",
+        "Filip Traverse", "Aaron Dreschner", "Marcos Rudaski",
+        "Baldur Sanjin", "Xavier Hayasaka", "Luis Moray",
+    ]
     def __init__(self, tts, project):
         self._tts = tts
         self._project = project
         self._voice_refs_dir = os.path.join(project.artifacts_dir, "voice_refs")
+        # Per-character gender lookup, populated from voice_cast at call
+        # time so we don't have to change the synthesize() signature.
+        cast_art = project.read_artifact("voice_cast") or {}
+        self._gender_by_char: Dict[str, str] = {}
+        for name, entry in (cast_art.get("cast") or {}).items():
+            g = str((entry or {}).get("gender", "")).strip().lower()
+            if g in ("male", "female", "neutral"):
+                self._gender_by_char[name.upper()] = g
 
     def _speaker_for(self, speaker: str) -> Dict[str, Any]:
         """Return kwargs for TTS.tts_to_file that pick the right voice."""
         ref = os.path.join(self._voice_refs_dir, f"{_safe_filename(speaker)}.wav")
         if os.path.exists(ref):
             return {"speaker_wav": ref}
-        # Deterministic library speaker per character so a name always maps
-        # to the same voice within a film.
-        idx = abs(hash(speaker.upper())) % len(self._BUILTIN_SPEAKERS)
-        return {"speaker": self._BUILTIN_SPEAKERS[idx]}
+        # No reference clip — pick a library speaker deterministically
+        # from the character name, gender-filtered so male characters
+        # don't land on Sofia Hellen and vice versa. Falls back to the
+        # combined pool when we don't know the gender.
+        gender = self._gender_by_char.get(speaker.upper(), "")
+        if gender == "female":
+            pool = self._FEMALE_SPEAKERS
+        elif gender == "male":
+            pool = self._MALE_SPEAKERS
+        else:
+            pool = self._FEMALE_SPEAKERS + self._MALE_SPEAKERS
+        idx = abs(hash(speaker.upper())) % len(pool)
+        return {"speaker": pool[idx]}
 
     def synthesize(self, text: str, out_path: str, *, speaker: str = "") -> None:
         kwargs = self._speaker_for(speaker)
         # language="en" locks XTTS to English output. Multi-language films
-        # would need a per-line language tag; not wired yet.
-        self._tts.tts_to_file(text=text, file_path=out_path, language="en", **kwargs)
+        # would need a per-line language tag; not wired yet. temperature
+        # 0.65 (below the 0.75 default) trims some of the drunk-narrator
+        # wobble XTTS tends to add on longer lines while keeping enough
+        # variation that flat re-reads don't sound identical. Older XTTS
+        # forks reject the kwarg — fall back to the plain call if so.
+        try:
+            self._tts.tts_to_file(
+                text=text, file_path=out_path, language="en",
+                temperature=0.65, **kwargs,
+            )
+        except TypeError:
+            self._tts.tts_to_file(
+                text=text, file_path=out_path, language="en", **kwargs,
+            )
 
 
 def _load_xtts_if_requested(voice_backend: str, project) -> Optional[_XTTSWrap]:

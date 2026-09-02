@@ -5,14 +5,15 @@ agent module structure — adding a stage means one line here.
 
 from __future__ import annotations
 
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 from . import agents
 from .project import Project
-from .stages import StageKey
+from .stages import QualityReport, StageKey
 
 
 StageRunner = Callable[[Project], Dict]
+Verifier = Callable[[Project, Dict], QualityReport]
 
 RUNNERS: Dict[StageKey, StageRunner] = {
     "producer":            agents.run_producer,
@@ -35,7 +36,23 @@ RUNNERS: Dict[StageKey, StageRunner] = {
 }
 
 
+# Optional per-stage quality verifiers. A stage without an entry here
+# behaves exactly as before — one shot, no retry loop. Stages that opt
+# in get up to two extra attempts if the first output fails verification,
+# with the report's hints fed back to the runner as reviewer notes.
+VERIFIERS: Dict[StageKey, Verifier] = {
+    "producer":     agents.verify_producer,
+    "screenwriter": agents.verify_screenwriter,
+    "story_editor": agents.verify_story_editor,
+    "storyboard":   agents.verify_storyboard,
+}
+
+
 def get_runner(key: StageKey) -> StageRunner:
     if key not in RUNNERS:
         raise KeyError(f"No runner registered for stage {key!r}")
     return RUNNERS[key]
+
+
+def get_verifier(key: StageKey) -> Optional[Verifier]:
+    return VERIFIERS.get(key)

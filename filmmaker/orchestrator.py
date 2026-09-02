@@ -22,8 +22,13 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 from .project import Project
-from .registry import get_runner
+from .registry import get_runner, get_verifier
 from .stages import STAGES, StageKey, StageSpec
+
+# How many total attempts a verified stage gets before we accept the last
+# attempt regardless of its report. Two is the sweet spot: one retry
+# catches most one-off model misfires, more just burns wall-clock.
+_MAX_VERIFY_ATTEMPTS = 2
 
 logger = logging.getLogger("studiolite.filmmaker.orch")
 
@@ -156,8 +161,44 @@ class RunManager:
         started = time.time()
 
         runner = get_runner(spec.key)
+        verifier = get_verifier(spec.key)
         try:
-            data = await asyncio.to_thread(runner, project)
+            # Verifier-driven retry loop. Stages without a verifier run
+            # exactly once and the loop degenerates to the original one-
+            # shot behavior. Stages with a verifier get up to
+            # _MAX_VERIFY_ATTEMPTS attempts; hints from a rejected report
+            # flow back to the runner via project._retry_hint.
+            project._retry_hint = ""  # type: ignore[attr-defined]
+            data: Dict = {}
+            report = None
+            attempts = _MAX_VERIFY_ATTEMPTS if verifier is not None else 1
+            for attempt in range(1, attempts + 1):
+                data = await asyncio.to_thread(runner, project)
+                if verifier is None:
+                    break
+                report = verifier(project, data)
+                self._emit(project, {
+                    "type": "stage_verified",
+                    "stage": spec.key,
+                    "attempt": attempt,
+                    "score": round(report.score, 3),
+                    "accepted": report.accepted,
+                    "hints": report.hints[:6],
+                })
+                if report.accepted or attempt >= attempts:
+                    break
+                # Feed the hints back into the runner for its next try.
+                project._retry_hint = " | ".join(report.hints[:6])  # type: ignore[attr-defined]
+            project._retry_hint = ""  # type: ignore[attr-defined]
+            if report is not None:
+                data.setdefault("_quality", {})
+                data["_quality"] = {
+                    "score": round(report.score, 3),
+                    "accepted": report.accepted,
+                    "hints": report.hints,
+                    "notes": report.notes,
+                    "attempts": attempt,
+                }
             project.write_artifact(spec.key, data)
             project.set_stage_status(spec.key, "done")
             self._emit(project, {

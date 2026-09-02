@@ -7,8 +7,33 @@ Adding a new stage means: (1) append its key to STAGES in dependency order,
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Literal
+
+
+@dataclass
+class QualityReport:
+    """A verifier's read on a completed stage artifact.
+
+    A stage-level verifier returns one of these. The orchestrator uses
+    `accepted` to decide whether to retry the stage with `hints` fed back
+    to the runner as reviewer notes. Verifiers are entirely optional —
+    stages without one behave exactly as before.
+
+    `score` is a soft 0-1 signal for the UI; `accepted` is the boolean
+    the retry loop actually reads. `hints` are short natural-language
+    strings that get concatenated and passed as reviewer notes; keep
+    them specific ("all three loglines start with 'When'") rather than
+    general ("could be better")."""
+
+    score: float
+    accept_threshold: float = 0.7
+    hints: List[str] = field(default_factory=list)
+    notes: str = ""
+
+    @property
+    def accepted(self) -> bool:
+        return self.score >= self.accept_threshold
 
 
 StageKey = Literal[

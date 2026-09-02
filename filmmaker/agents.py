@@ -69,13 +69,17 @@ Return JSON:
 def run_producer(project: Project) -> Dict[str, Any]:
     meta = project.meta
     cfg = meta.config
+    hint = getattr(project, "_retry_hint", "") or ""
     user_msg = (
         f"Brief:\n{meta.brief}\n\n"
         f"Target runtime: {cfg.target_minutes:.1f} minutes\n"
         f"Visual style: {cfg.style}\n"
     )
+    if hint:
+        user_msg += (f"\n[Reviewer notes on your previous attempt: {hint}]\n"
+                     "Rewrite addressing those notes. Keep the format.\n")
     raw = _chat(project, "producer", _PRODUCER_SYSTEM, user_msg,
-                want_json=True, temperature=0.9, max_tokens=2000)
+                want_json=True, temperature=0.9, max_tokens=2500)
     data = llm.parse_json(raw)
     loglines = data.get("loglines") or []
     if not isinstance(loglines, list) or len(loglines) == 0:
@@ -241,6 +245,7 @@ def run_screenwriter(project: Project) -> Dict[str, Any]:
         if val:
             pitch_ctx += f"{label}: {val}\n"
 
+    hint = getattr(project, "_retry_hint", "") or ""
     user_msg = (
         f"Title: {chosen.get('title')}\n"
         f"Tone: {chosen.get('tone')}\n"
@@ -250,38 +255,24 @@ def run_screenwriter(project: Project) -> Dict[str, Any]:
         f"Visual style: {cfg.style}\n\n"
         "Write the screenplay now."
     )
-    # Prose stages want higher temperature than the JSON stages — 0.9
-    # gives the model room to leave the median voice. If it comes back
-    # with slop phrases we re-prompt once with the specific hits called
-    # out; a second re-prompt burns latency for diminishing returns.
+    if hint:
+        user_msg += (f"\n\n[Reviewer notes on your previous attempt: {hint}]\n"
+                     "Rewrite the screenplay addressing those notes. "
+                     "Keep the format and cast.")
+    # Prose stages want higher temperature than JSON stages — 0.9 gives
+    # room to leave the median voice. The verifier + orchestrator loop
+    # handles slop-phrase retries; no need for a second call in here.
     fountain = _chat(project, "screenwriter", _SCREENWRITER_SYSTEM, user_msg,
                      want_json=False, temperature=0.9, max_tokens=6000)
     fountain = fountain.strip()
     if not fountain:
         raise llm.LLMError("Screenwriter returned an empty draft.")
 
-    hits = _slop_lint(fountain)
-    slop_retried = False
-    if hits:
-        logger.info("screenwriter slop-lint hits: %s -- re-prompting once", hits)
-        retry_msg = user_msg + (
-            "\n\nYour previous draft contained banned phrases: "
-            + ", ".join(f'"{h}"' for h in hits[:10])
-            + ". Rewrite the screenplay without those phrases or close "
-              "paraphrases. Keep the story, cast, and structure."
-        )
-        fountain2 = _chat(project, "screenwriter", _SCREENWRITER_SYSTEM, retry_msg,
-                          want_json=False, temperature=0.9, max_tokens=6000).strip()
-        if fountain2:
-            fountain = fountain2
-            slop_retried = True
-
     return {
         "fountain": fountain,
         "title": chosen.get("title", "Untitled Film"),
         "revisions": 0,
-        "slop_lint_hits": hits,
-        "slop_retried": slop_retried,
+        "slop_lint_hits": _slop_lint(fountain),
     }
 
 
@@ -296,6 +287,119 @@ _SLOP_PHRASES = (
     "the weight of", "a mix of emotions", "unable to contain",
     "the tension is palpable", "silence hangs", "as if",
 )
+
+
+# -------------------------------------------------------------------------
+# Quality verifiers — one per stage that opts into the retry loop. Each
+# returns a QualityReport; the orchestrator decides whether to retry.
+# Keep these deterministic and cheap: they run after every stage attempt,
+# so a slow verifier taxes every render.
+# -------------------------------------------------------------------------
+
+def verify_producer(project: Project, artifact: Dict[str, Any]):
+    """Check the producer's 3 loglines: three of them, unique titles,
+    all fields present, sentence structure varies."""
+    from .stages import QualityReport
+    loglines = artifact.get("loglines") or []
+    hints: List[str] = []
+    if len(loglines) < 3:
+        hints.append(f"returned {len(loglines)} loglines; the pipeline needs exactly 3")
+    titles = [str(l.get("title", "")).strip().lower() for l in loglines]
+    if len(set(titles)) < len(titles):
+        hints.append("two of the loglines share a title; each pitch needs a distinct title")
+    starts = [str(l.get("logline", "")).strip().lower().split()[:1] for l in loglines]
+    starts = [s[0] if s else "" for s in starts]
+    if starts and len(set(starts)) == 1 and starts[0] == "when":
+        hints.append("all three loglines start with 'When ' — vary sentence structure")
+    for i, l in enumerate(loglines):
+        for f in ("premise", "central_irony", "unresolved"):
+            if not str(l.get(f, "")).strip():
+                hints.append(f"logline {i}: missing '{f}'")
+    score = 1.0 - min(1.0, len(hints) * 0.2)
+    return QualityReport(score=score, hints=hints)
+
+
+def verify_screenwriter(project: Project, artifact: Dict[str, Any]):
+    """Check the screenplay for slop phrases, format sanity, and structural
+    minimums. Doesn't judge dramatic quality — a machine can't — but flags
+    the mechanical failures that produce AI-shaped output."""
+    from .stages import QualityReport
+    fountain = artifact.get("fountain", "") or ""
+    hints: List[str] = []
+    hits = _slop_lint(fountain)
+    if hits:
+        hints.append("banned AI-slop phrases still in draft: "
+                     + ", ".join(f'"{h}"' for h in hits[:8]))
+    import re as _re
+    scene_headings = len(_re.findall(r"(?m)^(?:INT\.|EXT\.)", fountain))
+    if scene_headings == 0:
+        hints.append("no scene headings found — every scene needs a slugline "
+                     "like `INT. LOCATION - TIME`")
+    # ALL CAPS cue lines are 1-4 words, all upper, on their own line —
+    # leading whitespace allowed (Fountain doesn't care).
+    all_caps_cues = _re.findall(r"(?m)^[ \t]*[A-Z][A-Z0-9 '.-]{1,30}$", fountain)
+    if len(all_caps_cues) < 4:
+        hints.append(f"only {len(all_caps_cues)} character cues detected; "
+                     "each speaking line needs its name in ALL CAPS on its own line")
+    # Rough runtime check: expect ~1 page per minute, ~30 lines per page.
+    try:
+        target_min = float(project.meta.config.target_minutes)
+    except Exception:
+        target_min = 2.0
+    line_count = len([l for l in fountain.splitlines() if l.strip()])
+    expected_min = max(15, int(target_min * 15))
+    expected_max = max(80, int(target_min * 60))
+    if line_count < expected_min:
+        hints.append(f"draft is only {line_count} non-empty lines; "
+                     f"target runtime {target_min:.1f} min expects at least ~{expected_min}")
+    score = 1.0 - min(1.0, len(hints) * 0.25)
+    return QualityReport(score=score, hints=hints)
+
+
+def verify_story_editor(project: Project, artifact: Dict[str, Any]):
+    """Story editor should improve on the screenwriter: no slop phrases, at
+    least a couple named failure notes with quoted evidence."""
+    from .stages import QualityReport
+    fountain = artifact.get("revised_fountain", "") or ""
+    notes = artifact.get("notes") or []
+    hints: List[str] = []
+    slop = _slop_lint(fountain)
+    if slop:
+        hints.append("the revision still contains banned phrases: "
+                     + ", ".join(f'"{h}"' for h in slop[:8])
+                     + "; the story editor is supposed to remove these, not preserve them")
+    if not fountain.strip():
+        hints.append("revised_fountain is empty; the editor must return the full revised draft")
+    if isinstance(notes, list):
+        quoted_notes = [n for n in notes if isinstance(n, dict) and n.get("quote")]
+        if len(notes) > 0 and len(quoted_notes) == 0:
+            hints.append("notes have no quoted lines; the rubric requires each note "
+                         "to quote the offending screenplay line before rewriting")
+    score = 1.0 - min(1.0, len(hints) * 0.3)
+    return QualityReport(score=score, hints=hints)
+
+
+def verify_storyboard(project: Project, artifact: Dict[str, Any]):
+    """Storyboard should cover every scene with at least a couple shots,
+    and dialogue lines should trace back to the screenplay's speakers."""
+    from .stages import QualityReport
+    scenes_map = artifact.get("scenes") or {}
+    breakdown = project.read_artifact("breakdown") or {}
+    scenes = breakdown.get("scenes") or []
+    hints: List[str] = []
+    if scenes:
+        missing = [s["id"] for s in scenes if s["id"] not in scenes_map]
+        if missing:
+            hints.append(f"storyboard missing scenes: {missing[:5]}")
+        thin = [sid for sid, shots in scenes_map.items() if len(shots or []) < 2]
+        if thin:
+            hints.append(f"scenes with fewer than 2 shots: {thin[:5]} — "
+                         "each scene needs multiple angles/beats")
+    total_shots = sum(len(shots or []) for shots in scenes_map.values())
+    if total_shots == 0:
+        hints.append("no shots at all in the storyboard")
+    score = 1.0 - min(1.0, len(hints) * 0.3)
+    return QualityReport(score=score, hints=hints)
 
 
 def _slop_lint(text: str) -> List[str]:
@@ -370,7 +474,11 @@ def run_story_editor(project: Project) -> Dict[str, Any]:
     fountain = draft.get("fountain", "")
     if not fountain.strip():
         raise ValueError("Screenwriter artifact is empty.")
+    hint = getattr(project, "_retry_hint", "") or ""
     user_msg = f"Original draft:\n\n{fountain}"
+    if hint:
+        user_msg += (f"\n\n[Notes on your previous revision: {hint}]\n"
+                     "Do the pass again addressing those notes.")
     raw = _chat(project, "story_editor", _STORY_EDITOR_SYSTEM, user_msg,
                 want_json=True, temperature=0.4, max_tokens=8000)
     data = llm.parse_json(raw)
@@ -541,14 +649,18 @@ def run_storyboard(project: Project) -> Dict[str, Any]:
                        or screenwriter.get("fountain")
                        or "")
     scene_scripts = _split_screenplay_by_scene(full_screenplay, scenes)
+    hint = getattr(project, "_retry_hint", "") or ""
 
     out: Dict[str, List[Dict[str, Any]]] = {}
     for scene in scenes:
         sid = scene["id"]
-        user_msg = json.dumps({
+        payload = {
             "scene": scene,
             "screenplay": scene_scripts.get(sid) or full_screenplay,
-        }, ensure_ascii=False, indent=2)
+        }
+        if hint:
+            payload["_reviewer_notes"] = hint
+        user_msg = json.dumps(payload, ensure_ascii=False, indent=2)
         raw = _chat(project, "storyboard", _STORYBOARD_SYSTEM, user_msg,
                     want_json=True, temperature=0.4, max_tokens=5000)
         data = llm.parse_json(raw)

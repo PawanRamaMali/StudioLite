@@ -42,4 +42,5 @@ def _config_from_dict(d: Dict[str, Any]) -> ProjectConfig:
         sdxl_variant=str(d.get("sdxl_variant", "turbo")).lower(),
         motion_backend=str(d.get("motion_backend", "auto")).lower(),
         voice_backend=str(d.get("voice_backend", "piper")).lower(),
+        music_backend=str(d.get("music_backend", "musicgen")).lower(),
     )

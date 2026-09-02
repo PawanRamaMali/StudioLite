@@ -4425,6 +4425,7 @@ def _film_meta_dict(project) -> Dict:
             "sdxl_variant": m.config.sdxl_variant,
             "motion_backend": m.config.motion_backend,
             "voice_backend": m.config.voice_backend,
+            "music_backend": m.config.music_backend,
             "per_stage": m.config.per_stage,
         },
     }

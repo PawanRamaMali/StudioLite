@@ -38,21 +38,37 @@ class ProjectConfig:
     # Values: "draft" (fast iteration), "standard" (default),
     # "high" (finishing look), "ultra" (final render).
     quality: str = "standard"
-    # SDXL variant. "turbo" is fast (12 steps, distilled) but faces come
-    # out flat and hands often mangle. "base" uses SDXL 1.0 (30-50 steps,
-    # much higher fidelity, slower). "flux" is not wired yet.
+    # Image gen for keyframes + portraits. "turbo" (default): SDXL Turbo,
+    # 1-4 steps, ~512-1024px, flat faces. "base": SDXL 1.0, 30-50 steps,
+    # sharper but ~5GB download. "z-image-turbo": Tongyi Z-Image-Turbo
+    # (6B Apache, ~sub-10s per image, Flux-tier photorealism at Turbo cost;
+    # only wired when the weights land on disk under fp8). "flux-schnell":
+    # black-forest-labs/FLUX.1-schnell, 4 steps, ~12GB fp16 / ~7GB fp8.
+    # Loaders try local_files_only first and fall through to the current
+    # SDXL Turbo path on any miss — no downloads triggered by the pipeline.
     sdxl_variant: str = "turbo"
-    # Motion backend for motion_shots. "auto" tries SVD -> Wan -> Ken Burns.
-    # "animatediff" is faster (~30s per 16 frames) but style drifts from
-    # the SDXL keyframe. "svd" locks composition to the keyframe but is
-    # slow on 12GB (5-10 min per clip). "wan" is text-only T2V. "kenburns"
-    # skips motion entirely and pans on the stills.
+    # Motion backend for motion_shots. "auto" tries SVD -> AnimateDiff ->
+    # Wan -> Ken Burns; individual backends can be forced. Newer options
+    # accepted for forward compatibility (loaders detect local weights,
+    # otherwise fall through): "wan22" (Wan 2.2 TI2V-5B fp8, 704p native,
+    # keyframe I2V, 5s per clip, ungated Apache), "framepack" (constant
+    # ~6GB VRAM regardless of clip length, HunyuanVideo-based, 1-120s),
+    # "ltx" (LTX-Video / LTX-2 distilled, fastest but softer fidelity).
     motion_backend: str = "auto"
-    # Voice backend for voice_actor. "piper" (default) is fast, offline,
-    # reads at a flat register. "xtts" uses Coqui XTTS-v2 which supports
-    # voice cloning from a 6s reference clip and emotion, at the cost of
-    # slower synth (~5-10x Piper) and a ~2GB model download on first use.
+    # Voice backend for voice_actor. "piper" (default): fast, flat.
+    # "xtts": Coqui XTTS-v2, 24kHz, 6s-clip cloning. Forward-compatible
+    # values whose loaders fall through until weights are on disk:
+    # "indextts2" (IndexTeam/IndexTTS-2, Apache, ~6GB, disentangled
+    # emotion control — the current best local TTS for prosody stability),
+    # "qwen3tts" (Qwen/Qwen3-TTS-12Hz-1.7B, Apache, ~4GB, voice-design
+    # from a text prompt so characters can get truly unique voices),
+    # "chatterbox" (resemble-ai/chatterbox, MIT, ~6GB, expressive).
     voice_backend: str = "piper"
+    # Music backend for composer. "musicgen" (default): Meta MusicGen
+    # small, CC-BY-NC weights. Forward-compatible: "acestep" (ACE-Step
+    # 1.5, MIT, 2-4B DiT, benchmarks between Suno v4.5 and v5; loader
+    # falls through until weights are cached).
+    music_backend: str = "musicgen"
 
 
 @dataclass
@@ -303,6 +319,7 @@ def _meta_from_json(d: Dict[str, Any]) -> ProjectMeta:
         sdxl_variant=str(cfg_raw.get("sdxl_variant", "turbo")).lower(),
         motion_backend=str(cfg_raw.get("motion_backend", "auto")).lower(),
         voice_backend=str(cfg_raw.get("voice_backend", "piper")).lower(),
+        music_backend=str(cfg_raw.get("music_backend", "musicgen")).lower(),
     )
     return ProjectMeta(
         id=d["id"],

@@ -31,19 +31,34 @@ logger = logging.getLogger("studiolite.filmmaker")
 _PRODUCER_SYSTEM = """\
 You are a seasoned indie-film Producer developing a short film.
 Given the user's one-paragraph brief plus target runtime and visual style,
-respond with EXACTLY THREE distinct loglines the film could pursue.
-Each logline is one sentence, 20-35 words, in the classic format:
-"When [inciting incident], a [protagonist] must [goal] before [stakes]."
+respond with EXACTLY THREE distinct pitches the film could pursue.
 
-Also return a suggested title per logline (short, evocative) and a tone tag
-(one of: drama, thriller, comedy, sci-fi, horror, romance, mystery, action, documentary, experimental).
+Each pitch is:
+- title: short, evocative, concrete (a noun or noun phrase, not a sentence).
+- tone: one of drama, thriller, comedy, sci-fi, horror, romance, mystery, action, documentary, experimental.
+- premise: one or two sentences on the situation — who, where, what shifts.
+  Do NOT write "When X, a Y must Z before W" — that formula produces
+  identical-sounding pitches. Just say what happens.
+- central_irony: one sentence naming the tension that makes the story
+  worth watching — what the character wants versus what the situation
+  demands, or what the audience knows versus what the character does.
+- unresolved: one sentence naming what the film deliberately does NOT
+  settle. Short films earn their end by leaving something open.
+- logline: one sentence, 20-35 words, a distilled hook combining premise
+  and irony. This is the only line the downstream stages read; the other
+  fields discipline the pitch.
 
-Return JSON of the shape:
+Prefer specific over grand: one afternoon in one room beats a saga; a
+character trying to say one hard sentence beats a character trying to
+save the world. Vary the three pitches — different tones, different
+stakes, different endings.
+
+Return JSON:
 {
   "loglines": [
-    {"title": "...", "tone": "...", "logline": "..."},
-    {"title": "...", "tone": "...", "logline": "..."},
-    {"title": "...", "tone": "...", "logline": "..."}
+    {"title": "...", "tone": "...", "premise": "...", "central_irony": "...",
+     "unresolved": "...", "logline": "..."},
+    ...
   ],
   "recommended_index": 0
 }
@@ -69,6 +84,9 @@ def run_producer(project: Project) -> Dict[str, Any]:
     loglines = [{
         "title": str(l.get("title", "Untitled")).strip(),
         "tone": str(l.get("tone", "drama")).strip().lower(),
+        "premise": str(l.get("premise", "")).strip(),
+        "central_irony": str(l.get("central_irony", "")).strip(),
+        "unresolved": str(l.get("unresolved", "")).strip(),
         "logline": str(l.get("logline", "")).strip(),
     } for l in loglines if isinstance(l, dict)]
     idx = int(data.get("recommended_index", 0))
@@ -86,13 +104,15 @@ def run_producer(project: Project) -> Dict[str, Any]:
 
 _SCREENWRITER_SYSTEM = """\
 You are a professional screenwriter drafting a SHORT film in Fountain-style
-plaintext screenplay format. Follow these conventions STRICTLY — the
-downstream pipeline parses your output and silently drops any dialogue whose
-character cue is not in ALL CAPS on its own line.
+plaintext screenplay format. What you write should read like a working
+short-film script, not like AI describing a short-film script.
+
+FORMAT (the downstream parser is strict; violating this drops dialogue):
 
 - Scene headings on their own line: `INT. LOCATION - TIME` or `EXT. LOCATION - TIME`.
-- Action lines: present tense, visual, one short paragraph.
-- Character cue on its own line in ALL CAPS. NEVER Title Case. Example:
+- Action lines: present tense, visual, one short paragraph. What a camera
+  can see and a mic can hear. Never interior monologue.
+- Character cue on its own line in ALL CAPS. NEVER Title Case:
       MARGO
       Where is he?
   Not:
@@ -105,20 +125,102 @@ character cue is not in ALL CAPS on its own line.
   Do NOT put dialogue on the same line as the parenthetical.
 - Blank line between blocks.
 
-Constraints:
-- Total runtime target: about ONE screen page per minute.
-- **Scene count scales with runtime**. Under 2 minutes: 1-2 scenes is fine.
-  2 to 3 minutes: at least 3 scenes. 4 minutes or longer: at least 4 scenes
-  with distinct headings (location or time change), so the film has real
-  structure instead of one long conversation in a single room.
-- Cast: 2-4 named speaking characters. Introduce each in ALL CAPS on first
-  appearance in an action line, followed by a short physical description in
-  parentheses on the SAME line — age range, wardrobe, one distinctive
-  feature. Downstream stages parse those descriptors to keep the character
-  looking consistent across shots. Example:
-      MARGO (60s, silver bob, apron dusted with flour) wipes the counter.
-- Make it filmable with the given visual style; avoid long monologues.
-- No preface, no epilogue, no formatting tricks. Just the screenplay.
+CHARACTERS: 2-4 named speaking parts. Introduce each in ALL CAPS on first
+appearance in an action line, followed by a short physical description in
+parens on the SAME line — age range, wardrobe, one distinctive feature.
+Downstream stages parse those to keep the character looking consistent.
+Example:
+    MARGO (60s, silver bob, apron dusted with flour) wipes the counter.
+
+STRUCTURE: about one screen page per minute. Scene count scales with
+runtime — under 2 min: 1-2 scenes; 2-3 min: at least 3; 4+ min: at least
+4 scenes with distinct headings. Prefer real location or time changes
+over one long conversation in a single room.
+
+CRAFT — the part that separates screenplay from AI slop:
+
+1. Enter late, leave early. Cut the first and last line of every dialogue
+   exchange. Start the scene in the middle of the argument. End on the
+   line before a character would say the thing you don't want them to say.
+2. No character states an emotion or the theme aloud. They argue about a
+   concrete object (the receipt, the door lock, the sandwich) instead.
+   If a line COULD be replaced by a look at an object, replace it.
+3. Subtext > text. The characters want the audience to think they want
+   one thing; they actually want another. The action reveals the second.
+4. End scenes on an image, not a line. The camera should linger on
+   something specific — a hand, an empty chair, a light — after the
+   last word.
+5. One clear scene goal per scene. Somebody wants something concrete;
+   somebody else is in the way; something shifts by the end.
+
+BANNED PHRASES — do not write these exact strings or their close
+paraphrases. They are the fingerprints of AI-generated screenwriting:
+"smiles softly", "eyes widen", "takes a deep breath", "a testament to",
+"little did they know", "we see", "we hear", "the camera pans", "in that
+moment", "a single tear", "her heart races", "his mind races", "gathers
+her thoughts", "steels himself", "she can't help but", "the weight of",
+"a mix of emotions", "unable to contain", "as if", "seemingly", "yet
+somehow", "the tension is palpable", "silence hangs".
+
+HOUSE STYLE — the below is the register to imitate. Not a template to
+copy verbatim; a reference for pacing, dialogue tightness, and how
+action + subtext land on the page.
+
+===
+INT. LAUNDROMAT - NIGHT
+
+Fluorescents. One dryer running, the rest dead.
+
+CARL (mid 40s, work shirt untucked, safety vest folded on the bench)
+sits with a paperback he isn't reading. A woman comes in with a black
+trash bag. This is DIANE (30s, uniform of a chain restaurant, still on
+the clock by the smell of grease).
+
+She sets the bag on the counter. Pulls out a single blue shirt. Feeds
+it to a washer alone. Two quarters. She sits three seats down from Carl.
+
+    DIANE
+    You know it's on the door.
+
+    CARL
+    What is.
+
+    DIANE
+    That we're closed.
+
+Carl doesn't look up.
+
+    CARL
+    Door's open.
+
+    DIANE
+    That's the other door.
+
+The dryer finishes. Nobody moves. Diane watches the shirt spin.
+
+    DIANE (CONT'D)
+    My kid's got picture day tomorrow.
+
+She says it to the machine, not to him. Carl marks his page with a
+receipt and closes the book. Puts it in his jacket. Stands.
+
+    CARL
+    Quarters?
+
+    DIANE
+    I got quarters.
+
+He walks out the front door. The bell rings. Diane doesn't turn to
+watch him go. She watches the shirt.
+===
+
+WORKFLOW — write in two passes internally, then output only the second:
+1. Sketch a 5-beat outline in your head: scene goal, obstacle, midpoint
+   turn, low point, image. Do not print the outline.
+2. Write the scenes hitting those beats, applying every craft rule above.
+
+Output ONLY the screenplay. No preface, no epilogue, no notes, no
+markdown fences, no "Here is the screenplay." Just Fountain text.
 """
 
 
@@ -131,24 +233,83 @@ def run_screenwriter(project: Project) -> Dict[str, Any]:
     chosen = loglines[idx]
     cfg = project.meta.config
 
+    pitch_ctx = ""
+    for field, label in (("premise", "Premise"),
+                         ("central_irony", "Central irony"),
+                         ("unresolved", "What stays unresolved")):
+        val = str(chosen.get(field, "")).strip()
+        if val:
+            pitch_ctx += f"{label}: {val}\n"
+
     user_msg = (
         f"Title: {chosen.get('title')}\n"
         f"Tone: {chosen.get('tone')}\n"
         f"Logline: {chosen.get('logline')}\n"
+        f"{pitch_ctx}"
         f"Target runtime: {cfg.target_minutes:.1f} minutes\n"
         f"Visual style: {cfg.style}\n\n"
         "Write the screenplay now."
     )
+    # Prose stages want higher temperature than the JSON stages — 0.9
+    # gives the model room to leave the median voice. If it comes back
+    # with slop phrases we re-prompt once with the specific hits called
+    # out; a second re-prompt burns latency for diminishing returns.
     fountain = _chat(project, "screenwriter", _SCREENWRITER_SYSTEM, user_msg,
-                     want_json=False, temperature=0.7, max_tokens=6000)
+                     want_json=False, temperature=0.9, max_tokens=6000)
     fountain = fountain.strip()
     if not fountain:
         raise llm.LLMError("Screenwriter returned an empty draft.")
+
+    hits = _slop_lint(fountain)
+    slop_retried = False
+    if hits:
+        logger.info("screenwriter slop-lint hits: %s -- re-prompting once", hits)
+        retry_msg = user_msg + (
+            "\n\nYour previous draft contained banned phrases: "
+            + ", ".join(f'"{h}"' for h in hits[:10])
+            + ". Rewrite the screenplay without those phrases or close "
+              "paraphrases. Keep the story, cast, and structure."
+        )
+        fountain2 = _chat(project, "screenwriter", _SCREENWRITER_SYSTEM, retry_msg,
+                          want_json=False, temperature=0.9, max_tokens=6000).strip()
+        if fountain2:
+            fountain = fountain2
+            slop_retried = True
+
     return {
         "fountain": fountain,
         "title": chosen.get("title", "Untitled Film"),
         "revisions": 0,
+        "slop_lint_hits": hits,
+        "slop_retried": slop_retried,
     }
+
+
+# AI-slop phrase list — kept in sync with the writer's system prompt so
+# both banning and re-prompting agree on what "banned" means. Matched
+# case-insensitively as whole-word substrings.
+_SLOP_PHRASES = (
+    "smiles softly", "eyes widen", "takes a deep breath", "a testament to",
+    "little did", "we see", "we hear", "the camera pans",
+    "in that moment", "a single tear", "her heart races", "his mind races",
+    "gathers her thoughts", "steels himself", "she can't help but",
+    "the weight of", "a mix of emotions", "unable to contain",
+    "the tension is palpable", "silence hangs", "as if",
+)
+
+
+def _slop_lint(text: str) -> List[str]:
+    """Return the unique banned phrases actually present in `text`.
+    Simple case-insensitive substring match — fast, deterministic, and
+    good enough since the phrases are distinctive enough not to collide
+    with legitimate use in short dialogue. Not perfect (a legitimate
+    'as if' in dialogue would be flagged) — we accept that as the price
+    for cheap enforcement."""
+    if not text:
+        return []
+    low = text.lower()
+    hits = [p for p in _SLOP_PHRASES if p in low]
+    return hits
 
 
 # ---------------------------------------------------------------------------
@@ -156,18 +317,51 @@ def run_screenwriter(project: Project) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _STORY_EDITOR_SYSTEM = """\
-You are a story editor doing ONE revision pass on a short-film draft.
+You are a story editor doing a targeted revision pass on a short-film
+draft. Your job is not to be nice; it is to name specific failures and
+cut what doesn't earn its place.
 
 Return JSON:
 {
-  "notes": "5-8 bullet critique focused on structure, character motivation, and shootability.",
-  "revised_fountain": "the full revised screenplay in the same Fountain-style format"
+  "notes": [
+    {"fail": "on_the_nose", "quote": "I love you so much it hurts", "why": "..."},
+    {"fail": "feeling_exposition", "quote": "...", "why": "..."},
+    ...
+  ],
+  "revised_fountain": "the full revised screenplay in Fountain format"
 }
 
-Rules:
-- The revised draft must still be filmable with 2-4 characters and roughly the same runtime.
+RUBRIC — for each note, `fail` must be exactly one of:
+  on_the_nose            character states the theme or their emotion aloud
+  feeling_exposition     character explains their inner state instead of showing
+  symmetrical_ending     resolution too neat; every thread tied off
+  cliche_beat            scene beat is a screenwriting cliche (running in the
+                          rain, dramatic phone hang-up, whispered dying words)
+  monologue_bloat        a dialogue block runs longer than 4 lines without
+                          the other character responding
+  purple_action          action line reaches for interior state ("her eyes
+                          fill with 20 years of regret") the camera can't shoot
+  weak_scene_goal        scene has no clear objective; nobody wants anything
+                          concrete
+  banned_phrase          hits one of the AI-slop phrases in the writer prompt
+
+You must QUOTE the offending line (max ~15 words) in `quote`. Generic
+notes ("dialogue could be sharper") are forbidden — they produce
+generic rewrites.
+
+REVISION RULES:
+- The revised draft stays filmable with 2-4 characters and roughly the
+  same runtime.
 - Preserve scene headings unless a scene truly does not earn its place.
-- Do NOT add stage directions the visual generator can't render (e.g., "her eyes fill with 20 years of regret").
+- Do NOT add stage directions the visual generator can't render.
+- For each note in `notes`, the revised draft must actually address it.
+  Do not repeat the noted defect.
+- Then do a TRIM PASS on the revision: cut the first and last line of
+  every dialogue exchange (enter late, leave early), and cut roughly
+  30% of the total word count. Held silence and image beats replace
+  cut talk. Aim for the same runtime with less text on the page.
+- Fountain format is strict: character cues on their own line in ALL
+  CAPS; parentheticals on their own line; blank line between blocks.
 """
 
 
@@ -178,9 +372,23 @@ def run_story_editor(project: Project) -> Dict[str, Any]:
         raise ValueError("Screenwriter artifact is empty.")
     user_msg = f"Original draft:\n\n{fountain}"
     raw = _chat(project, "story_editor", _STORY_EDITOR_SYSTEM, user_msg,
-                want_json=True, temperature=0.4, max_tokens=6000)
+                want_json=True, temperature=0.4, max_tokens=8000)
     data = llm.parse_json(raw)
-    notes = str(data.get("notes", "")).strip()
+    notes_raw = data.get("notes")
+    # Accept both the new structured shape (list of {fail, quote, why})
+    # and the legacy single-string prose so a mid-run pipeline change
+    # doesn't fail the stage.
+    notes: List[Dict[str, str]]
+    if isinstance(notes_raw, list):
+        notes = [{
+            "fail":  str(n.get("fail", "")).strip(),
+            "quote": str(n.get("quote", "")).strip(),
+            "why":   str(n.get("why", "")).strip(),
+        } for n in notes_raw if isinstance(n, dict)]
+    elif isinstance(notes_raw, str):
+        notes = [{"fail": "prose", "quote": "", "why": notes_raw.strip()}]
+    else:
+        notes = []
     revised = str(data.get("revised_fountain", "")).strip()
     if not revised:
         raise llm.LLMError("Story editor returned no revised draft.")

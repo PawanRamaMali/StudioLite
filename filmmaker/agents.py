@@ -1801,9 +1801,14 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
 
     voice_backend = (project.meta.config.voice_backend or "piper").lower()
 
-    # XTTS-v2 path — one shared model, per-character speaker embeddings via
-    # reference clips or the built-in speaker library. Falls through to
-    # Piper on any load failure.
+    # IndexTTS-2 first if requested — best local prosody, disentangled
+    # emotion control. Auto-bootstraps reference clips from Piper on
+    # first use per character. Falls through cleanly if model isn't on
+    # disk or the package isn't installed.
+    indextts2_wrap = _load_indextts2_if_requested(voice_backend, project)
+    # XTTS-v2 fallback — one shared model, per-character speaker embeddings
+    # via reference clips or the built-in speaker library. Also available
+    # as its own primary backend (voice_backend='xtts').
     xtts_wrap = _load_xtts_if_requested(voice_backend, project)
 
     tts_cache: Dict[str, Any] = {}
@@ -1911,16 +1916,31 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
                                    f"{sid}_{shot['id']}.wav")
             ok = False
             err: Optional[str] = None
-            # XTTS first if requested — cloned voice with more prosody.
-            if xtts_wrap is not None:
+            backend_used = ""
+            # IndexTTS-2 first if requested — best local prosody. On per-line
+            # failure it falls to XTTS (if loaded) or Piper below without
+            # tearing down the whole stage.
+            if indextts2_wrap is not None:
+                try:
+                    indextts2_wrap.synthesize(line["text"], wav_abs, speaker=speaker)
+                    _pad_wav_with_silence(wav_abs, head_sec=0.25, tail_sec=0.45)
+                    ok = True
+                    backend_used = "indextts2"
+                except Exception as e:
+                    logger.warning("IndexTTS-2 synth failed for %s/%s (%s); trying next backend",
+                                   sid, shot["id"], e)
+                    err = f"indextts2: {e}"
+            # XTTS — cloned voice with more prosody than Piper.
+            if not ok and xtts_wrap is not None:
                 try:
                     xtts_wrap.synthesize(line["text"], wav_abs, speaker=speaker)
                     _pad_wav_with_silence(wav_abs, head_sec=0.25, tail_sec=0.45)
                     ok = True
+                    backend_used = "xtts"
                 except Exception as e:
                     logger.warning("XTTS synth failed for %s/%s (%s); falling back to Piper",
                                    sid, shot["id"], e)
-                    err = f"xtts: {e}"
+                    err = f"{err or ''}; xtts: {e}"
 
             tts = get_tts(voice_name) if not ok else None
             if not ok and tts is not None:
@@ -1931,6 +1951,7 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
                     # in so the line has breathing room when mixed.
                     _pad_wav_with_silence(wav_abs, head_sec=0.25, tail_sec=0.45)
                     ok = True
+                    backend_used = "piper"
                     err = None
                 except Exception as e:
                     logger.warning("Piper synth failed for %s/%s (%s); writing silence",
@@ -1943,6 +1964,7 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
                 "shot_id":  shot["id"],
                 "speaker":  speaker,
                 "voice":    voice_name,
+                "backend":  backend_used or "silent",
                 "text":     line["text"],
                 "wav":      wav_rel,
                 "duration_sec": _wav_duration_seconds(wav_abs),
@@ -2182,6 +2204,177 @@ class _XTTSWrap:
             self._tts.tts_to_file(
                 text=text, file_path=out_path, language="en", **kwargs,
             )
+
+
+class _IndexTTS2Wrap:
+    """Thin adapter over IndexTeam/IndexTTS-2 with the same shape as
+    `_XTTSWrap.synthesize(text, out_path, speaker=)`.
+
+    IndexTTS-2 unlike XTTS ships NO built-in library speakers — every
+    call needs a reference audio clip. We bootstrap those clips lazily:
+    on first synth for a speaker, if no per-character clip lives at
+    `<project>/artifacts/voice_refs/<safe>.wav`, we synthesize a short
+    seed with the character's Piper voice (from voice_cast) and cache
+    it. IndexTTS-2 then clones that seed for every subsequent line, so
+    the character's timbre is consistent AND has the prosody stability
+    IndexTTS-2 brings over Piper's flat register."""
+
+    # Sample text for the auto-bootstrap seed clip. Kept generic and
+    # ~8 seconds worth of speech so IndexTTS-2 has enough acoustic
+    # material to lock the timbre — too short and cloned lines drift.
+    _SEED_TEXT = (
+        "The night was cold. She stood by the window for a long moment, "
+        "waiting. Then she turned, picked up the letter from the table, "
+        "and walked out into the empty hall."
+    )
+
+    def __init__(self, tts, project, piper_seed_fn):
+        # tts is an initialized IndexTTS2 instance
+        # piper_seed_fn: callable (voice_name, out_path) -> None that
+        # synthesizes a wav with Piper — passed in so we don't drag
+        # the Piper import into this class's file scope.
+        self._tts = tts
+        self._project = project
+        self._piper_seed = piper_seed_fn
+        self._voice_refs_dir = os.path.join(project.artifacts_dir, "voice_refs")
+        os.makedirs(self._voice_refs_dir, exist_ok=True)
+        # Character → voice_ref path cache, built once per stage run.
+        self._ref_cache: Dict[str, str] = {}
+        cast_art = project.read_artifact("voice_cast") or {}
+        self._cast: Dict[str, Dict[str, str]] = cast_art.get("cast") or {}
+
+    def _piper_voice_for(self, speaker: str) -> str:
+        """Look up the Piper voice name assigned to `speaker` in voice_cast,
+        with the same exact→substring→first-word cascade as run_voice_actor
+        so seeding falls on the same voice the fallback would use."""
+        sp = speaker.upper().strip()
+        items = [(k, v) for k, v in self._cast.items() if k]
+        for k, v in items:
+            if k.upper().strip() == sp:
+                return v.get("voice") or _PIPER_POOL[0]["name"]
+        for k, v in items:
+            ku = k.upper().strip()
+            if sp and (sp in ku or ku in sp):
+                return v.get("voice") or _PIPER_POOL[0]["name"]
+        sp_first = sp.split()[0] if sp else ""
+        for k, v in items:
+            ku_first = k.upper().strip().split()[0] if k.strip() else ""
+            if sp_first and sp_first == ku_first:
+                return v.get("voice") or _PIPER_POOL[0]["name"]
+        return _PIPER_POOL[0]["name"]
+
+    def _ensure_ref(self, speaker: str) -> Optional[str]:
+        """Return the on-disk path to `speaker`'s reference audio clip,
+        seeding it from Piper if it doesn't exist yet. Returns None if
+        we can't produce one — caller must handle."""
+        if speaker in self._ref_cache:
+            return self._ref_cache[speaker]
+        ref_path = os.path.join(self._voice_refs_dir,
+                                f"{_safe_filename(speaker)}.wav")
+        if os.path.exists(ref_path) and os.path.getsize(ref_path) > 1024:
+            self._ref_cache[speaker] = ref_path
+            return ref_path
+        # Seed from Piper. Failure here means IndexTTS-2 can't run for
+        # this character, so the caller falls back to Piper directly.
+        voice_name = self._piper_voice_for(speaker)
+        try:
+            self._piper_seed(voice_name, ref_path)
+        except Exception as e:
+            logger.warning("IndexTTS-2 seed synthesis failed for %s (%s)", speaker, e)
+            return None
+        if not (os.path.exists(ref_path) and os.path.getsize(ref_path) > 1024):
+            return None
+        self._ref_cache[speaker] = ref_path
+        return ref_path
+
+    def synthesize(self, text: str, out_path: str, *, speaker: str = "") -> None:
+        """Match the _XTTSWrap.synthesize signature so run_voice_actor
+        can call either wrapper interchangeably. Raises on any failure —
+        run_voice_actor already catches and falls back."""
+        ref = self._ensure_ref(speaker) if speaker else None
+        if ref is None:
+            raise RuntimeError(
+                f"IndexTTS-2 needs a reference wav for '{speaker}' and "
+                "seeding from Piper failed. Drop a real clip at "
+                f"{os.path.join(self._voice_refs_dir, _safe_filename(speaker))}.wav "
+                "to bypass the seed."
+            )
+        # IndexTTS-2 emits 22050Hz WAV. We keep that native and let the
+        # mixer handle any resampling — matches the ambient/score chain.
+        self._tts.infer(
+            spk_audio_prompt=ref,
+            text=text,
+            output_path=out_path,
+            verbose=False,
+        )
+
+
+def _load_indextts2_if_requested(voice_backend: str, project) -> Optional[_IndexTTS2Wrap]:
+    """Load IndexTTS-2 when the project asks for `voice_backend='indextts2'`.
+    Returns None on any failure so the caller falls through to XTTS/Piper.
+
+    Model weights live at `~/models/indextts2/` (produced by a one-off
+    `hf download IndexTeam/IndexTTS-2 --local-dir=~/models/indextts2`).
+    The bilibili license requires the user to read the DISCLAIMER before
+    use — we assume the user has since they explicitly opted in via
+    voice_backend=indextts2."""
+    if voice_backend != "indextts2":
+        return None
+    try:
+        import torch as _torch
+        # Model files must exist on disk — IndexTTS-2 doesn't self-download
+        # from HF the way XTTS does. `_INDEXTTS2_MODEL_DIR` is a fixed
+        # per-user path we don't hide behind config: this is a heavy asset,
+        # sharing one copy across projects is the right default.
+        model_dir = _INDEXTTS2_MODEL_DIR
+        cfg_path = os.path.join(model_dir, "config.yaml")
+        if not (os.path.exists(cfg_path) and os.path.exists(os.path.join(model_dir, "gpt.pth"))):
+            logger.warning(
+                "IndexTTS-2 model not found at %s. Run: `hf download "
+                "IndexTeam/IndexTTS-2 --local-dir=%s`. Falling back to XTTS/Piper.",
+                model_dir, model_dir,
+            )
+            return None
+        from indextts.infer_v2 import IndexTTS2
+        # use_fp16 halves VRAM at negligible quality cost — matches what
+        # the upstream README recommends for consumer GPUs.
+        # DeepSpeed and the custom CUDA kernel are skipped on Windows;
+        # both add install friction for a small speedup.
+        tts = IndexTTS2(
+            cfg_path=cfg_path,
+            model_dir=model_dir,
+            use_fp16=_torch.cuda.is_available(),
+            use_cuda_kernel=False,
+            use_deepspeed=False,
+        )
+        # Build the Piper-seed closure the wrapper uses to bootstrap
+        # missing reference clips. Kept out of the wrapper so we don't
+        # import mpv2 unless we actually need to seed.
+        piper_cache: Dict[str, Any] = {}
+
+        def _piper_seed(voice_name: str, out_path: str) -> None:
+            from mpv2.classes.PiperTts import PiperTTS
+            if voice_name not in piper_cache:
+                piper_cache[voice_name] = PiperTTS(voice_name=voice_name)
+            piper_cache[voice_name].synthesize(_IndexTTS2Wrap._SEED_TEXT, out_path)
+        logger.info("IndexTTS-2 loaded from %s (fp16=%s)", model_dir,
+                    _torch.cuda.is_available())
+        return _IndexTTS2Wrap(tts, project, _piper_seed)
+    except ImportError as e:
+        logger.warning(
+            "IndexTTS-2 not installed (%s). Install with: "
+            "`pip install git+https://github.com/index-tts/index-tts.git`. "
+            "Falling back to XTTS/Piper.", e,
+        )
+        return None
+    except Exception as e:
+        logger.warning("IndexTTS-2 load failed (%s); falling back to XTTS/Piper", e)
+        return None
+
+
+_INDEXTTS2_MODEL_DIR = os.path.expanduser(
+    os.environ.get("INDEXTTS2_MODEL_DIR", r"~/models/indextts2")
+)
 
 
 def _load_xtts_if_requested(voice_backend: str, project) -> Optional[_XTTSWrap]:

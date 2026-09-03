@@ -2335,6 +2335,28 @@ def _load_indextts2_if_requested(voice_backend: str, project) -> Optional[_Index
                 model_dir, model_dir,
             )
             return None
+        # torchaudio 2.9+ routes save() through torchcodec's AudioEncoder,
+        # which needs FFmpeg shared libs (libtorchcodec_core[4-9].dll) on
+        # PATH. On a fresh Windows install those aren't present, so the
+        # save step fails after synthesis has already succeeded. We swap
+        # torchaudio.save for a soundfile-backed drop-in before importing
+        # indextts (which reads torchaudio.save into its own namespace).
+        # No functional change: PCM_16 wav in, PCM_16 wav out; only the
+        # writer library differs.
+        import torchaudio as _ta
+        try:
+            import soundfile as _sf
+            def _sf_save(path, tensor, sample_rate, encoding=None,
+                         bits_per_sample=None, **_kw):
+                arr = tensor.detach().cpu().numpy()
+                if arr.ndim == 2 and arr.shape[0] < arr.shape[1]:
+                    arr = arr.T
+                _sf.write(path, arr, int(sample_rate), subtype="PCM_16")
+            _ta.save = _sf_save
+        except ImportError:
+            logger.warning("soundfile not installed; leaving torchaudio.save "
+                           "as-is. If IndexTTS-2 synthesis fails with "
+                           "'libtorchcodec' errors, `pip install soundfile`.")
         from indextts.infer_v2 import IndexTTS2
         # use_fp16 halves VRAM at negligible quality cost — matches what
         # the upstream README recommends for consumer GPUs.

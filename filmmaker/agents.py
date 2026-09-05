@@ -3556,12 +3556,13 @@ def _load_wan22_pipeline():
             torch_dtype=_torch.bfloat16,
             local_files_only=True,
         )
-        # Sequential offload swaps layers one at a time — half the speed of
-        # model_cpu_offload but keeps the whole-transformer forward under
-        # 12GB VRAM. model_cpu_offload segfaulted on the first inference at
-        # 704x1280x121 frames on this box; the peak activation dwarfed
-        # the offload's per-module footprint.
-        pipe.enable_sequential_cpu_offload()
+        # model_cpu_offload keeps whole modules on GPU during forward and
+        # swaps at module boundaries — much faster than sequential offload
+        # (which swaps per-layer). We combine it with the reduced resolution
+        # in _render_wan22_i2v below (480x832 instead of 704x1280) so the
+        # peak activation stays under 12GB and the segfault-inducing memory
+        # spike doesn't happen.
+        pipe.enable_model_cpu_offload()
         pipe.set_progress_bar_config(disable=True)
         _WAN22_PIPE = pipe
         _WAN22_STATE = "loaded"
@@ -3615,19 +3616,23 @@ def _render_wan22_i2v(pipe, image_path: str, out_path: str, *,
         "static":  "gentle atmospheric motion, minimal camera movement",
     }.get(camera_move, "gentle atmospheric motion")
     full_prompt = f"{prompt}. {motion_hint}."
-    # Cap at 121 native frames (5s). Shorter shots get proportional cuts
-    # but the model was trained at 121 so drifting far below hurts quality.
-    num_frames = min(121, max(49, duration_sec * 24 + 1))
+    # Downsized geometry for 12GB VRAM. Native 704x1280x121 blows past
+    # `enable_model_cpu_offload`'s per-module budget on a laptop-class
+    # card. 480x832 is Wan's second training resolution (Wan 2.1 I2V's
+    # native), 49 frames = ~2s at 24fps. The editor still tiles for shots
+    # longer than 2s, but a 2s Wan clip retains real semantic motion
+    # unlike a 4s AnimateDiff clip padded to 8s.
+    num_frames = min(81, max(49, duration_sec * 24 + 1))
     # Round to 4k+1 pattern the pipeline expects (temporal compression).
     num_frames = ((num_frames - 1) // 4) * 4 + 1
     with _torch.no_grad():
         out = pipe(
             prompt=full_prompt,
-            height=704,
-            width=1280,
+            height=480,
+            width=832,
             num_frames=num_frames,
             guidance_scale=5.0,
-            num_inference_steps=50,
+            num_inference_steps=30,
             negative_prompt="low quality, distorted, deformed, watermark",
         )
     frames = out.frames[0]

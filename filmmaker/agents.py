@@ -3499,6 +3499,130 @@ def _disable_wan() -> None:
     logger.warning("Wan pipeline disabled for the rest of the session")
 
 
+_WAN22_PIPE = None
+_WAN22_STATE = "unknown"   # unknown | loaded | disabled
+_WAN22_MODEL_DIR = os.path.expanduser(
+    os.environ.get("WAN22_MODEL_DIR", r"~/models/wan22-ti2v-5b")
+)
+
+
+def _load_wan22_pipeline():
+    """Load Wan 2.2 TI2V-5B (diffusers format) lazily. Unlike Wan 2.1 T2V
+    this one takes a keyframe image directly (I2V mode) and produces 704p
+    native output at 24fps for ~5s per generation, which is exactly what
+    the motion_shots stage wants — no more tiling short clips over long
+    slots.
+
+    Runs at bf16 with full CPU offload to fit 12GB VRAM. Community reports
+    put a 5s clip at 15-30 min per shot on 12GB with offload; the caller
+    should plan overnight-scale renders for 30+ shot films.
+
+    Weights must be at `~/models/wan22-ti2v-5b/` (or `$WAN22_MODEL_DIR`) —
+    the 34GB `Wan-AI/Wan2.2-TI2V-5B-Diffusers` HF repo laid down by a one-
+    off `hf download ... --local-dir=~/models/wan22-ti2v-5b`. Returns
+    the pipeline handle on success, None on any failure so the caller
+    falls through to Wan 2.1, AnimateDiff, or Ken Burns."""
+    global _WAN22_PIPE, _WAN22_STATE
+    if _WAN22_STATE == "disabled":
+        return None
+    if _WAN22_STATE == "loaded":
+        return _WAN22_PIPE
+    try:
+        import torch as _torch
+        model_dir = _WAN22_MODEL_DIR
+        # Cheap sanity: at least the model_index.json and a transformer
+        # shard should exist. Without them the from_pretrained will just
+        # try to hit HF Hub, which is what we're avoiding.
+        idx = os.path.join(model_dir, "model_index.json")
+        if not os.path.exists(idx):
+            logger.warning(
+                "Wan 2.2 model not found at %s. Run: `hf download "
+                "Wan-AI/Wan2.2-TI2V-5B-Diffusers --local-dir=%s` (~34GB). "
+                "motion_shots will fall back.", model_dir, model_dir,
+            )
+            _WAN22_STATE = "disabled"
+            return None
+        # Newer diffusers required — WanPipeline for Wan 2.2 needs the
+        # `image=` kwarg support that landed after diffusers 0.32. If the
+        # installed version predates that we get a TypeError on infer.
+        from diffusers import WanPipeline, AutoencoderKLWan
+        vae = AutoencoderKLWan.from_pretrained(
+            model_dir, subfolder="vae", torch_dtype=_torch.float32,
+            local_files_only=True,
+        )
+        pipe = WanPipeline.from_pretrained(
+            model_dir,
+            vae=vae,
+            torch_dtype=_torch.bfloat16,
+            local_files_only=True,
+        )
+        pipe.enable_model_cpu_offload()  # essential for 12GB VRAM
+        pipe.set_progress_bar_config(disable=True)
+        _WAN22_PIPE = pipe
+        _WAN22_STATE = "loaded"
+        logger.info("Wan 2.2 TI2V-5B loaded from %s (bf16 + CPU offload)", model_dir)
+        return pipe
+    except Exception as e:
+        _WAN22_STATE = "disabled"
+        logger.warning("Wan 2.2 unavailable (%s); motion_shots will fall back", e)
+        return None
+
+
+def _disable_wan22() -> None:
+    global _WAN22_PIPE, _WAN22_STATE
+    _WAN22_PIPE = None
+    _WAN22_STATE = "disabled"
+    try:
+        import torch as _torch
+        if _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
+    except Exception:
+        pass
+    logger.warning("Wan 2.2 disabled for the rest of the session")
+
+
+def _render_wan22_i2v(pipe, image_path: str, out_path: str, *,
+                       prompt: str, duration_sec: int,
+                       camera_move: str) -> None:
+    """Render one motion clip from a keyframe using Wan 2.2 TI2V-5B.
+
+    Native output is 704x1280 at 24fps for 121 frames = ~5s. We clamp the
+    request to that native shape and let the editor either accept the
+    5s clip or trim to shot duration. Chained-generation for longer shots
+    (feed last frame of clip N into clip N+1) is doable but not wired
+    here — first cut is one 5s clip per shot."""
+    import torch as _torch
+    from diffusers.utils import export_to_video, load_image
+    motion_hint = {
+        "pan":     "smooth horizontal camera pan",
+        "dolly":   "slow dolly-in",
+        "crane":   "camera cranes upward",
+        "handheld":"subtle handheld shake",
+        "whip":    "fast whip pan",
+        "static":  "gentle atmospheric motion, minimal camera movement",
+    }.get(camera_move, "gentle atmospheric motion")
+    full_prompt = f"{prompt}. {motion_hint}."
+    image = load_image(image_path)
+    # Cap at 121 native frames (5s). Shorter shots get proportional cuts
+    # but the model was trained at 121 so drifting far below hurts quality.
+    num_frames = min(121, max(49, duration_sec * 24 + 1))
+    # Round to 4k+1 pattern the pipeline expects (temporal compression).
+    num_frames = ((num_frames - 1) // 4) * 4 + 1
+    with _torch.no_grad():
+        out = pipe(
+            prompt=full_prompt,
+            image=image,
+            height=704,
+            width=1280,
+            num_frames=num_frames,
+            guidance_scale=5.0,
+            num_inference_steps=50,
+            negative_prompt="low quality, distorted, deformed, watermark",
+        )
+    frames = out.frames[0]
+    export_to_video(frames, out_path, fps=24)
+
+
 _MOTION_SHOTS_MAX_WAN = 40   # Wan T2V is ~260s per 3s clip. Cap when Wan is
                               # the only motion backend so long films finish.
 
@@ -3528,6 +3652,7 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
     svd_pipe = None
     animatediff_pipe = None
     wan_pipe = None
+    wan22_pipe = None
     if backend_cfg == "kenburns":
         pass  # nothing to load; every shot falls through
     elif backend_cfg == "animatediff":
@@ -3536,6 +3661,11 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
         svd_pipe = _load_svd_pipeline()
     elif backend_cfg == "wan":
         wan_pipe = _load_wan_pipeline()
+    elif backend_cfg == "wan22":
+        # Wan 2.2 TI2V-5B — keyframe-conditioned I2V, 704p native, 5s
+        # clips. Overnight-scale for 30+ shot films (15-30 min/clip on
+        # 12GB). Explicit opt-in only; auto never picks it silently.
+        wan22_pipe = _load_wan22_pipeline()
     else:  # auto
         svd_pipe = _load_svd_pipeline()
         if svd_pipe is None:
@@ -3550,7 +3680,7 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
                 return {
                     "motion_shots": [],
                     "svd_count": 0, "animatediff_count": 0,
-                    "wan_count": 0, "kb_count": 0,
+                    "wan_count": 0, "wan22_count": 0, "kb_count": 0,
                     "skipped_reason": f"only Wan available and {len(shots)} > {_MOTION_SHOTS_MAX_WAN}",
                 }
             wan_pipe = _load_wan_pipeline()
@@ -3558,6 +3688,7 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
     used_svd = 0
     used_animatediff = 0
     used_wan = 0
+    used_wan22 = 0
     used_kb = 0
     total = len(shots)
     project.append_event({"type": "motion_progress", "done": 0, "total": total})
@@ -3576,8 +3707,26 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
         backend = "kenburns"
         error: Optional[str] = None
 
+        # Wan 2.2 TI2V-5B — keyframe-conditioned, 704p native. Tried
+        # first when explicitly configured because it's the best quality
+        # option on 12GB and produces a full 5s clip per generation.
+        if wan22_pipe is not None and os.path.exists(keyframe_abs):
+            try:
+                _render_wan22_i2v(
+                    wan22_pipe, keyframe_abs, mp4_abs,
+                    prompt=s.get("prompt", "") or "",
+                    duration_sec=dur, camera_move=move,
+                )
+                rendered = True; backend = "wan22"; used_wan22 += 1
+            except Exception as e:
+                logger.exception("Wan 2.2 failed for %s/%s", sid, shot_id)
+                error = f"wan22: {e}"
+                if "out of memory" in str(e).lower():
+                    _disable_wan22()
+                    wan22_pipe = None
+
         # Try SVD first (best quality, keyframe-conditioned)
-        if svd_pipe is not None and os.path.exists(keyframe_abs):
+        if not rendered and svd_pipe is not None and os.path.exists(keyframe_abs):
             try:
                 _render_svd_i2v(svd_pipe, keyframe_abs, mp4_abs, duration_sec=clip_dur)
                 rendered = True; backend = "svd"; used_svd += 1
@@ -3647,7 +3796,12 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
         "svd_count": used_svd,
         "animatediff_count": used_animatediff,
         "wan_count": used_wan,
+        "wan22_count": used_wan22,
         "kb_count": used_kb,
+        "backend_counts": {
+            "svd": used_svd, "animatediff": used_animatediff,
+            "wan": used_wan, "wan22": used_wan22, "kenburns": used_kb,
+        },
     }
 
 

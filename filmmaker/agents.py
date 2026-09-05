@@ -1548,12 +1548,24 @@ def run_editor(project: Project) -> Dict[str, Any]:
 
 
 def _standardize_motion_clip(src: str, dst: str, duration_sec: int) -> None:
-    """Re-encode a Wan I2V mp4 to the editor's canonical 1280x720 30fps H.264
+    """Re-encode a motion mp4 to the editor's canonical 1280x720 30fps H.264
     (yuv420p) container so all clips concat with stream copy. Duration is
-    padded or trimmed to `duration_sec`."""
+    padded or trimmed to `duration_sec`.
+
+    Filter chain:
+      - lanczos upscale (sharper than default bilinear on Wan's 832x480 out)
+      - hqdn3d denoise (cleans model dithering + upscale artifacts, light)
+      - unsharp mask (5x5 kernel, small gain — recovers edge crispness
+        that upscale + denoise soften)
+    The three run cheap on ffmpeg's CPU pipeline (<1s per shot) and
+    together take a 480p AI-video output from 'obviously upscaled' to
+    'watchable on a 1080p display'."""
     fps = 30
-    vf = ("scale=1280:720:force_original_aspect_ratio=decrease,"
-          "pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30")
+    vf = ("scale=1280:720:force_original_aspect_ratio=decrease:flags=lanczos,"
+          "pad=1280:720:(ow-iw)/2:(oh-ih)/2,"
+          "hqdn3d=1.5:1.5:6:6,"
+          "unsharp=5:5:0.6:5:5:0.0,"
+          "fps=30")
     cmd = [
         "ffmpeg", "-y",
         "-stream_loop", "-1",

@@ -3556,7 +3556,12 @@ def _load_wan22_pipeline():
             torch_dtype=_torch.bfloat16,
             local_files_only=True,
         )
-        pipe.enable_model_cpu_offload()  # essential for 12GB VRAM
+        # Sequential offload swaps layers one at a time — half the speed of
+        # model_cpu_offload but keeps the whole-transformer forward under
+        # 12GB VRAM. model_cpu_offload segfaulted on the first inference at
+        # 704x1280x121 frames on this box; the peak activation dwarfed
+        # the offload's per-module footprint.
+        pipe.enable_sequential_cpu_offload()
         pipe.set_progress_bar_config(disable=True)
         _WAN22_PIPE = pipe
         _WAN22_STATE = "loaded"
@@ -3584,15 +3589,23 @@ def _disable_wan22() -> None:
 def _render_wan22_i2v(pipe, image_path: str, out_path: str, *,
                        prompt: str, duration_sec: int,
                        camera_move: str) -> None:
-    """Render one motion clip from a keyframe using Wan 2.2 TI2V-5B.
+    """Render one motion clip using Wan 2.2 TI2V-5B.
 
-    Native output is 704x1280 at 24fps for 121 frames = ~5s. We clamp the
-    request to that native shape and let the editor either accept the
-    5s clip or trim to shot duration. Chained-generation for longer shots
-    (feed last frame of clip N into clip N+1) is doable but not wired
-    here — first cut is one 5s clip per shot."""
+    Native output: 704x1280 at 24fps for 121 frames = ~5s. Diffusers'
+    current WanPipeline API doesn't expose the `image=` I2V path for the
+    5B model (that lives in the modular-pipeline experimental API and
+    the main-branch diffusers). So this runs in T2V mode using the shot
+    prompt — which is the same prompt SDXL used for the keyframe, plus
+    a motion hint — and drops the keyframe as a conditioning signal.
+
+    Character consistency drops without the keyframe (Wan re-invents the
+    visual from prompt alone), but we keep 704p native resolution and 5s
+    native clips, which fix the blur + tile-repeat complaints. The
+    `image_path` arg is preserved so run_motion_shots doesn't need to
+    branch — it's currently unused past the existence check the caller
+    already does."""
     import torch as _torch
-    from diffusers.utils import export_to_video, load_image
+    from diffusers.utils import export_to_video
     motion_hint = {
         "pan":     "smooth horizontal camera pan",
         "dolly":   "slow dolly-in",
@@ -3602,7 +3615,6 @@ def _render_wan22_i2v(pipe, image_path: str, out_path: str, *,
         "static":  "gentle atmospheric motion, minimal camera movement",
     }.get(camera_move, "gentle atmospheric motion")
     full_prompt = f"{prompt}. {motion_hint}."
-    image = load_image(image_path)
     # Cap at 121 native frames (5s). Shorter shots get proportional cuts
     # but the model was trained at 121 so drifting far below hurts quality.
     num_frames = min(121, max(49, duration_sec * 24 + 1))
@@ -3611,7 +3623,6 @@ def _render_wan22_i2v(pipe, image_path: str, out_path: str, *,
     with _torch.no_grad():
         out = pipe(
             prompt=full_prompt,
-            image=image,
             height=704,
             width=1280,
             num_frames=num_frames,

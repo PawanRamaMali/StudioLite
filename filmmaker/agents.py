@@ -3517,6 +3517,66 @@ _WAN22_MODEL_DIR = os.path.expanduser(
     os.environ.get("WAN22_MODEL_DIR", r"~/models/wan22-ti2v-5b")
 )
 
+# Path to an isolated venv Python that has main-branch diffusers + transformers
+# 5.x installed. Wan 2.2 I2V mode (real keyframe conditioning) needs those
+# newer libs, but they're incompatible with the transformers 4.x that
+# IndexTTS-2 pins. So we run the Wan I2V renderer as a subprocess against
+# this venv and keep the main StudioLite runtime unchanged. Set to empty
+# string to disable I2V and force T2V mode.
+_WAN22_VENV_PYTHON = os.path.expanduser(
+    os.environ.get("WAN22_VENV_PYTHON",
+                   r"~/venvs/wan22/Scripts/python.exe")
+)
+
+
+def _wan22_i2v_available() -> bool:
+    """Cheap check: does the isolated venv exist and does the standalone
+    render script live at the expected path? Doesn't verify the venv's
+    packages are healthy — subprocess call will report that."""
+    if not _WAN22_VENV_PYTHON or not os.path.exists(_WAN22_VENV_PYTHON):
+        return False
+    script = os.path.join(os.path.dirname(__file__), "wan22_render.py")
+    return os.path.exists(script)
+
+
+def _render_wan22_i2v_venv(image_path: str, out_path: str, *,
+                            prompt: str, duration_sec: int,
+                            camera_move: str) -> bool:
+    """Try to render a shot via the isolated-venv I2V path. Returns True
+    on success, False on any subprocess failure so the caller can fall
+    back to the in-process T2V path without breaking the run."""
+    import subprocess as _sp
+    script = os.path.join(os.path.dirname(__file__), "wan22_render.py")
+    cmd = [
+        _WAN22_VENV_PYTHON, script,
+        "--model-dir", _WAN22_MODEL_DIR,
+        "--image", image_path,
+        "--prompt", prompt,
+        "--out", out_path,
+        "--duration-sec", str(int(duration_sec)),
+        "--camera-move", camera_move or "static",
+    ]
+    try:
+        # 25-min per-shot budget — I2V is slower than T2V (about 15-20 min
+        # observed) and we want a hard ceiling before falling back.
+        res = _sp.run(cmd, capture_output=True, text=True, timeout=1500)
+    except _sp.TimeoutExpired:
+        logger.warning("Wan 2.2 I2V venv timed out for %s", out_path)
+        return False
+    except Exception as e:
+        logger.warning("Wan 2.2 I2V venv launch failed (%s)", e)
+        return False
+    if res.returncode != 0:
+        logger.warning(
+            "Wan 2.2 I2V venv returned %d for %s\nstderr: %s",
+            res.returncode, out_path, (res.stderr or "")[-800:],
+        )
+        return False
+    if not (os.path.exists(out_path) and os.path.getsize(out_path) > 1024):
+        logger.warning("Wan 2.2 I2V venv produced no output at %s", out_path)
+        return False
+    return True
+
 
 def _load_wan22_pipeline():
     """Load Wan 2.2 TI2V-5B (diffusers format) lazily. Unlike Wan 2.1 T2V
@@ -3604,19 +3664,26 @@ def _render_wan22_i2v(pipe, image_path: str, out_path: str, *,
                        camera_move: str) -> None:
     """Render one motion clip using Wan 2.2 TI2V-5B.
 
-    Native output: 704x1280 at 24fps for 121 frames = ~5s. Diffusers'
-    current WanPipeline API doesn't expose the `image=` I2V path for the
-    5B model (that lives in the modular-pipeline experimental API and
-    the main-branch diffusers). So this runs in T2V mode using the shot
-    prompt — which is the same prompt SDXL used for the keyframe, plus
-    a motion hint — and drops the keyframe as a conditioning signal.
+    Tries real I2V via the isolated venv first (character consistency
+    preserved by keyframe conditioning); falls back to in-process T2V
+    if the venv path is unavailable or the subprocess fails.
 
-    Character consistency drops without the keyframe (Wan re-invents the
-    visual from prompt alone), but we keep 704p native resolution and 5s
-    native clips, which fix the blur + tile-repeat complaints. The
-    `image_path` arg is preserved so run_motion_shots doesn't need to
-    branch — it's currently unused past the existence check the caller
-    already does."""
+    Native output: 704x1280 at 24fps for 121 frames = ~5s. Diffusers'
+    current in-process WanPipeline API doesn't expose the `image=` I2V
+    path for the 5B model (that lives in main-branch diffusers). So T2V
+    fallback uses the shot prompt only and drops the keyframe."""
+    # I2V path — call the standalone renderer in the wan22 venv.
+    if _wan22_i2v_available():
+        if _render_wan22_i2v_venv(image_path, out_path,
+                                    prompt=prompt,
+                                    duration_sec=duration_sec,
+                                    camera_move=camera_move):
+            return
+        logger.warning(
+            "Wan 2.2 I2V venv failed for %s; falling back to in-process T2V",
+            out_path,
+        )
+
     import torch as _torch
     from diffusers.utils import export_to_video
     motion_hint = {

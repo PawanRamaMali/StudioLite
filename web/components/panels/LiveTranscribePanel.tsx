@@ -183,13 +183,44 @@ export default function LiveTranscribePanel() {
     meterCtxRef.current?.close().catch(() => { /* ignore */ });
     setErrorMsg(null);
     try {
+      // For the meter we deliberately turn OFF Chrome's default voice
+      // processing (echo cancellation, noise suppression, auto gain). A
+      // "test mic" should show the raw signal — with NS on, a quiet room
+      // can be driven to true silence, and with AEC on the mic can be
+      // canceled when Chrome thinks it hears its own output.
+      const audioConstraints: MediaTrackConstraints = {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      };
+      if (micDeviceId) audioConstraints.deviceId = { exact: micDeviceId };
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: micDeviceId ? { deviceId: { exact: micDeviceId } } : true,
+        audio: audioConstraints,
         video: false,
       });
       meterStreamRef.current = stream;
       // Labels are only populated once a stream has been granted.
       refreshInputDevices();
+      const track = stream.getAudioTracks()[0];
+      console.log("[mic-meter] track:", track?.label, "readyState:", track?.readyState,
+                    "muted:", track?.muted, "settings:", track?.getSettings?.());
+      // Browsers set MediaStreamTrack.muted = true when the OS stops delivering
+      // audio (e.g. Windows Privacy denies microphone access to the app, or
+      // the physical mic mute switch is engaged). That's a real, actionable
+      // signal — surface it up front rather than waiting the 1.5s silence probe.
+      if (track && track.muted) {
+        setErrorMsg(
+          `The mic track "${track.label || "(unknown)"}" is muted at the OS level. ` +
+          "Check Windows Settings › Privacy & security › Microphone (make sure " +
+          "'Let apps access your microphone' AND the entry for your browser are ON), " +
+          "then click Test mic again."
+        );
+      }
+      // Also react to a mute that arrives later.
+      if (track) {
+        track.onmute = () => setErrorMsg("The OS just muted this mic mid-test.");
+        track.onunmute = () => { /* clear soft error on unmute */ };
+      }
       const ctx = new AudioContext();
       meterCtxRef.current = ctx;
       // Same trap as the recording path (fixed in 219c235): the click gesture
@@ -197,23 +228,47 @@ export default function LiveTranscribePanel() {
       // prompt, so the AudioContext opens in `suspended` state. Analyser then
       // reports the silent baseline (128) forever, giving RMS = 0 and the
       // "Barely any signal" hint no matter how loud the mic actually is.
+      console.log("[mic-meter] AudioContext state before resume:", ctx.state);
       if (ctx.state === "suspended") {
         try { await ctx.resume(); } catch { /* ignore — analyser will report 0 */ }
       }
+      console.log("[mic-meter] AudioContext state after resume:", ctx.state,
+                    "sampleRate:", ctx.sampleRate);
       const src = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 1024;
       src.connect(analyser);
       const buf = new Uint8Array(analyser.fftSize);
       setMetering(true);
+      let frameCount = 0;
+      let sawNonSilence = false;
       const loop = () => {
         analyser.getByteTimeDomainData(buf);
         let sum = 0;
+        let allBaseline = true;
         for (let i = 0; i < buf.length; i++) {
           const v = (buf[i] - 128) / 128;
           sum += v * v;
+          if (buf[i] !== 128) allBaseline = false;
         }
         const rms = Math.sqrt(sum / buf.length);
+        if (!allBaseline) sawNonSilence = true;
+        // After ~90 frames (~1.5s @ 60fps), if EVERY sample is still the
+        // 128 baseline, the mic isn't handing audio to the audio graph.
+        // That's a very different failure from "quiet room" — surface it.
+        frameCount++;
+        if (frameCount === 90 && !sawNonSilence) {
+          setErrorMsg(
+            "The audio graph is receiving only silence frames from this mic. " +
+            "Windows may not be routing the input to Chrome — check Windows " +
+            "Settings › System › Sound › Input, and Chrome's Site Settings › " +
+            "Microphone for this site. Console (F12) has more details."
+          );
+        }
+        if (frameCount % 60 === 0) {
+          console.log("[mic-meter] frame", frameCount, "rms:", rms.toFixed(4),
+                        "allBaseline:", allBaseline, "ctx:", ctx.state);
+        }
         micPeakRef.current = Math.max(rms, micPeakRef.current * 0.92);
         setMicLevel(rms);
         setMicPeak(micPeakRef.current);

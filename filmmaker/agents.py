@@ -661,23 +661,28 @@ def run_storyboard(project: Project) -> Dict[str, Any]:
         if hint:
             payload["_reviewer_notes"] = hint
         user_msg = json.dumps(payload, ensure_ascii=False, indent=2)
-        raw = _chat(project, "storyboard", _STORYBOARD_SYSTEM, user_msg,
-                    want_json=True, temperature=0.4, max_tokens=5000)
-        data = llm.parse_json(raw)
-        shots = data.get("shots") or []
         norm: List[Dict[str, Any]] = []
-        for i, s in enumerate(shots):
-            if not isinstance(s, dict):
-                continue
-            norm.append({
-                "id": str(s.get("id") or f"sh{i+1}"),
-                "description": str(s.get("description", "")).strip(),
-                "subject": str(s.get("subject", "")).strip(),
-                "action": str(s.get("action", "")).strip(),
-                "dialogue": str(s.get("dialogue", "")).strip(),
-            })
+        try:
+            raw = _chat(project, "storyboard", _STORYBOARD_SYSTEM, user_msg,
+                        want_json=True, temperature=0.4, max_tokens=5000)
+            data = llm.parse_json(raw)
+            shots = data.get("shots") or []
+            for i, s in enumerate(shots):
+                if not isinstance(s, dict):
+                    continue
+                norm.append({
+                    "id": str(s.get("id") or f"sh{i+1}"),
+                    "description": str(s.get("description", "")).strip(),
+                    "subject": str(s.get("subject", "")).strip(),
+                    "action": str(s.get("action", "")).strip(),
+                    "dialogue": str(s.get("dialogue", "")).strip(),
+                })
+        except Exception as e:
+            logger.warning("Storyboard soft-failed on scene %s (%s); synthesizing one shot.",
+                           scene.get("id"), e)
         if not norm:
-            # Never leave a scene with zero shots — synthesize one.
+            # Never leave a scene with zero shots — synthesize one so the
+            # downstream pipeline has something to render.
             norm = [{
                 "id": "sh1",
                 "description": scene.get("summary", ""),
@@ -795,10 +800,15 @@ def run_cinematographer(project: Project) -> Dict[str, Any]:
             "scene": scene,
             "shots": shots,
         }, ensure_ascii=False, indent=2)
-        raw = _chat(project, "cinematographer", _CINEMATOGRAPHER_SYSTEM, user_msg,
-                    want_json=True, temperature=0.4, max_tokens=8000)
-        data = llm.parse_json(raw)
         by_id: Dict[str, Any] = {}
+        try:
+            raw = _chat(project, "cinematographer", _CINEMATOGRAPHER_SYSTEM, user_msg,
+                        want_json=True, temperature=0.4, max_tokens=8000)
+            data = llm.parse_json(raw)
+        except Exception as e:
+            logger.warning("Cinematographer soft-failed on scene %s (%s); using defaults.",
+                           scene.get("id"), e)
+            data = {"shots": []}
         for item in data.get("shots") or []:
             if not isinstance(item, dict):
                 continue

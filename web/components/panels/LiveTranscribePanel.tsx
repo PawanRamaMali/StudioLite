@@ -192,6 +192,14 @@ export default function LiveTranscribePanel() {
       refreshInputDevices();
       const ctx = new AudioContext();
       meterCtxRef.current = ctx;
+      // Same trap as the recording path (fixed in 219c235): the click gesture
+      // that opened this callback gets considered consumed by the getUserMedia
+      // prompt, so the AudioContext opens in `suspended` state. Analyser then
+      // reports the silent baseline (128) forever, giving RMS = 0 and the
+      // "Barely any signal" hint no matter how loud the mic actually is.
+      if (ctx.state === "suspended") {
+        try { await ctx.resume(); } catch { /* ignore — analyser will report 0 */ }
+      }
       const src = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 1024;

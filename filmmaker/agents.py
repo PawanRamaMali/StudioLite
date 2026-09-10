@@ -939,12 +939,18 @@ def run_shots(project: Project) -> Dict[str, Any]:
     # and no two lines end up overlapping in the mixer.
     voice_art = project.read_artifact("voice_actor") or {}
     dialogue_dur_by_key: Dict[str, float] = {}
+    dialogue_speakers_by_key: Dict[str, List[str]] = {}
     for line in voice_art.get("lines", []) or []:
         key = f"{line['scene_id']}::{line['shot_id']}"
         dialogue_dur_by_key[key] = max(
             dialogue_dur_by_key.get(key, 0.0),
             float(line.get("duration_sec", 0) or 0),
         )
+        sp = str(line.get("speaker", "")).strip()
+        if sp:
+            dialogue_speakers_by_key.setdefault(key, [])
+            if sp not in dialogue_speakers_by_key[key]:
+                dialogue_speakers_by_key[key].append(sp)
 
     # First pass: build the flat work list so we can batch across scenes.
     jobs: List[Dict[str, Any]] = []
@@ -963,10 +969,13 @@ def run_shots(project: Project) -> Dict[str, Any]:
             # so the next shot's line never starts before this one finishes.
             fitted = int(dlg_dur + 0.75) if dlg_dur > 0 else 0
             duration_sec = max(base_dur, fitted, 3)
+            speakers_here = dialogue_speakers_by_key.get(f"{sid}::{shot_id}", [])
             jobs.append({
                 "scene_id": sid,
                 "shot_id": shot_id,
-                "prompt": _shot_prompt(style, scene, shot, dp_shot, character_bios),
+                "prompt": _shot_prompt(style, scene, shot, dp_shot,
+                                       character_bios,
+                                       dialogue_speakers=speakers_here),
                 "png_path": os.path.join(scene_dir, f"{shot_id}.png"),
                 "duration_sec": duration_sec,
                 "dialogue": shot.get("dialogue", ""),
@@ -1055,11 +1064,23 @@ def run_shots(project: Project) -> Dict[str, Any]:
 
 
 def _shot_prompt(style: str, scene: Dict[str, Any], shot: Dict[str, Any],
-                 dp: Dict[str, Any], character_bios: Optional[Dict[str, str]] = None) -> str:
+                 dp: Dict[str, Any], character_bios: Optional[Dict[str, str]] = None,
+                 dialogue_speakers: Optional[List[str]] = None) -> str:
     """Build a single-line SDXL prompt from the DP + storyboard artifacts.
-    If character_bios is provided, physical descriptors for any character
-    named in this shot's subject/action get baked into the prompt so the
-    same person renders with the same look across scenes."""
+
+    Character bios get baked in from three signals, in order of confidence:
+
+      1. Explicit mentions in subject/action/description (highest signal).
+      2. Dialogue speakers for this shot from the voice_actor artifact.
+      3. Scene's declared characters from the breakdown — fallback when the
+         shot text is a wide/establishing that doesn't name anyone.
+
+    All matched characters get their full bio in the prompt, positioned
+    before the shot description so they land inside the CLIP 77-token
+    window before palette/lighting boilerplate gets truncated. This is
+    what nudges Wan T2V (which sees the same prompt as SDXL) toward the
+    right character shot after shot without requiring the I2V keyframe
+    conditioning."""
     style_prefix = "cinematic photorealistic still, film grain" if style == "photoreal" \
                    else "stylized illustrated frame, painterly, cinematic"
 
@@ -1069,15 +1090,50 @@ def _shot_prompt(style: str, scene: Dict[str, Any], shot: Dict[str, Any],
         f"{dp.get('lens_mm', 35)}mm lens",
     ]
 
-    # Character descriptors take priority so they land inside the CLIP 77-token
-    # window before palette/lighting boilerplate gets truncated.
+    matched: List[str] = []  # ordered, uppercased, deduplicated
     if character_bios:
+        seen: set = set()
+
+        def _try(name_up: str) -> None:
+            if name_up and name_up not in seen and name_up in bios_by_upper:
+                matched.append(name_up)
+                seen.add(name_up)
+
+        bios_by_upper = {n.upper(): (n, b) for n, b in character_bios.items()}
+
+        # Signal 1 — explicit mentions in the shot's own text.
         haystack = f"{shot.get('subject','')} {shot.get('action','')} {shot.get('description','')}".upper()
-        for name, bio in character_bios.items():
-            for tok in name.upper().split():
+        for name_up in bios_by_upper:
+            for tok in name_up.split():
                 if len(tok) >= 3 and tok in haystack:
-                    parts.append(f"{name}: {bio}")
+                    _try(name_up)
                     break
+
+        # Signal 2 — dialogue speakers for this shot.
+        for sp in (dialogue_speakers or []):
+            _try(sp.upper().strip())
+            first = sp.upper().strip().split()[:1]
+            if first:
+                # Match by first token so "MARGO" and "MARGO (V.O.)" collapse.
+                for name_up in bios_by_upper:
+                    if name_up.split()[:1] == first:
+                        _try(name_up)
+
+        # Signal 3 — scene's declared characters. Fallback when the shot
+        # text is a wide/establishing that doesn't name anyone but we
+        # know the scene features a specific character.
+        for name in (scene.get("characters") or []):
+            name_up = str(name).upper().strip()
+            _try(name_up)
+            first = name_up.split()[:1]
+            if first:
+                for cand in bios_by_upper:
+                    if cand.split()[:1] == first:
+                        _try(cand)
+
+    for name_up in matched:
+        display_name, bio = bios_by_upper[name_up]
+        parts.append(f"{display_name}: {bio}")
 
     parts += [
         shot.get("description") or shot.get("action") or "",

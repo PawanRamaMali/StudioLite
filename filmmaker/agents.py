@@ -3532,17 +3532,37 @@ _WAN22_MODEL_DIR = os.path.expanduser(
 # newer libs, but they're incompatible with the transformers 4.x that
 # IndexTTS-2 pins. So we run the Wan I2V renderer as a subprocess against
 # this venv and keep the main StudioLite runtime unchanged. Set to empty
-# string to disable I2V and force T2V mode.
+# string to disable I2V and force T2V mode. See docs/wan22_i2v.md for
+# setup instructions on 24GB+ desktop cards where I2V is actually usable.
 _WAN22_VENV_PYTHON = os.path.expanduser(
     os.environ.get("WAN22_VENV_PYTHON",
                    r"~/venvs/wan22/Scripts/python.exe")
+)
+
+# Force T2V mode by setting WAN22_MODE=t2v. Set to auto (default) to try
+# I2V first when the venv is present, or i2v to fail rather than fall
+# back to T2V — useful when you WANT the venv path to render and would
+# rather see an error than get silently-different output.
+_WAN22_MODE = os.environ.get("WAN22_MODE", "auto").strip().lower()
+
+# Per-shot subprocess timeout in seconds for the I2V venv path. Defaults
+# to 60 min because Wan 2.2 I2V on a 24GB desktop card at production
+# settings (30 steps, 49 frames, both transformer passes) lands somewhere
+# in the 20-40 min range and we want headroom before we give up. Bump
+# with WAN22_I2V_TIMEOUT_SEC when running on slower hardware.
+_WAN22_I2V_TIMEOUT_SEC = int(
+    os.environ.get("WAN22_I2V_TIMEOUT_SEC", "3600")
 )
 
 
 def _wan22_i2v_available() -> bool:
     """Cheap check: does the isolated venv exist and does the standalone
     render script live at the expected path? Doesn't verify the venv's
-    packages are healthy — subprocess call will report that."""
+    packages are healthy — subprocess call will report that. Also honors
+    WAN22_MODE=t2v to force the in-process T2V path even when the venv
+    is present."""
+    if _WAN22_MODE == "t2v":
+        return False
     if not _WAN22_VENV_PYTHON or not os.path.exists(_WAN22_VENV_PYTHON):
         return False
     script = os.path.join(os.path.dirname(__file__), "wan22_render.py")
@@ -3567,9 +3587,8 @@ def _render_wan22_i2v_venv(image_path: str, out_path: str, *,
         "--camera-move", camera_move or "static",
     ]
     try:
-        # 25-min per-shot budget — I2V is slower than T2V (about 15-20 min
-        # observed) and we want a hard ceiling before falling back.
-        res = _sp.run(cmd, capture_output=True, text=True, timeout=1500)
+        res = _sp.run(cmd, capture_output=True, text=True,
+                       timeout=_WAN22_I2V_TIMEOUT_SEC)
     except _sp.TimeoutExpired:
         logger.warning("Wan 2.2 I2V venv timed out for %s", out_path)
         return False
@@ -3689,6 +3708,13 @@ def _render_wan22_i2v(pipe, image_path: str, out_path: str, *,
                                     duration_sec=duration_sec,
                                     camera_move=camera_move):
             return
+        if _WAN22_MODE == "i2v":
+            # Explicit opt-in — surface the failure instead of masking it.
+            raise RuntimeError(
+                "Wan 2.2 I2V venv failed for this shot and WAN22_MODE=i2v "
+                "disables the T2V fallback. Check the venv logs, then either "
+                "unset WAN22_MODE or fix the venv setup (see docs/wan22_i2v.md)."
+            )
         logger.warning(
             "Wan 2.2 I2V venv failed for %s; falling back to in-process T2V",
             out_path,

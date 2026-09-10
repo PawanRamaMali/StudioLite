@@ -3203,6 +3203,165 @@ def run_titles(project: Project) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# NEW STAGE — Upscale
+#
+# Optional neural upscale of the finished film via Real-ESRGAN. Runs
+# frame by frame on GPU with spandrel as the model loader (works with the
+# ai-forever/Real-ESRGAN weights hosted on HF). Skips itself as a no-op
+# when upscale_backend is 'none' or the model/library isn't available so
+# the film still ends at titles.mp4/final.mp4 in the common case.
+# ---------------------------------------------------------------------------
+
+_REALESRGAN_MODEL_DIR = os.path.expanduser(
+    os.environ.get("REALESRGAN_MODEL_DIR", r"~/models/realesrgan")
+)
+
+
+def run_upscale(project: Project) -> Dict[str, Any]:
+    """Post-process the final cut through Real-ESRGAN. On the happy path we
+    write `final_upscaled.mp4` next to `final.mp4` and update the artifact
+    to point to it. When the backend is 'none' or unavailable we return a
+    no-op artifact so the pipeline still marks the stage 'done'."""
+    backend = (project.meta.config.upscale_backend or "none").lower()
+    src_abs = os.path.join(project.dir, "final.mp4")
+    if backend == "none":
+        return {"backend": "none", "skipped": "upscale_backend=none",
+                "output_path": "final.mp4"}
+    if not os.path.exists(src_abs):
+        return {"backend": backend, "skipped": "final.mp4 not found",
+                "output_path": None}
+    scale = 2 if backend == "realesrgan_x2" else 4 if backend == "realesrgan_x4" else 0
+    if scale == 0:
+        return {"backend": backend, "skipped": f"unknown backend {backend}",
+                "output_path": "final.mp4"}
+
+    weight_name = f"RealESRGAN_x{scale}.pth"
+    weight_path = os.path.join(_REALESRGAN_MODEL_DIR, weight_name)
+    if not os.path.exists(weight_path):
+        # Try to pull it from HF on demand — small file, one-off cost.
+        try:
+            from huggingface_hub import hf_hub_download
+            hf_hub_download("ai-forever/Real-ESRGAN", weight_name,
+                             local_dir=_REALESRGAN_MODEL_DIR)
+        except Exception as e:
+            logger.warning("Real-ESRGAN weights unavailable (%s); skipping upscale", e)
+            return {"backend": backend, "skipped": f"weights: {e}",
+                    "output_path": "final.mp4"}
+
+    try:
+        from spandrel import ModelLoader
+        import torch as _torch
+    except ImportError as e:
+        logger.warning("spandrel/torch not importable (%s); skipping upscale", e)
+        return {"backend": backend, "skipped": f"import: {e}",
+                "output_path": "final.mp4"}
+
+    device = "cuda" if _torch.cuda.is_available() else "cpu"
+    model = ModelLoader().load_from_file(weight_path)
+    model.to(device).eval()
+    logger.info("Real-ESRGAN loaded (arch=%s scale=%d device=%s)",
+                model.architecture.name if hasattr(model.architecture, "name") else "?",
+                model.scale, device)
+
+    out_abs = os.path.join(project.dir, "final_upscaled.mp4")
+    _upscale_video_realesrgan(model, src_abs, out_abs, device=device)
+
+    if not (os.path.exists(out_abs) and os.path.getsize(out_abs) > 1024):
+        return {"backend": backend, "skipped": "upscale produced no output",
+                "output_path": "final.mp4"}
+
+    return {
+        "backend": backend,
+        "scale": model.scale,
+        "output_path": os.path.relpath(out_abs, project.dir).replace(os.sep, "/"),
+    }
+
+
+def _upscale_video_realesrgan(model, src_abs: str, out_abs: str,
+                                *, device: str) -> None:
+    """Stream frames from `src_abs` through the model and mux them into
+    `out_abs` with the original audio track. Uses two ffmpeg subprocesses
+    connected by a raw video pipe so we never touch the disk for frames.
+
+    Model input/output is float32 in [0, 1], NCHW. We do batched-of-one
+    to keep VRAM predictable across arbitrary source resolutions; a
+    720p input at 2x becomes 1440p output which is ~11MB at RGB float32
+    per frame — comfortably inside 12GB VRAM."""
+    import numpy as _np
+    import torch as _torch
+
+    # Read source geometry first — need the output dimensions for ffmpeg.
+    probe = subprocess.check_output([
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,r_frame_rate",
+        "-of", "csv=p=0", src_abs,
+    ], text=True).strip().split(",")
+    src_w, src_h = int(probe[0]), int(probe[1])
+    # ffprobe returns fps as "num/den"
+    num, den = probe[2].split("/")
+    fps = float(num) / float(den) if float(den) > 0 else 30.0
+    dst_w, dst_h = src_w * model.scale, src_h * model.scale
+    logger.info("Upscaling %dx%d -> %dx%d @ %.2f fps", src_w, src_h, dst_w, dst_h, fps)
+
+    frame_bytes = src_w * src_h * 3
+    reader = subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-i", src_abs,
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        stdout=subprocess.PIPE,
+    )
+    # Encoder ingests upscaled frames and muxes source audio in one pass.
+    writer = subprocess.Popen(
+        ["ffmpeg", "-y", "-v", "error",
+         "-f", "rawvideo", "-pix_fmt", "rgb24",
+         "-s", f"{dst_w}x{dst_h}", "-r", f"{fps}",
+         "-i", "-",
+         "-i", src_abs,
+         "-map", "0:v", "-map", "1:a?",
+         "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+         "-pix_fmt", "yuv420p",
+         "-c:a", "copy",
+         "-shortest",
+         out_abs],
+        stdin=subprocess.PIPE,
+    )
+
+    frame_count = 0
+    try:
+        assert reader.stdout is not None
+        assert writer.stdin is not None
+        while True:
+            raw = reader.stdout.read(frame_bytes)
+            if not raw or len(raw) < frame_bytes:
+                break
+            img = _np.frombuffer(raw, dtype=_np.uint8).reshape(src_h, src_w, 3)
+            # HWC uint8 -> NCHW float32 in [0,1]
+            tensor = (
+                _torch.from_numpy(img).permute(2, 0, 1).float().unsqueeze(0)
+                / 255.0
+            ).to(device)
+            with _torch.no_grad():
+                out_t = model(tensor)
+            out_np = (
+                out_t.clamp(0.0, 1.0).squeeze(0).permute(1, 2, 0).cpu().numpy()
+                * 255.0
+            ).astype(_np.uint8)
+            writer.stdin.write(out_np.tobytes())
+            frame_count += 1
+            if frame_count % 60 == 0:
+                logger.info("upscale: %d frames processed", frame_count)
+    finally:
+        try:
+            if writer.stdin:
+                writer.stdin.close()
+        except Exception:
+            pass
+        reader.wait(timeout=60)
+        writer.wait(timeout=600)
+    logger.info("upscale done: %d frames -> %s", frame_count, out_abs)
+
+
 def _render_title_card(out_path: str, *, title: str, subtitle: str, duration: float) -> None:
     """Black 1280x720 card with the title fading in for the first second,
     holding, then fading out. Optional subtitle underneath.

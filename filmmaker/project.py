@@ -69,6 +69,14 @@ class ProjectConfig:
     # 1.5, MIT, 2-4B DiT, benchmarks between Suno v4.5 and v5; loader
     # falls through until weights are cached).
     music_backend: str = "musicgen"
+    # Post-processing upscale of the final cut. "none" (default) leaves the
+    # 1280x720 output alone. "realesrgan_x2" runs each frame through a
+    # Real-ESRGAN 2x model, lifting 720p to 1440p with sharp neural edges.
+    # "realesrgan_x4" upscales 4x (720p -> 2880p) — usually overkill on
+    # AI video that's noisy under magnification. Weights come from
+    # ai-forever/Real-ESRGAN on HF; loader falls through to no-op if the
+    # spandrel package or the weights file isn't available.
+    upscale_backend: str = "none"
 
 
 @dataclass
@@ -320,6 +328,7 @@ def _meta_from_json(d: Dict[str, Any]) -> ProjectMeta:
         motion_backend=str(cfg_raw.get("motion_backend", "auto")).lower(),
         voice_backend=str(cfg_raw.get("voice_backend", "piper")).lower(),
         music_backend=str(cfg_raw.get("music_backend", "musicgen")).lower(),
+        upscale_backend=str(cfg_raw.get("upscale_backend", "none")).lower(),
     )
     return ProjectMeta(
         id=d["id"],

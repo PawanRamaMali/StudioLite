@@ -4053,6 +4053,21 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
         backend = "kenburns"
         error: Optional[str] = None
 
+        # Idempotency: skip if a decent-sized MP4 for this shot already
+        # exists. A killed or interrupted run gets to resume cheaply.
+        # `> 100000` filters out ffmpeg's 48-byte moov-truncated stubs.
+        if os.path.exists(mp4_abs) and os.path.getsize(mp4_abs) > 100_000:
+            backend = "reused"; rendered = True
+            result.append({
+                "scene_id": sid, "shot_id": shot_id,
+                "path": os.path.relpath(mp4_abs, project.dir).replace(os.sep, "/"),
+                "duration_sec": dur,
+                "backend": backend, "rendered": rendered, "error": None,
+            })
+            project.append_event({"type": "motion_progress", "done": i + 1,
+                                  "total": total, "backend": backend})
+            continue
+
         # Wan 2.2 TI2V-5B — keyframe-conditioned, 704p native. Tried
         # first when explicitly configured because it's the best quality
         # option on 12GB and produces a full 5s clip per generation.

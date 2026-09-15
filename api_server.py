@@ -3864,6 +3864,59 @@ async def get_logs(lines: int = 100):
     }
 
 
+# ---------------------------------------------------------------------------
+# Telemetry / diagnostics (opt-in, local-only — see filmmaker/telemetry.py)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/system/telemetry")
+async def telemetry_state():
+    """Current consent + installation ID. Never returns event bodies."""
+    from filmmaker import telemetry
+    return telemetry.get_state()
+
+
+class TelemetryConsentRequest(BaseModel):
+    consent: bool
+
+
+@app.post("/api/v1/system/telemetry/consent")
+async def telemetry_set_consent(body: TelemetryConsentRequest):
+    """Flip local telemetry on or off. Auth via global middleware."""
+    from filmmaker import telemetry
+    return telemetry.record_consent(body.consent)
+
+
+@app.post("/api/v1/system/telemetry/reset-id")
+async def telemetry_reset_id():
+    """Rotate the installation ID. Only useful when consent is on."""
+    from filmmaker import telemetry
+    return telemetry.reset_installation_id()
+
+
+@app.get("/api/v1/system/telemetry/events")
+async def telemetry_events(limit: int = 100):
+    """Show the tail of the local events log so the user can see exactly
+    what's being recorded before they consent to share a diagnostic bundle."""
+    from filmmaker import telemetry
+    limit = max(1, min(1000, int(limit)))
+    return {"events": telemetry.recent_events(limit=limit)}
+
+
+@app.get("/api/v1/system/telemetry/bundle")
+async def telemetry_bundle():
+    """Return a diagnostic zip the user can attach to a bug report. Never
+    sent anywhere by us — this endpoint just packages what's already on
+    disk with the same redaction the module documents."""
+    from filmmaker import telemetry
+    from fastapi.responses import Response
+    data = telemetry.build_diagnostic_bundle()
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=studiolite-diagnostics.zip"},
+    )
+
+
 @app.post("/api/v1/system/hf-token-test")
 async def test_hf_token(token: str):
     """Test a HuggingFace token and save it if valid."""

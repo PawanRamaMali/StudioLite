@@ -5,10 +5,11 @@ Run with: uvicorn api_server:app --host 0.0.0.0 --port 8000
 Or: python api_server.py
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, WebSocket, WebSocketDisconnect, Depends, Request, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 from typing import Optional, Dict
 import logging
@@ -16,9 +17,72 @@ import threading
 import uuid
 import time
 import os
+import secrets
 import traceback
 
 logger = logging.getLogger("studiolite.api")
+
+# ---------------------------------------------------------------------------
+# Security config
+#
+# Everything below is opt-out via env var, so the dev inner-loop stays
+# painless: without any config, we still bind loopback and pick a fresh
+# random token on each start (written to `.auth` so the local UI can
+# read it). Set STUDIOLITE_AUTH=off to disable auth entirely (local dev
+# only), STUDIOLITE_HOST to override the bind address (e.g. 0.0.0.0 for
+# LAN access — you also need to accept the security implications), and
+# STUDIOLITE_ALLOWED_ORIGINS to a comma list for CORS.
+# ---------------------------------------------------------------------------
+
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+AUTH_FILE = os.path.join(ROOT_DIR, ".auth")
+
+
+def _load_or_make_token() -> str:
+    """Return the persisted token from `.auth` if present, else mint a new
+    one, write it, and return it. Tokens are 32-byte URL-safe strings and
+    the file is written 0600 where the platform respects it."""
+    if os.path.exists(AUTH_FILE):
+        try:
+            with open(AUTH_FILE, "r", encoding="utf-8") as f:
+                tok = f.read().strip()
+                if tok:
+                    return tok
+        except OSError:
+            pass
+    tok = secrets.token_urlsafe(32)
+    try:
+        with open(AUTH_FILE, "w", encoding="utf-8") as f:
+            f.write(tok)
+        try:
+            os.chmod(AUTH_FILE, 0o600)
+        except OSError:
+            pass
+    except OSError as e:
+        logger.warning("Could not persist auth token to %s: %s", AUTH_FILE, e)
+    return tok
+
+
+_AUTH_MODE = os.environ.get("STUDIOLITE_AUTH", "on").lower()
+_AUTH_ENABLED = _AUTH_MODE not in ("off", "disabled", "false", "0", "")
+API_TOKEN = _load_or_make_token() if _AUTH_ENABLED else ""
+
+_api_key_scheme = APIKeyHeader(name="X-StudioLite-Token", auto_error=False)
+
+
+async def require_auth(token: Optional[str] = Depends(_api_key_scheme)) -> None:
+    """FastAPI dependency for endpoints that mutate state. Read endpoints
+    can opt in the same way. Skipped when STUDIOLITE_AUTH=off."""
+    if not _AUTH_ENABLED:
+        return
+    if not token or not secrets.compare_digest(token, API_TOKEN):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Missing or invalid X-StudioLite-Token header.")
+
+
+_default_origins = "http://localhost:3000,http://127.0.0.1:3000"
+_origins = [o.strip() for o in os.environ.get(
+    "STUDIOLITE_ALLOWED_ORIGINS", _default_origins).split(",") if o.strip()]
 
 app = FastAPI(
     title="StudioLite API",
@@ -26,17 +90,68 @@ app = FastAPI(
     description="AI Video Generation & Editing API",
 )
 
-# CORS middleware - allow all origins by default for development
+# CORS: tight allowlist by default. Set STUDIOLITE_ALLOWED_ORIGINS=* only
+# if you understand the credential-exposure implications.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*", "X-StudioLite-Token"],
 )
 
-# Root directory (same as the rest of StudioLite)
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Paths that stay open without auth: the OpenAPI docs, a lightweight
+# status/version probe, static asset mounts (which serve project output
+# users already chose to publish), and websocket handshakes (they carry
+# the token as a query param since browsers can't set custom headers on
+# ws). Everything else is gated by X-StudioLite-Token unless auth is off.
+_AUTH_EXEMPT_PATH_PREFIXES = (
+    "/static/",
+    "/docs", "/redoc", "/openapi.json",
+    "/api/v1/system/auth-status",  # public read-only "is auth on?" probe
+)
+_AUTH_EXEMPT_METHODS = ("OPTIONS",)  # CORS preflight
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    """Global auth gate. Skipped when STUDIOLITE_AUTH=off, when the request
+    method is OPTIONS (CORS preflight), and for the exempt-path allowlist.
+    Websockets carry the token as a `?token=` query param since browsers
+    can't set custom headers on WS handshakes — checked below where WS
+    handlers accept the connection."""
+    if not _AUTH_ENABLED:
+        return await call_next(request)
+    if request.method in _AUTH_EXEMPT_METHODS:
+        return await call_next(request)
+    path = request.url.path
+    if any(path.startswith(p) for p in _AUTH_EXEMPT_PATH_PREFIXES):
+        return await call_next(request)
+    token = request.headers.get("X-StudioLite-Token") or request.query_params.get("token", "")
+    if not token or not secrets.compare_digest(token, API_TOKEN):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Missing or invalid X-StudioLite-Token"},
+        )
+    return await call_next(request)
+
+
+@app.get("/api/v1/system/auth-status")
+async def auth_status():
+    """Unauthenticated probe so a fresh UI knows whether it needs to ask
+    for a token. Does NOT return the token itself — the token lives in
+    the `.auth` file next to api_server.py and the local user has read
+    access to it."""
+    return {
+        "auth_enabled": _AUTH_ENABLED,
+        "auth_file_hint": ".auth" if _AUTH_ENABLED else None,
+        "header": "X-StudioLite-Token",
+        "ws_query": "token",
+    }
+
+# Root/output directories (ROOT_DIR is defined above with the auth block).
 OUTPUT_DIR = os.path.join(ROOT_DIR, ".mp")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -3524,10 +3639,20 @@ async def get_env_vars():
 
 @app.post("/api/v1/system/env")
 async def set_env_var(key: str, value: str):
-    """Set an environment variable. Takes effect immediately for this process."""
-    if not key.strip():
+    """Set an environment variable. Takes effect immediately for this process.
+    Restricted to keys in MANAGED_ENV_VARS to prevent an attacker with API
+    access from smuggling arbitrary process state through this endpoint.
+    Auth enforced by the global middleware."""
+    k = key.strip()
+    if not k:
         raise HTTPException(status_code=422, detail="Key cannot be empty")
-    os.environ[key.strip()] = value
+    if k not in MANAGED_ENV_VARS and not k.startswith(("HF_", "CUDA_", "TORCH_", "PYTORCH_")):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Env key {k!r} is not on the managed allowlist. Add it to "
+                   "MANAGED_ENV_VARS in api_server.py if you need it exposed.",
+        )
+    os.environ[k] = value
     # Persist to .env file for next startup
     env_file = os.path.join(ROOT_DIR, ".env")
     env_lines = []
@@ -3550,9 +3675,13 @@ async def set_env_var(key: str, value: str):
 
 @app.delete("/api/v1/system/env")
 async def delete_env_var(key: str):
-    """Remove an environment variable."""
-    if key in os.environ:
-        del os.environ[key]
+    """Remove an environment variable. Same allowlist as POST.
+    Auth enforced by the global middleware."""
+    k = key.strip()
+    if k not in MANAGED_ENV_VARS and not k.startswith(("HF_", "CUDA_", "TORCH_", "PYTORCH_")):
+        raise HTTPException(status_code=403, detail=f"Env key {k!r} is not managed.")
+    if k in os.environ:
+        del os.environ[k]
     # Remove from .env file
     env_file = os.path.join(ROOT_DIR, ".env")
     if os.path.exists(env_file):
@@ -4684,4 +4813,19 @@ if os.path.exists(_env_file):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Loopback by default. To expose on the LAN, set STUDIOLITE_HOST=0.0.0.0
+    # (or a specific NIC address) — and understand that anyone on that
+    # network can then use whatever the API can do. Auth still applies.
+    host = os.environ.get("STUDIOLITE_HOST", "127.0.0.1")
+    port = int(os.environ.get("STUDIOLITE_PORT", "8000"))
+    if _AUTH_ENABLED:
+        logger.info(
+            "StudioLite API auth ON  |  bind=%s  |  token file=%s",
+            host, AUTH_FILE,
+        )
+    else:
+        logger.warning(
+            "StudioLite API auth OFF (STUDIOLITE_AUTH=off) — anyone who "
+            "reaches %s can call every endpoint.", host,
+        )
+    uvicorn.run(app, host=host, port=port)

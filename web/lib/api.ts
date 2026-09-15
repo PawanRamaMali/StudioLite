@@ -1,5 +1,44 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// The API token is either baked in at build time (NEXT_PUBLIC_API_TOKEN)
+// or read from browser storage. When both are absent, requests still go
+// out headerless — the server will 401 if auth is enabled, and the UI
+// can then surface the auth-status probe to ask the user for it.
+const _buildToken =
+  typeof process !== "undefined" && process.env
+    ? process.env.NEXT_PUBLIC_API_TOKEN || ""
+    : "";
+const TOKEN_STORAGE_KEY = "studiolite.api_token";
+
+export function getApiToken(): string {
+  if (_buildToken) return _buildToken;
+  if (typeof window === "undefined") return "";
+  try {
+    return window.localStorage.getItem(TOKEN_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function setApiToken(token: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (token) window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    else window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {
+    // Storage failed (private mode, quota) — the caller can retry.
+  }
+}
+
+export interface AuthStatus {
+  auth_enabled: boolean;
+  auth_file_hint?: string | null;
+  header: string;
+  ws_query: string;
+}
+
+export const getAuthStatus = () => apiFetch<AuthStatus>("/api/v1/system/auth-status");
+
 export interface Job {
   job_id: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
@@ -38,10 +77,15 @@ export interface SystemStatus {
 }
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json", ...options?.headers },
-    ...options,
-  });
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(options?.headers as Record<string, string> | undefined),
+  };
+  const token = getApiToken();
+  if (token && !headers["X-StudioLite-Token"]) {
+    headers["X-StudioLite-Token"] = token;
+  }
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || `API error: ${res.status}`);
@@ -81,10 +125,24 @@ export const deleteModel = (modelKey: string) =>
   );
 
 // Jobs
+export interface JobListEntry {
+  job_id: string;
+  kind: string;
+  status: Job["status"];
+  progress: number;
+  message: string;
+  created_at: number;
+  elapsed: number;
+}
+export interface JobList {
+  jobs: JobListEntry[];
+  total: number;
+}
 export const getJob = (id: string) => apiFetch<Job>(`/api/v1/jobs/${id}`);
-export const listJobs = (limit = 20) => apiFetch<Job[]>(`/api/v1/jobs?limit=${limit}`);
+export const listJobs = (limit = 50) => apiFetch<JobList>(`/api/v1/jobs?limit=${limit}`);
 export const cancelJob = (id: string) =>
   apiFetch<Job>(`/api/v1/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+export const jobDownloadUrl = (id: string) => `${API_BASE}/api/v1/jobs/${encodeURIComponent(id)}/download`;
 
 // Generation
 export const generateText2Video = (params: {

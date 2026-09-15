@@ -2759,27 +2759,137 @@ os.makedirs(UPLOADS_DIR, exist_ok=True)
 app.mount("/static/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 
 
-def _save_upload(file: UploadFile, prefix: str) -> str:
-    """Persist an UploadFile to disk and return its path."""
-    safe_name = os.path.basename(file.filename or "input.wav").replace(" ", "_")
+# Per-file upload ceiling. Overridable at runtime with the env var
+# STUDIOLITE_MAX_UPLOAD_MB — set to 0 to disable the cap (not recommended
+# on any host with a public network face). 2 GiB fits every reasonable
+# short-film source clip and keeps a single malicious upload from filling
+# the disk.
+_MAX_UPLOAD_BYTES = int(os.environ.get(
+    "STUDIOLITE_MAX_UPLOAD_MB", "2048")) * 1024 * 1024
+
+# Whitelist of allowed extension → (leading magic bytes) mappings. The
+# magic-byte check catches the common trick of renaming an arbitrary
+# payload to .mp4. It is not a full media validator — the downstream
+# ffprobe/ffmpeg call is the real gate — but it rejects the obvious
+# junk before we spend disk on it. Video uses a broad "starts with any
+# of these prefixes" check because container flavors (ISOM, MP42, QT...)
+# differ by 4 bytes; audio uses stricter fixed prefixes.
+_ALLOWED_UPLOAD_MAGIC: Dict[str, tuple[bytes, ...]] = {
+    # Video containers: MP4/MOV share `ftyp` at offset 4; MKV starts with
+    # EBML header; WebM is EBML too; AVI starts with RIFF...AVI .
+    ".mp4":  (b"ftyp", b"free", b"mdat"),
+    ".mov":  (b"ftyp", b"moov", b"free"),
+    ".avi":  (b"RIFF",),
+    ".mkv":  (b"\x1a\x45\xdf\xa3",),
+    ".webm": (b"\x1a\x45\xdf\xa3",),
+    # Audio.
+    ".mp3":  (b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"),
+    ".wav":  (b"RIFF",),
+    ".m4a":  (b"ftyp",),
+    ".aac":  (b"\xff\xf1", b"\xff\xf9", b"ADIF"),
+    ".flac": (b"fLaC",),
+    ".ogg":  (b"OggS",),
+    # Images.
+    ".png":  (b"\x89PNG\r\n\x1a\n",),
+    ".jpg":  (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".webp": (b"RIFF",),
+    ".gif":  (b"GIF87a", b"GIF89a"),
+}
+
+# Sanitize filename component: strip any path separators, control chars,
+# and keep the last extension. Prevents ../ escapes or NUL smuggling.
+_UNSAFE_FILENAME_RE = None
+
+
+def _sanitize_filename(name: str, default: str = "input.bin") -> str:
+    global _UNSAFE_FILENAME_RE
+    if _UNSAFE_FILENAME_RE is None:
+        import re
+        _UNSAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+    base = os.path.basename(name or default).strip() or default
+    # Drop any embedded null bytes and trim to a reasonable length.
+    base = base.replace("\x00", "")[:120]
+    return _UNSAFE_FILENAME_RE.sub("_", base) or default
+
+
+def _magic_bytes_for(ext: str) -> tuple[bytes, ...]:
+    return _ALLOWED_UPLOAD_MAGIC.get(ext.lower(), tuple())
+
+
+def _save_upload(file: UploadFile, prefix: str,
+                  allowed_exts: Optional[set[str]] = None,
+                  max_bytes: Optional[int] = None) -> str:
+    """Stream an UploadFile to disk with hard size and content checks.
+
+    - `allowed_exts`: e.g. {".mp4", ".mkv"}. Enforced against the sanitized
+      filename's extension. Also drives the magic-byte lookup.
+    - `max_bytes`: per-file cap. Defaults to _MAX_UPLOAD_BYTES.
+
+    Reads in 1 MiB chunks so the request never lives in RAM in full,
+    kills the write if the cap is breached, and deletes the partial
+    file before raising so the disk stays clean."""
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if allowed_exts is not None and ext not in allowed_exts:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Extension {ext!r} not allowed. Accepted: {sorted(allowed_exts)}",
+        )
+    safe_name = _sanitize_filename(file.filename or f"input{ext}")
     dest = os.path.join(UPLOADS_DIR, f"{prefix}_{uuid.uuid4().hex[:8]}_{safe_name}")
-    with open(dest, "wb") as f:
-        while True:
-            chunk = file.file.read(1024 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
-    file.file.close()
+    cap = max_bytes if max_bytes is not None else _MAX_UPLOAD_BYTES
+    if cap == 0:
+        cap = float("inf")  # explicitly disabled
+
+    magic = _magic_bytes_for(ext)
+    header = b""
+    written = 0
+    try:
+        with open(dest, "wb") as f:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if cap != float("inf") and written > cap:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Upload exceeded {cap/(1024*1024):.0f} MiB cap.",
+                    )
+                if magic and len(header) < 16:
+                    header += chunk[: 16 - len(header)]
+                    if len(header) >= min(16, len(magic[0])):
+                        # Check any-of-magic-prefixes match. For ISO-BMFF
+                        # containers (mp4/mov/m4a) the magic sits at
+                        # offset 4 not 0, so we scan the first 16 bytes.
+                        head16 = header[:16]
+                        if not any(m in head16 or head16.startswith(m) for m in magic):
+                            raise HTTPException(
+                                status_code=415,
+                                detail=f"File content does not look like a valid {ext} file.",
+                            )
+                f.write(chunk)
+    except HTTPException:
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        raise
+    finally:
+        file.file.close()
     return dest
+
+
+_ALLOWED_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+_ALLOWED_AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+_ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 
 @app.post("/api/v1/edit/upload")
 async def edit_upload(file: UploadFile = File(...)):
     """Upload a video for edit utility endpoints."""
-    ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext not in {".mp4", ".mov", ".avi", ".mkv", ".webm"}:
-        raise HTTPException(status_code=400, detail="Upload a video file: mp4, mov, avi, mkv, or webm")
-    saved = _save_upload(file, prefix="edit")
+    saved = _save_upload(file, prefix="edit",
+                         allowed_exts=_ALLOWED_VIDEO_EXTS)
     return {
         "video_path": saved,
         "filename": os.path.basename(saved),
@@ -2790,10 +2900,8 @@ async def edit_upload(file: UploadFile = File(...)):
 @app.post("/api/v1/edit/upload-audio")
 async def edit_upload_audio(file: UploadFile = File(...)):
     """Upload an audio file for edit utility endpoints."""
-    ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext not in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}:
-        raise HTTPException(status_code=400, detail="Upload an audio file: mp3, wav, m4a, aac, flac, or ogg")
-    saved = _save_upload(file, prefix="edit_audio")
+    saved = _save_upload(file, prefix="edit_audio",
+                         allowed_exts=_ALLOWED_AUDIO_EXTS)
     return {
         "audio_path": saved,
         "filename": os.path.basename(saved),
@@ -3206,18 +3314,50 @@ async def images_remove_bg(req: ImageBgRemoveRequest):
 
 @app.post("/api/v1/images/upload")
 async def images_upload(file: UploadFile = File(...)):
-    """Upload an image so it can be referenced by image_path in subsequent calls."""
-    ext = os.path.splitext(file.filename or "")[1].lower() or ".png"
-    if ext not in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
-        raise HTTPException(status_code=422, detail=f"Unsupported file type: {ext}")
-    out_path = os.path.join(IMAGES_DIR, f"upload_{uuid.uuid4().hex[:8]}{ext}")
-    contents = await file.read()
-    with open(out_path, "wb") as f:
-        f.write(contents)
+    """Upload an image so it can be referenced by image_path in subsequent calls.
+    Uses the streaming/validated helper so a malicious file can't blow up
+    RAM or masquerade under a benign extension."""
+    ext = (os.path.splitext(file.filename or "")[1].lower() or ".png")
+    if ext not in _ALLOWED_IMAGE_EXTS:
+        raise HTTPException(status_code=415,
+                            detail=f"Unsupported file type: {ext}. Allowed: {sorted(_ALLOWED_IMAGE_EXTS)}")
+    safe_name = _sanitize_filename(file.filename or f"upload{ext}")
+    out_path = os.path.join(IMAGES_DIR, f"upload_{uuid.uuid4().hex[:8]}_{safe_name}")
+    magic = _magic_bytes_for(ext)
+    header = b""
+    written = 0
+    cap = _MAX_UPLOAD_BYTES
+    try:
+        with open(out_path, "wb") as f:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if cap and written > cap:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Upload exceeded {cap/(1024*1024):.0f} MiB cap.",
+                    )
+                if magic and len(header) < 16:
+                    header += chunk[: 16 - len(header)]
+                    if len(header) >= min(16, len(magic[0])):
+                        if not any(m in header[:16] or header[:16].startswith(m) for m in magic):
+                            raise HTTPException(status_code=415,
+                                                detail=f"File content does not look like a valid {ext} image.")
+                f.write(chunk)
+    except HTTPException:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        raise
+    finally:
+        file.file.close()
     return {
         "image_path": out_path,
         "url": f"/static/images/{os.path.basename(out_path)}",
-        "size_bytes": len(contents),
+        "size_bytes": written,
     }
 
 

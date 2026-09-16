@@ -113,10 +113,20 @@ class Project:
     a background orchestrator writing on one side and the API reading on
     the other stay coherent without an in-process lock across processes.
     Within one process a per-project RLock guards write bursts.
+
+    Meta index + artifact version snapshots go through a shared
+    ``filmmaker.project_store.ProjectStore``. The store is optional — if
+    it can't open its SQLite file we silently skip both index and
+    history, and the JSON tree remains fully authoritative.
     """
 
     _locks: Dict[str, threading.RLock] = {}
     _locks_guard = threading.Lock()
+
+    # Process-wide project store handle. Bound lazily by ``_get_store()``
+    # so tests can point at a tmp DB via ``set_store()``.
+    _store = None
+    _store_guard = threading.Lock()
 
     def __init__(self, root_dir: str, project_id: str):
         self.project_id = project_id
@@ -131,9 +141,31 @@ class Project:
     # ---- lifecycle -------------------------------------------------------
 
     @classmethod
+    def _get_store(cls, root_dir: str):
+        """Return the process-wide ProjectStore, opening it lazily on the
+        first call. Root_dir is used only to derive the SQLite path so
+        the store lives alongside the film directories."""
+        with cls._store_guard:
+            if cls._store is None:
+                # Deferred import so tests / read-only tools don't have
+                # to pay for sqlite3 unless they touch a Project.
+                from .project_store import ProjectStore
+                db_path = os.path.join(root_dir, "projects.sqlite3")
+                cls._store = ProjectStore(db_path)
+            return cls._store
+
+    @classmethod
+    def set_store(cls, store) -> None:
+        """Test hook — install a specific ProjectStore instance so the
+        tmp path is honored. Passing None resets to lazy init."""
+        with cls._store_guard:
+            cls._store = store
+
+    @classmethod
     def create(cls, root_dir: str, brief: str, title: Optional[str], config: ProjectConfig) -> "Project":
         pid = f"film-{int(time.time())}-{uuid.uuid4().hex[:6]}"
         proj = cls(root_dir, pid)
+        proj._root_dir = root_dir
         os.makedirs(proj.artifacts_dir, exist_ok=True)
         os.makedirs(proj.logs_dir, exist_ok=True)
         os.makedirs(proj.shots_dir, exist_ok=True)
@@ -151,11 +183,15 @@ class Project:
         )
         proj._write_json(proj.meta_path, _meta_to_json(meta))
         proj._write_json(proj.state_path, _state_to_json(state))
+        cls._get_store(root_dir).upsert_project(
+            pid, meta.title, meta.brief, meta.created_at, meta.updated_at,
+        )
         return proj
 
     @classmethod
     def load(cls, root_dir: str, project_id: str) -> "Project":
         proj = cls(root_dir, project_id)
+        proj._root_dir = root_dir
         if not os.path.exists(proj.meta_path):
             raise FileNotFoundError(f"Project not found: {project_id}")
         return proj
@@ -187,6 +223,38 @@ class Project:
     def delete(self) -> None:
         import shutil
         shutil.rmtree(self.dir, ignore_errors=True)
+        root = getattr(self, "_root_dir", None)
+        if root:
+            self._get_store(root).delete_project(self.project_id)
+
+    def list_versions(self, key: StageKey, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return the version-snapshot history for one artifact."""
+        root = getattr(self, "_root_dir", None) or os.path.dirname(self.dir)
+        return self._get_store(root).list_versions(self.project_id, key, limit=limit)
+
+    def load_version(self, key: StageKey, version_no: int) -> Optional[Dict[str, Any]]:
+        """Materialize a specific version. Returns the artifact dict or
+        None if the version doesn't exist."""
+        root = getattr(self, "_root_dir", None) or os.path.dirname(self.dir)
+        return self._get_store(root).load_version(self.project_id, key, version_no)
+
+    def restore_version(self, key: StageKey, version_no: int) -> bool:
+        """Write the given historical version back over the current
+        artifact. Also snapshots what we just overwrote so the restore
+        itself is undoable."""
+        data = self.load_version(key, version_no)
+        if data is None:
+            return False
+        # Snapshot current state first so restore is reversible.
+        current = self.read_artifact(key)
+        if current is not None:
+            root = getattr(self, "_root_dir", None) or os.path.dirname(self.dir)
+            self._get_store(root).snapshot_artifact(
+                self.project_id, key, current,
+                note=f"pre-restore of v{version_no}",
+            )
+        self.write_artifact(key, data)
+        return True
 
     # ---- meta / state ----------------------------------------------------
 
@@ -197,6 +265,10 @@ class Project:
     def save_meta(self, meta: ProjectMeta) -> None:
         meta.updated_at = time.time()
         self._write_json(self.meta_path, _meta_to_json(meta))
+        root = getattr(self, "_root_dir", None) or os.path.dirname(self.dir)
+        self._get_store(root).upsert_project(
+            meta.id, meta.title, meta.brief, meta.created_at, meta.updated_at,
+        )
 
     @property
     def state(self) -> ProjectState:
@@ -247,10 +319,20 @@ class Project:
         with open(p, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def write_artifact(self, key: StageKey, data: Dict[str, Any]) -> None:
+    def write_artifact(self, key: StageKey, data: Dict[str, Any],
+                       *, snapshot: bool = True, note: str = "") -> None:
+        """Write an artifact and (by default) drop a version snapshot in
+        the project store. Pass ``snapshot=False`` for hot-loop writes
+        that don't want history — the current callers all leave it on
+        so every stage completion becomes a restorable point."""
         with self._lock():
             self._write_json(self.artifact_path(key), data)
             self._bump_updated()
+            if snapshot:
+                root = getattr(self, "_root_dir", None) or os.path.dirname(self.dir)
+                self._get_store(root).snapshot_artifact(
+                    self.project_id, key, data, note=note or "",
+                )
 
     # ---- events ----------------------------------------------------------
 

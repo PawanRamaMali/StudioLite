@@ -177,6 +177,16 @@ SCREEN_TRANSCRIPTS_DIR = os.path.join(OUTPUT_DIR, "screen_transcripts")
 os.makedirs(SCREEN_TRANSCRIPTS_DIR, exist_ok=True)
 app.mount("/static/screen_transcripts", StaticFiles(directory=SCREEN_TRANSCRIPTS_DIR), name="screen_transcripts")
 
+# Extracted routers. Each module keeps its own imports and Pydantic
+# models — mounting here rather than in each router file so the auth
+# middleware above sees them the same way it sees inline endpoints.
+from api.routers import health as _health_router
+from api.routers import licensing as _licensing_router
+from api.routers import telemetry as _telemetry_router
+app.include_router(_health_router.router)
+app.include_router(_licensing_router.router)
+app.include_router(_telemetry_router.router)
+
 # ---------------------------------------------------------------------------
 # Job tracking
 #
@@ -2416,14 +2426,6 @@ def _compute_features(has_cuda: bool) -> dict:
     return features
 
 
-@app.get("/api/v1/health")
-async def health():
-    """Liveness probe. Docker HEALTHCHECK and load balancers hit this.
-    Returns 200 with a tiny body — no dependencies, no side effects.
-    """
-    return {"status": "ok"}
-
-
 @app.get("/api/v1/system/status")
 async def system_status():
     """Get system status: GPU, VRAM, loaded models, feature capabilities."""
@@ -4359,107 +4361,11 @@ async def get_logs(lines: int = 100):
 # Telemetry / diagnostics (opt-in, local-only — see filmmaker/telemetry.py)
 # ---------------------------------------------------------------------------
 
-@app.get("/api/v1/system/telemetry")
-async def telemetry_state():
-    """Current consent + installation ID. Never returns event bodies."""
-    from filmmaker import telemetry
-    return telemetry.get_state()
-
-
-class TelemetryConsentRequest(BaseModel):
-    consent: bool
-
-
-@app.post("/api/v1/system/telemetry/consent")
-async def telemetry_set_consent(body: TelemetryConsentRequest):
-    """Flip local telemetry on or off. Auth via global middleware."""
-    from filmmaker import telemetry
-    return telemetry.record_consent(body.consent)
-
-
-@app.post("/api/v1/system/telemetry/reset-id")
-async def telemetry_reset_id():
-    """Rotate the installation ID. Only useful when consent is on."""
-    from filmmaker import telemetry
-    return telemetry.reset_installation_id()
-
-
-@app.get("/api/v1/system/telemetry/events")
-async def telemetry_events(limit: int = 100):
-    """Show the tail of the local events log so the user can see exactly
-    what's being recorded before they consent to share a diagnostic bundle."""
-    from filmmaker import telemetry
-    limit = max(1, min(1000, int(limit)))
-    return {"events": telemetry.recent_events(limit=limit)}
-
-
-@app.get("/api/v1/system/telemetry/bundle")
-async def telemetry_bundle():
-    """Return a diagnostic zip the user can attach to a bug report. Never
-    sent anywhere by us — this endpoint just packages what's already on
-    disk with the same redaction the module documents."""
-    from filmmaker import telemetry
-    from fastapi.responses import Response
-    data = telemetry.build_diagnostic_bundle()
-    return Response(
-        content=data,
-        media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=studiolite-diagnostics.zip"},
-    )
-
-
-# ---------------------------------------------------------------------------
-# Licensing / entitlements (offline signed license — filmmaker/licensing.py)
-# ---------------------------------------------------------------------------
-
-@app.get("/api/v1/system/license")
-async def license_status():
-    """Report the current entitlement — tier, feature list, expiry,
-    grace warning if any. Absence of a license reports tier=free and
-    valid=False; the UI treats that as 'community edition' rather than
-    an error."""
-    from filmmaker import licensing
-    check = licensing.check_entitlement()
-    return {
-        "valid": check.valid,
-        "tier": check.tier,
-        "features": check.features,
-        "licensee": check.licensee,
-        "expires_at": check.expires_at,
-        "reason": check.reason,
-        "warning": check.warning,
-        "device_fingerprint": licensing.device_fingerprint(),
-    }
-
-
-class LicenseInstallRequest(BaseModel):
-    # Two-piece bundle: JSON payload the publisher signed + Ed25519 sig.
-    payload: dict
-    signature: str
-
-
-@app.post("/api/v1/system/license")
-async def install_license(body: LicenseInstallRequest):
-    """Verify a caller-supplied license bundle and, if it checks out,
-    persist it under `.license`. Invalid bundles are rejected without
-    touching disk, so a botched install can't lock the user out."""
-    from filmmaker import licensing
-    check = licensing.install_license(body.model_dump())
-    if not check.valid:
-        raise HTTPException(status_code=400, detail=check.reason)
-    return {
-        "valid": True, "tier": check.tier, "features": check.features,
-        "licensee": check.licensee, "expires_at": check.expires_at,
-        "warning": check.warning,
-    }
-
-
-@app.delete("/api/v1/system/license")
-async def deactivate_license():
-    """Remove the on-disk license. Idempotent; missing file is fine."""
-    from filmmaker import licensing
-    licensing.deactivate_license()
-    return {"deactivated": True}
+# Telemetry endpoints live in api/routers/telemetry.py; license endpoints
+# in api/routers/licensing.py. Both are wired in via app.include_router
+# alongside health further up. Only endpoints still tangled with module-
+# scoped state in this file (jobs, GPU probe, filesystem globals) remain
+# inline; new work should go in api/routers/.
 
 
 @app.post("/api/v1/system/hf-token-test")

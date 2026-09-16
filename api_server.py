@@ -179,9 +179,24 @@ app.mount("/static/screen_transcripts", StaticFiles(directory=SCREEN_TRANSCRIPTS
 
 # ---------------------------------------------------------------------------
 # Job tracking
+#
+# Backed by SQLite via filmmaker.job_store so a process restart leaves the
+# jobs list intact and long-running renders survive an accidental Ctrl-C.
+# The store still quacks like the old ``dict[str, dict]`` for existing
+# callsites, so nothing else in this file changed shape.
 # ---------------------------------------------------------------------------
-jobs = {}  # job_id -> dict
+from filmmaker.job_store import PersistentJobStore
+
+_JOB_DB_PATH = os.environ.get(
+    "STUDIOLITE_JOB_DB",
+    os.path.join(ROOT_DIR, ".mp", "jobs.sqlite3"),
+)
+jobs = PersistentJobStore(_JOB_DB_PATH)
 _jobs_lock = threading.Lock()
+# On startup any job left in-flight from a previous process gets flipped
+# to 'interrupted' so the UI can offer a retry instead of showing a
+# stuck spinner forever.
+_INTERRUPTED_JOBS = jobs.recover_interrupted_jobs()
 # job_id -> threading.Event. A worker calls `_should_cancel(job_id)` at
 # safe checkpoints; set() flips that check to True and the worker exits
 # cleanly with status="cancelled". Every _create_job() now registers an
@@ -220,7 +235,10 @@ def _create_job(kind: str, params: dict | None = None) -> str:
 def _update_job(job_id: str, **kwargs):
     with _jobs_lock:
         if job_id in jobs:
-            jobs[job_id].update(kwargs)
+            # Route through the store so the SQLite row and the in-memory
+            # cache stay in sync. Plain `jobs[job_id].update(...)` would
+            # only touch the in-memory dict.
+            jobs.update_fields(job_id, **kwargs)
 
 
 def _should_cancel(job_id: str) -> bool:

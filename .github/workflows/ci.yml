@@ -77,6 +77,42 @@ jobs:
           pip install --dry-run -r requirements-${{ matrix.build }}.txt
           pip install --dry-run -r requirements.txt
 
+  pytest:
+    name: pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The unit tests only need the pure-Python surface (project, stages,
+      # telemetry) plus fastapi/pydantic for the API integration checks.
+      # We deliberately do NOT install the heavy inference stack — that would
+      # push CI wall-clock past the free-tier budget and give us nothing over
+      # the unit surface we actually care about here.
+      - name: Install test-only deps
+        shell: bash
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          python -m pip install pytest httpx fastapi pydantic uvicorn python-multipart
+
+      - name: Run pytest
+        shell: bash
+        env:
+          # Neutralise anything a developer .env would inject; the tests
+          # already patch what they need.
+          STUDIOLITE_AUTH: "off"
+        run: python -m pytest tests -ra -q
+
   frontend-typecheck:
     name: Frontend typecheck
     runs-on: ubuntu-latest

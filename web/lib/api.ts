@@ -275,6 +275,45 @@ export const animateKeyframes = (params: {
   method: "POST", body: JSON.stringify(params),
 });
 
+// Timeline / NLE ---------------------------------------------------------
+
+export interface TimelineClipInput {
+  video_path: string;
+  in_point: number;
+  out_point: number;
+}
+
+export interface TimelineRenderParams {
+  clips: TimelineClipInput[];
+  fps: number;
+  width: number;
+  height: number;
+  codec: "h264" | "h265" | "prores";
+  quality: "high" | "medium" | "low";
+  apply_watermark: boolean;
+}
+
+export const renderTimeline = (params: TimelineRenderParams) =>
+  apiFetch<Job>("/api/v1/edit/timeline-render", {
+    method: "POST", body: JSON.stringify(params),
+  });
+
+// Licensing --------------------------------------------------------------
+
+export interface LicenseStatus {
+  valid: boolean;
+  tier: "free" | "pro" | "studio" | string;
+  features: string[];
+  licensee: string;
+  expires_at: number;
+  reason: string;
+  warning: string;
+  device_fingerprint: string;
+}
+
+export const getLicenseStatus = () =>
+  apiFetch<LicenseStatus>("/api/v1/system/license");
+
 export const extractVideoAudio = (params: { video_path: string; format: "wav" | "mp3" }) =>
   apiFetch<Job>("/api/v1/edit/extract-audio", { method: "POST", body: JSON.stringify(params) });
 

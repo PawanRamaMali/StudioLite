@@ -8,6 +8,7 @@ import GeneratePanel from "@/components/panels/GeneratePanel";
 import StoryPanel from "@/components/panels/StoryPanel";
 import ImagesPanel from "@/components/panels/ImagesPanel";
 import EditPanel from "@/components/panels/EditPanel";
+import TimelinePanel from "@/components/panels/TimelinePanel";
 import AudioPanel from "@/components/panels/AudioPanel";
 import LiveTranscribePanel from "@/components/panels/LiveTranscribePanel";
 import ScreenTranscribePanel from "@/components/panels/ScreenTranscribePanel";
@@ -67,6 +68,7 @@ export default function Home() {
       case "story":             return <StoryPanel />;
       case "images":            return <ImagesPanel />;
       case "edit":              return <EditPanel />;
+      case "timeline":          return <TimelinePanel />;
       case "audio":             return <AudioPanel />;
       case "live-transcribe":   return <LiveTranscribePanel />;
       case "screen-transcribe": return <ScreenTranscribePanel />;

@@ -5,7 +5,7 @@ import {
   Home, Video, Wand2, BookOpen, Scissors, Music, ArrowUpCircle,
   Users, KeyRound, Briefcase, Settings, ChevronLeft, ChevronRight,
   Sparkles, Image as ImageIcon, Radio, ScanText, FileVideo, Cpu,
-  Film,
+  Film, LayoutList,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getSystemStatus, type SystemStatus } from "@/lib/api";
@@ -26,6 +26,7 @@ const NAV_ITEMS: { id: string; label: string; icon: typeof Video; group: string;
   { id: "story", label: "Story Mode", icon: BookOpen, group: "Create", gpuRequired: true },
   { id: "images", label: "Images Studio", icon: ImageIcon, group: "Create" },
   { id: "edit", label: "Video Editor", icon: Scissors, group: "Tools" },
+  { id: "timeline", label: "Timeline", icon: LayoutList, group: "Tools" },
   { id: "audio", label: "Audio Studio", icon: Music, group: "Tools" },
   { id: "live-transcribe", label: "Live Transcribe", icon: Radio, group: "Tools" },
   { id: "screen-transcribe", label: "Screen Transcribe", icon: ScanText, group: "Tools" },

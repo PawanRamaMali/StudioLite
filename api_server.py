@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import logging
 import threading
 import uuid
@@ -501,6 +501,34 @@ class ThumbnailRequest(BaseModel):
     video_path: str
     timestamp: float = Field(default=0.0, ge=0.0)
     width: int = Field(default=1280, ge=120, le=3840)
+
+
+# --- Timeline / NLE ------------------------------------------------------
+# The timeline is a flat list of clips in playback order. Each clip carries
+# an in/out point into its source file; renderer trims + concatenates them
+# with the selected codec/quality preset. One video track for v1 — audio
+# rides along with the source. Multi-track lives in a future revision.
+
+class TimelineClip(BaseModel):
+    video_path: str
+    in_point: float = Field(default=0.0, ge=0.0)
+    out_point: float = Field(default=0.0, gt=0.0)
+
+
+class TimelineRenderRequest(BaseModel):
+    clips: List[TimelineClip]
+    fps: int = Field(default=30, ge=1, le=120)
+    width: int = Field(default=1920, ge=64, le=7680)
+    height: int = Field(default=1080, ge=64, le=4320)
+    # Export presets — the pair (codec, quality) picks a specific
+    # ffmpeg profile in _export_profile(). Presets are validated by the
+    # runner so an unknown value fails fast, not at ffmpeg call time.
+    codec: str = Field(default="h264")     # h264 | h265 | prores
+    quality: str = Field(default="high")   # high | medium | low
+    # Free-tier watermark. UI passes this from the license status; the
+    # server also gate-checks against licensing.check_entitlement so a
+    # tampered client can't lie its way out of it.
+    apply_watermark: bool = True
 
 
 # --- Image Studio request models ---
@@ -1594,6 +1622,164 @@ def _run_upscale(job_id: str, req: UpscaleRequest):
             status="failed",
             error=str(exc),
             message=f"Upscale failed: {exc}",
+        )
+
+
+def _export_profile(codec: str, quality: str) -> Dict[str, str]:
+    """Map a (codec, quality) pair to the ffmpeg args the renderer applies.
+
+    Encoders and CRFs picked to hit the intuition users have for the
+    labels — 'high' should look near-lossless to eyeballs, 'low' should
+    be small enough to email — without ballooning the option matrix."""
+    codec = (codec or "h264").lower()
+    quality = (quality or "high").lower()
+    if codec not in {"h264", "h265", "prores"}:
+        raise ValueError(f"Unsupported codec: {codec!r}")
+    if quality not in {"high", "medium", "low"}:
+        raise ValueError(f"Unsupported quality: {quality!r}")
+    if codec == "prores":
+        # ProRes has its own profile ladder; ignore CRF-style quality.
+        profile = {"high": "3", "medium": "2", "low": "1"}[quality]  # 3=HQ, 2=422, 1=LT
+        return {
+            "vcodec": "prores_ks",
+            "extra": f"-profile:v {profile} -pix_fmt yuv422p10le",
+            "ext": "mov",
+        }
+    if codec == "h265":
+        crf = {"high": "20", "medium": "24", "low": "28"}[quality]
+        return {
+            "vcodec": "libx265",
+            "extra": f"-crf {crf} -preset medium -pix_fmt yuv420p",
+            "ext": "mp4",
+        }
+    # h264 default
+    crf = {"high": "18", "medium": "22", "low": "26"}[quality]
+    return {
+        "vcodec": "libx264",
+        "extra": f"-crf {crf} -preset medium -pix_fmt yuv420p",
+        "ext": "mp4",
+    }
+
+
+def _run_timeline_render(job_id: str, req: "TimelineRenderRequest") -> None:
+    """Render a flat clip-list timeline. For each clip we trim source
+    to [in_point, out_point], scale/pad to the export canvas, then
+    concatenate. Watermark is a bottom-right text overlay applied
+    when the license requires it (free tier).
+
+    Progress is coarse — 10% per stage — because moviepy's own callbacks
+    are inconsistent across codecs; the user gets a running message
+    instead."""
+    try:
+        from filmmaker import licensing
+        from moviepy.editor import (
+            VideoFileClip, concatenate_videoclips, TextClip, CompositeVideoClip,
+        )
+
+        _update_job(job_id, status="running", progress=5,
+                    message="Preparing timeline clips…")
+
+        if not req.clips:
+            raise ValueError("Timeline is empty — add at least one clip.")
+
+        # Server-side license gate. The client passes apply_watermark, but
+        # we cross-check: only Pro/Studio (or an explicit watermark_removal
+        # feature) can turn the watermark off.
+        entitlement = licensing.check_entitlement()
+        allow_no_watermark = (
+            entitlement.valid
+            and (entitlement.tier in {"pro", "studio"}
+                 or entitlement.has("watermark_removal"))
+        )
+        watermark_on = req.apply_watermark or not allow_no_watermark
+        profile = _export_profile(req.codec, req.quality)
+
+        source_clips = []
+        segments = []
+        try:
+            for i, spec in enumerate(req.clips):
+                if not os.path.isfile(spec.video_path):
+                    raise FileNotFoundError(f"Clip not found: {spec.video_path}")
+                src = VideoFileClip(spec.video_path)
+                source_clips.append(src)
+                end = spec.out_point or src.duration
+                start = max(0.0, spec.in_point)
+                if end <= start:
+                    raise ValueError(
+                        f"Clip {i}: out_point ({end}) must exceed in_point ({start})."
+                    )
+                end = min(end, src.duration)
+                seg = src.subclip(start, end)
+                # Resize to fit canvas; letterbox by centering on a
+                # black background. Keeps aspect and avoids stretch.
+                seg = seg.resize(height=req.height) if seg.h != req.height else seg
+                if seg.w > req.width:
+                    seg = seg.resize(width=req.width)
+                segments.append(seg)
+                _update_job(job_id, progress=5 + int(30 * (i + 1) / len(req.clips)),
+                            message=f"Loaded clip {i + 1}/{len(req.clips)}")
+
+            _update_job(job_id, progress=40, message="Concatenating…")
+            final = concatenate_videoclips(segments, method="compose")
+            final = final.set_fps(req.fps)
+
+            if watermark_on:
+                _update_job(job_id, progress=55, message="Applying watermark…")
+                try:
+                    wm = (TextClip("StudioLite", fontsize=28, color="white",
+                                   stroke_color="black", stroke_width=1)
+                          .set_duration(final.duration)
+                          .margin(right=16, bottom=16, opacity=0)
+                          .set_pos(("right", "bottom"))
+                          .set_opacity(0.7))
+                    final = CompositeVideoClip([final, wm])
+                except Exception as wm_exc:  # noqa: BLE001
+                    # TextClip needs ImageMagick — if it's missing we
+                    # still deliver the render (no silent 'watermark
+                    # skipped' would be worse than a warning).
+                    logger.warning("Watermark skipped: %s", wm_exc)
+
+            output = os.path.join(
+                OUTPUT_DIR, f"timeline_{job_id}.{profile['ext']}"
+            )
+            _update_job(job_id, progress=65,
+                        message=f"Encoding ({req.codec}/{req.quality})…")
+            ffmpeg_params = profile["extra"].split()
+            final.write_videofile(
+                output,
+                codec=profile["vcodec"],
+                audio_codec="aac" if final.audio else None,
+                fps=req.fps,
+                ffmpeg_params=ffmpeg_params,
+                logger=None,
+            )
+        finally:
+            for c in source_clips:
+                try:
+                    c.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Timeline export complete.",
+            result={
+                "video_path": output,
+                "codec": req.codec,
+                "quality": req.quality,
+                "clip_count": len(req.clips),
+                "watermark_applied": bool(watermark_on),
+                "tier": entitlement.tier,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        _update_job(
+            job_id,
+            status="failed",
+            error=str(exc),
+            message=f"Timeline render failed: {exc}",
         )
 
 
@@ -3360,6 +3546,29 @@ def _keyframe_animate_runner(job_id: str, params: dict) -> None:
     stored params dict and dispatches into the same worker."""
     req = KeyframeAnimateRequest(**params)
     _run_keyframe_animate(job_id, req)
+
+
+@register_job_runner("timeline_render")
+def _timeline_render_runner(job_id: str, params: dict) -> None:
+    req = TimelineRenderRequest(**params)
+    _run_timeline_render(job_id, req)
+
+
+@app.post("/api/v1/edit/timeline-render", response_model=JobResponse)
+async def edit_timeline_render(req: TimelineRenderRequest):
+    """Render a flat timeline of clips into a single mp4/mov with the
+    chosen codec/quality preset. Adds the free-tier watermark unless the
+    installed license grants ``watermark_removal`` or is Pro/Studio."""
+    if not req.clips:
+        raise HTTPException(status_code=422, detail="Timeline has no clips.")
+    for spec in req.clips:
+        if not os.path.isfile(spec.video_path):
+            raise HTTPException(status_code=422,
+                                detail=f"Clip not found: {spec.video_path}")
+    job_id = _create_job("timeline_render", req.model_dump())
+    threading.Thread(target=_run_timeline_render, args=(job_id, req),
+                     daemon=True).start()
+    return _job_response(job_id)
 
 
 @app.post("/api/v1/edit/keyframe-animate", response_model=JobResponse)

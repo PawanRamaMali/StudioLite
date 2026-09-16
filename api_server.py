@@ -182,10 +182,20 @@ app.mount("/static/screen_transcripts", StaticFiles(directory=SCREEN_TRANSCRIPTS
 # ---------------------------------------------------------------------------
 jobs = {}  # job_id -> dict
 _jobs_lock = threading.Lock()
-# job_id -> threading.Event. Presence means the job supports cooperative
-# cancellation (currently only model_download jobs). set() → the worker
-# stops at the next checkpoint and reports status="cancelled".
+# job_id -> threading.Event. A worker calls `_should_cancel(job_id)` at
+# safe checkpoints; set() flips that check to True and the worker exits
+# cleanly with status="cancelled". Every _create_job() now registers an
+# event automatically — even runners that don't yet consult it are at
+# least honest about the flag on the API surface.
 _cancel_events: dict[str, "threading.Event"] = {}
+
+# job_id -> list[subprocess.Popen]. Long-running ffmpeg / model shell-outs
+# register themselves so cancel can send SIGTERM (Windows: terminate)
+# instead of only waiting for the next Python checkpoint. On cancel we
+# walk the list and kill anything still running; on job completion the
+# runner clears its entry so we don't try to signal a stale PID.
+_job_subprocesses: dict[str, list] = {}
+_job_subprocesses_lock = threading.Lock()
 
 
 def _create_job(kind: str, params: dict | None = None) -> str:
@@ -201,6 +211,9 @@ def _create_job(kind: str, params: dict | None = None) -> str:
             "kind": kind,
             "params": params or {},
         }
+    # Every job is cancellable in principle. A runner opts *in* to actually
+    # honoring cancel by calling _should_cancel or _register_subprocess.
+    _cancel_events[job_id] = threading.Event()
     return job_id
 
 
@@ -208,6 +221,50 @@ def _update_job(job_id: str, **kwargs):
     with _jobs_lock:
         if job_id in jobs:
             jobs[job_id].update(kwargs)
+
+
+def _should_cancel(job_id: str) -> bool:
+    """Non-blocking cancel probe. Runners in inference / long ffmpeg
+    loops call this at safe checkpoints and bail cleanly on True.
+    Absence of an event (older jobs that predate this registry) is
+    treated as 'not cancelled'."""
+    event = _cancel_events.get(job_id)
+    return bool(event and event.is_set())
+
+
+def _register_subprocess(job_id: str, proc) -> None:
+    """Attach a Popen to the job so cancel can terminate it.
+    The runner should still monitor the process itself; this just makes
+    cancel effective without waiting for the process to check in."""
+    with _job_subprocesses_lock:
+        _job_subprocesses.setdefault(job_id, []).append(proc)
+
+
+def _clear_subprocesses(job_id: str) -> None:
+    """Called when a runner finishes (success or failure) so we don't
+    leak references or kill stale PIDs on a future cancel."""
+    with _job_subprocesses_lock:
+        _job_subprocesses.pop(job_id, None)
+
+
+def _terminate_job_subprocesses(job_id: str) -> int:
+    """Signal every subprocess attached to this job. Returns how many
+    processes actually got a terminate call — the rest were already
+    done. Terminate is polite on Unix (SIGTERM) and hard on Windows
+    (WM_CLOSE / TerminateProcess); the runner handles cleanup around
+    the killed process."""
+    killed = 0
+    with _job_subprocesses_lock:
+        procs = list(_job_subprocesses.get(job_id, []))
+    for p in procs:
+        try:
+            if p.poll() is None:
+                p.terminate()
+                killed += 1
+        except Exception:  # noqa: BLE001
+            # Popen already reaped / OS refused — nothing to do.
+            pass
+    return killed
 
 
 def _job_response(job_id: str) -> dict:
@@ -2444,28 +2501,95 @@ async def download_model_endpoint(model_key: str, background_tasks: BackgroundTa
 
 @app.post("/api/v1/jobs/{job_id}/cancel", response_model=JobResponse)
 async def cancel_job(job_id: str):
-    """Cooperatively cancel a job. Only model_download jobs are cancellable
-    today; anything else returns 400. For a running model download the
-    current file finishes, then the worker exits with status="cancelled"
-    and leaves partial cache on disk (resumable via re-download)."""
+    """Cooperatively cancel any running job.
+
+    Sets the cancel event so the runner exits at its next checkpoint,
+    then terminates any tracked subprocess (ffmpeg, spawned model
+    scripts) so long non-Python work doesn't hold up the exit for
+    minutes. Jobs already in a terminal state are returned as-is.
+
+    Runners that don't yet consult _should_cancel remain unaffected;
+    the event still flips, so future refactors can honor it without an
+    API change."""
     with _jobs_lock:
         job = jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
+    if job["status"] in ("completed", "failed", "cancelled"):
+        return _job_response(job_id)
+
     event = _cancel_events.get(job_id)
-    if event is None:
-        # Either the job kind doesn't support cancel or it already finished.
-        if job["status"] in ("completed", "failed", "cancelled"):
-            return _job_response(job_id)
+    if event is not None:
+        event.set()
+    killed = _terminate_job_subprocesses(job_id)
+    _update_job(
+        job_id,
+        status="cancelling" if job["status"] != "queued" else "cancelled",
+        message=(
+            f"Cancelling — {killed} subprocess(es) signalled."
+            if killed else "Cancelling — waiting for next runner checkpoint…"
+        ),
+    )
+    return _job_response(job_id)
+
+
+class JobRetryResponse(BaseModel):
+    job_id: str
+    new_job_id: str
+    kind: str
+
+
+@app.post("/api/v1/jobs/{job_id}/retry", response_model=JobRetryResponse)
+async def retry_job(job_id: str):
+    """Re-fire a completed / failed / cancelled job with the same params.
+
+    The runner-dispatch table lives in JOB_KIND_RUNNERS below. Kinds
+    that aren't registered can't be retried yet — the API returns 400
+    rather than silently dropping the request.
+
+    The retry runs in a fresh thread and gets its own job_id, so both
+    the original and the retry stay visible in the jobs list. Nothing
+    is deleted."""
+    with _jobs_lock:
+        job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if job["status"] not in ("completed", "failed", "cancelled"):
         raise HTTPException(
             status_code=400,
-            detail=f"Job {job_id} ({job.get('kind')}) does not support cancellation.",
+            detail=f"Job is still {job['status']}; cancel or wait for it to finish first.",
         )
+    kind = job.get("kind", "")
+    runner = JOB_KIND_RUNNERS.get(kind)
+    if runner is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job kind {kind!r} does not support retry — no runner registered.",
+        )
+    new_id = _create_job(kind, job.get("params") or {})
+    threading.Thread(target=runner, args=(new_id, job.get("params") or {}), daemon=True).start()
+    return JobRetryResponse(job_id=job_id, new_job_id=new_id, kind=kind)
 
-    event.set()
-    _update_job(job_id, message="Cancelling — waiting for current file to finish…")
-    return _job_response(job_id)
+
+# Populated as runners register themselves. Keeping this as an explicit
+# dict (rather than importing from a decorator) means the retry endpoint
+# can't accidentally start something dangerous — kinds have to be added
+# on purpose. See _run_model_download at the bottom of the download
+# endpoint for an example wiring pattern.
+JOB_KIND_RUNNERS: dict[str, "callable"] = {}
+
+
+def register_job_runner(kind: str):
+    """Decorator: expose a runner function to the retry endpoint.
+
+    The runner signature must be `(job_id: str, params: dict) -> None`.
+    Anything else the runner needs (files, model handles) comes from
+    the shared module-level state or the params dict."""
+    def _dec(fn):
+        JOB_KIND_RUNNERS[kind] = fn
+        return fn
+    return _dec
 
 
 @app.delete("/api/v1/models/{model_key}")

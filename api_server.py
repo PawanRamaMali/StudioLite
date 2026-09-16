@@ -4199,6 +4199,60 @@ async def telemetry_bundle():
     )
 
 
+# ---------------------------------------------------------------------------
+# Licensing / entitlements (offline signed license — filmmaker/licensing.py)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/system/license")
+async def license_status():
+    """Report the current entitlement — tier, feature list, expiry,
+    grace warning if any. Absence of a license reports tier=free and
+    valid=False; the UI treats that as 'community edition' rather than
+    an error."""
+    from filmmaker import licensing
+    check = licensing.check_entitlement()
+    return {
+        "valid": check.valid,
+        "tier": check.tier,
+        "features": check.features,
+        "licensee": check.licensee,
+        "expires_at": check.expires_at,
+        "reason": check.reason,
+        "warning": check.warning,
+        "device_fingerprint": licensing.device_fingerprint(),
+    }
+
+
+class LicenseInstallRequest(BaseModel):
+    # Two-piece bundle: JSON payload the publisher signed + Ed25519 sig.
+    payload: dict
+    signature: str
+
+
+@app.post("/api/v1/system/license")
+async def install_license(body: LicenseInstallRequest):
+    """Verify a caller-supplied license bundle and, if it checks out,
+    persist it under `.license`. Invalid bundles are rejected without
+    touching disk, so a botched install can't lock the user out."""
+    from filmmaker import licensing
+    check = licensing.install_license(body.model_dump())
+    if not check.valid:
+        raise HTTPException(status_code=400, detail=check.reason)
+    return {
+        "valid": True, "tier": check.tier, "features": check.features,
+        "licensee": check.licensee, "expires_at": check.expires_at,
+        "warning": check.warning,
+    }
+
+
+@app.delete("/api/v1/system/license")
+async def deactivate_license():
+    """Remove the on-disk license. Idempotent; missing file is fine."""
+    from filmmaker import licensing
+    licensing.deactivate_license()
+    return {"deactivated": True}
+
+
 @app.post("/api/v1/system/hf-token-test")
 async def test_hf_token(token: str):
     """Test a HuggingFace token and save it if valid."""

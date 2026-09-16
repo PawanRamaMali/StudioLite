@@ -3241,6 +3241,146 @@ async def edit_rotate_flip(req: RotateFlipRequest):
     return _job_response(job_id)
 
 
+class KeyframeAnimateRequest(BaseModel):
+    start_image_path: str
+    end_image_path: str
+    frames: int = Field(default=30, ge=6, le=240)
+    fps: int = Field(default=24, ge=6, le=60)
+    easing: str = Field(default="ease_in_out")
+    # `blend` is the only method the plain ffmpeg backend can do. `i2v`
+    # would route to a diffusion pipeline (not wired here — the UI shows
+    # it as "requires GPU", and the panel disables it when it's absent).
+    method: str = Field(default="blend")
+
+
+def _run_keyframe_animate(job_id: str, req: KeyframeAnimateRequest):
+    """Alpha-blend start_image → end_image into an mp4 of ``frames`` frames
+    at ``fps`` fps. The easing curve is applied by mapping the linear
+    frame index through an easing function and feeding the resulting
+    alpha to ffmpeg's blend filter one frame at a time. On failure the
+    job status flips to failed with the ffmpeg stderr tail."""
+    import math
+    import subprocess as _sp
+    if _should_cancel(job_id):
+        _update_job(job_id, status="cancelled", message="Cancelled before start.")
+        return
+    _update_job(job_id, status="running", message="Rendering blend…", progress=0.0)
+    out_path = os.path.join(UPLOADS_DIR, f"keyframe_{uuid.uuid4().hex[:8]}.mp4")
+
+    def _ease(t: float, kind: str) -> float:
+        # Standard easing curves. `t` is 0..1.
+        if kind == "linear":
+            return t
+        if kind == "ease_in":
+            return t * t
+        if kind == "ease_out":
+            return 1 - (1 - t) * (1 - t)
+        if kind == "ease_in_out":
+            return 3 * t * t - 2 * t * t * t
+        if kind == "bounce":
+            # Cheap bounce approximation.
+            return 1 - abs(math.cos(t * math.pi)) * (1 - t)
+        return t
+
+    try:
+        # We render the sequence in a single ffmpeg call: two image
+        # inputs looped, and a `blend` filter whose `all_expr` uses
+        # a keyframe-count-based alpha so we don't have to spawn one
+        # process per frame. This keeps the runtime bounded even for
+        # a 240-frame max.
+        n = int(req.frames)
+        fps = int(req.fps)
+        # Build a piecewise expression that varies alpha per output
+        # frame index N; easing is precomputed into a small LUT so the
+        # ffmpeg expression stays readable.
+        lut = [_ease(i / max(1, n - 1), req.easing) for i in range(n)]
+        # Emit alpha as: alpha(N) = lut[N] evaluated via `if` chain.
+        # Ffmpeg's expression can't index arrays cleanly, but a
+        # ``lerp(A,B,N/(n-1))`` shape produces the linear case and
+        # covers 99% of user intent. For the actual easing we render
+        # to individual frames via a small python loop then concat —
+        # much simpler and lets us report progress accurately.
+        import tempfile
+        from PIL import Image
+        start_img = Image.open(req.start_image_path).convert("RGBA")
+        end_img = Image.open(req.end_image_path).convert("RGBA")
+        # Resize both to the smaller of the two so blending has a
+        # consistent surface.
+        w = min(start_img.size[0], end_img.size[0])
+        h = min(start_img.size[1], end_img.size[1])
+        # Fold to even dims — libx264 refuses odd width/height.
+        w -= w % 2
+        h -= h % 2
+        start_img = start_img.resize((w, h))
+        end_img = end_img.resize((w, h))
+        with tempfile.TemporaryDirectory(prefix="kf_") as tmp:
+            for i in range(n):
+                if _should_cancel(job_id):
+                    _update_job(job_id, status="cancelled",
+                                message="Cancelled mid-render.")
+                    return
+                a = lut[i]
+                frame = Image.blend(start_img, end_img, a)
+                frame.convert("RGB").save(
+                    os.path.join(tmp, f"f_{i:05d}.png"), "PNG",
+                )
+                if i % max(1, n // 20) == 0:
+                    _update_job(job_id, progress=i / n,
+                                message=f"Blending frame {i}/{n}")
+            cmd = [
+                "ffmpeg", "-y",
+                "-framerate", str(fps),
+                "-i", os.path.join(tmp, "f_%05d.png"),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p",
+                out_path,
+            ]
+            proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE)
+            _register_subprocess(job_id, proc)
+            _, err = proc.communicate()
+            if proc.returncode != 0:
+                raise RuntimeError((err or b"").decode("utf-8", "replace")[-400:])
+        _update_job(
+            job_id,
+            status="completed",
+            progress=1.0,
+            message=f"Wrote {out_path}",
+            result={"video_path": out_path, "frames": n, "fps": fps},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception("keyframe animate failed")
+        _update_job(job_id, status="failed", error=str(e))
+    finally:
+        _clear_subprocesses(job_id)
+
+
+@register_job_runner("keyframe_animate")
+def _keyframe_animate_runner(job_id: str, params: dict) -> None:
+    """Retry-friendly entry point. Reconstructs the request from the
+    stored params dict and dispatches into the same worker."""
+    req = KeyframeAnimateRequest(**params)
+    _run_keyframe_animate(job_id, req)
+
+
+@app.post("/api/v1/edit/keyframe-animate", response_model=JobResponse)
+async def edit_keyframe_animate(req: KeyframeAnimateRequest):
+    """Alpha-blend two keyframe images into an mp4 of N frames at ``fps``
+    using the specified easing curve. Only the ``blend`` method is wired
+    server-side today — GPU-backed I2V / frame-interpolation modes live
+    in the video-gen stack and will be routed here when they land."""
+    for path in (req.start_image_path, req.end_image_path):
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=422, detail=f"Image not found: {path}")
+    if req.method != "blend":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Method {req.method!r} not implemented on the server-side blend runner.",
+        )
+    job_id = _create_job("keyframe_animate", req.model_dump())
+    threading.Thread(target=_run_keyframe_animate, args=(job_id, req), daemon=True).start()
+    return _job_response(job_id)
+
+
 @app.post("/api/v1/edit/reverse", response_model=JobResponse)
 async def edit_reverse(req: ReverseRequest):
     """Reverse video playback, optionally including audio."""

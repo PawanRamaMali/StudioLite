@@ -227,10 +227,16 @@ export interface EditAudioUploadResponse {
   size_bytes: number;
 }
 
-export async function uploadEditVideo(file: File): Promise<EditUploadResponse> {
+// Uploads go through a bespoke helper because `apiFetch` sets a JSON
+// content-type header that clobbers the multipart boundary the browser
+// picks. Still inject the auth token if we have one.
+async function _uploadFile<T>(path: string, file: File): Promise<T> {
   const fd = new FormData();
   fd.append("file", file);
-  const res = await fetch(`${API_BASE}/api/v1/edit/upload`, { method: "POST", body: fd });
+  const headers: Record<string, string> = {};
+  const token = getApiToken();
+  if (token) headers["X-StudioLite-Token"] = token;
+  const res = await fetch(`${API_BASE}${path}`, { method: "POST", headers, body: fd });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || `Upload failed: ${res.status}`);
@@ -238,16 +244,36 @@ export async function uploadEditVideo(file: File): Promise<EditUploadResponse> {
   return res.json();
 }
 
-export async function uploadEditAudio(file: File): Promise<EditAudioUploadResponse> {
-  const fd = new FormData();
-  fd.append("file", file);
-  const res = await fetch(`${API_BASE}/api/v1/edit/upload-audio`, { method: "POST", body: fd });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || `Upload failed: ${res.status}`);
-  }
-  return res.json();
+export const uploadEditVideo = (file: File) =>
+  _uploadFile<EditUploadResponse>("/api/v1/edit/upload", file);
+
+export const uploadEditAudio = (file: File) =>
+  _uploadFile<EditAudioUploadResponse>("/api/v1/edit/upload-audio", file);
+
+export const upscaleVideo = (params: { video_path: string; scale: 1 | 2 | 3 | 4; preset: string }) =>
+  apiFetch<Job>("/api/v1/edit/upscale", { method: "POST", body: JSON.stringify(params) });
+
+// Keyframe animation ------------------------------------------------------
+
+export interface ImageUploadResponse {
+  image_path: string;
+  url: string;
+  size_bytes: number;
 }
+
+export const uploadImage = (file: File) =>
+  _uploadFile<ImageUploadResponse>("/api/v1/images/upload", file);
+
+export const animateKeyframes = (params: {
+  start_image_path: string;
+  end_image_path: string;
+  frames: number;
+  fps: number;
+  easing: string;
+  method: string;
+}) => apiFetch<Job>("/api/v1/edit/keyframe-animate", {
+  method: "POST", body: JSON.stringify(params),
+});
 
 export const extractVideoAudio = (params: { video_path: string; format: "wav" | "mp3" }) =>
   apiFetch<Job>("/api/v1/edit/extract-audio", { method: "POST", body: JSON.stringify(params) });
@@ -410,16 +436,7 @@ export const getImagesHistory = (limit = 50) =>
     `/api/v1/images/history?limit=${limit}`,
   );
 
-export async function uploadImage(file: File): Promise<{ image_path: string; url: string; size_bytes: number }> {
-  const fd = new FormData();
-  fd.append("file", file);
-  const res = await fetch(`${API_BASE}/api/v1/images/upload`, { method: "POST", body: fd });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || `Upload failed: ${res.status}`);
-  }
-  return res.json();
-}
+// uploadImage lives up in the edit section — same helper handles both.
 
 // ---------------------------------------------------------------------------
 // Film Studio

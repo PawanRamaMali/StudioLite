@@ -183,9 +183,13 @@ app.mount("/static/screen_transcripts", StaticFiles(directory=SCREEN_TRANSCRIPTS
 from api.routers import health as _health_router
 from api.routers import licensing as _licensing_router
 from api.routers import telemetry as _telemetry_router
+from api.routers import env_vars as _env_vars_router
+from api.routers import models_inventory as _models_inventory_router
 app.include_router(_health_router.router)
 app.include_router(_licensing_router.router)
 app.include_router(_telemetry_router.router)
+app.include_router(_env_vars_router.router)
+app.include_router(_models_inventory_router.router)
 
 # ---------------------------------------------------------------------------
 # Job tracking
@@ -2556,39 +2560,9 @@ async def list_engines():
     }
 
 
-@app.get("/api/v1/models/inventory")
-async def model_inventory():
-    """Live installation status of every model in the registry.
-
-    Returns per-model: {key, name, installed, vram_min, engine, modes, quality,
-    speed, built_in, active_job}. active_job is the job_id of an in-flight
-    download for that model, if any. Backed by model_hub.get_model_status
-    which probes the HuggingFace cache + local model dirs on disk each call.
-    """
-    try:
-        import model_hub as _mh
-        models = _mh.get_model_status()
-    except Exception as e:
-        logger.error("model_hub.get_model_status failed: %s", e)
-        models = []
-
-    with _jobs_lock:
-        active = {
-            j["params"].get("model_key"): jid
-            for jid, j in jobs.items()
-            if j.get("kind") == "model_download"
-            and j["status"] in ("queued", "running")
-            and j.get("params", {}).get("model_key")
-        }
-    for m in models:
-        m["active_job"] = active.get(m["key"])
-
-    installed = sum(1 for m in models if m.get("installed"))
-    return {
-        "models": models,
-        "installed_count": installed,
-        "total_count": len(models),
-    }
+# models/inventory GET lives in api/routers/models_inventory.py; other
+# /api/v1/models/... endpoints (download / delete) still live here
+# because they use module-local runners.
 
 
 def _run_model_download(job_id: str, model_key: str):
@@ -3573,6 +3547,129 @@ async def edit_timeline_render(req: TimelineRenderRequest):
     return _job_response(job_id)
 
 
+# --- Batch render --------------------------------------------------------
+# A batch is a lightweight wrapper around N timeline_render jobs. The
+# individual jobs still show up in the Jobs panel and honor cancel/retry
+# on their own; the batch record aggregates their status so a "render
+# 12 shots overnight" workflow has one thing to watch instead of twelve.
+
+class BatchRenderItem(BaseModel):
+    name: Optional[str] = None
+    render: TimelineRenderRequest
+
+
+class BatchRenderRequest(BaseModel):
+    name: Optional[str] = None
+    items: List[BatchRenderItem]
+
+
+_batches: Dict[str, Dict] = {}
+_batches_lock = threading.Lock()
+
+
+def _batch_status(batch_id: str) -> Optional[Dict]:
+    """Snapshot of a batch: aggregate counts + per-item job status. Reads
+    the live job dict so cancel/retry on individual items reflects here
+    without a separate write path."""
+    with _batches_lock:
+        batch = _batches.get(batch_id)
+        if batch is None:
+            return None
+        items_snapshot = list(batch["items"])
+        name = batch["name"]
+        created_at = batch["created_at"]
+
+    counts = {"queued": 0, "running": 0, "completed": 0,
+              "failed": 0, "cancelled": 0}
+    resolved = []
+    for it in items_snapshot:
+        job = jobs.get(it["job_id"])
+        status = (job or {}).get("status", "queued")
+        counts[status] = counts.get(status, 0) + 1
+        resolved.append({
+            "job_id": it["job_id"],
+            "name": it.get("name"),
+            "status": status,
+            "progress": (job or {}).get("progress", 0.0),
+            "message": (job or {}).get("message", ""),
+            "result": (job or {}).get("result"),
+            "error": (job or {}).get("error"),
+        })
+    total = len(items_snapshot)
+    done = counts["completed"] + counts["failed"] + counts["cancelled"]
+    return {
+        "batch_id": batch_id,
+        "name": name,
+        "created_at": created_at,
+        "total": total,
+        "done": done,
+        "in_flight": total - done,
+        "counts": counts,
+        "items": resolved,
+    }
+
+
+@app.post("/api/v1/edit/batch-render")
+async def edit_batch_render(req: BatchRenderRequest):
+    """Queue a batch of timeline renders. Every clip in every item is
+    validated up front — a batch that fails half-through with the other
+    half already rendered is worse than one that fails at submit."""
+    if not req.items:
+        raise HTTPException(status_code=422, detail="Batch has no items.")
+    for i, item in enumerate(req.items):
+        if not item.render.clips:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Batch item {i}: timeline has no clips.")
+        for spec in item.render.clips:
+            if not os.path.isfile(spec.video_path):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Batch item {i}: clip not found: "
+                           f"{spec.video_path}")
+
+    batch_id = uuid.uuid4().hex[:12]
+    items_meta = []
+    for item in req.items:
+        job_id = _create_job("timeline_render", item.render.model_dump())
+        threading.Thread(target=_run_timeline_render,
+                         args=(job_id, item.render), daemon=True).start()
+        items_meta.append({"job_id": job_id, "name": item.name})
+    with _batches_lock:
+        _batches[batch_id] = {
+            "name": req.name,
+            "created_at": time.time(),
+            "items": items_meta,
+        }
+    return _batch_status(batch_id)
+
+
+@app.get("/api/v1/edit/batch-render/{batch_id}")
+async def edit_batch_render_status(batch_id: str):
+    status = _batch_status(batch_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    return status
+
+
+@app.delete("/api/v1/edit/batch-render/{batch_id}")
+async def edit_batch_render_cancel(batch_id: str):
+    """Cancel every still-running item in the batch. Completed items
+    stay completed. Idempotent."""
+    with _batches_lock:
+        batch = _batches.get(batch_id)
+        items = list(batch["items"]) if batch else []
+    if batch is None:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    cancelled = 0
+    for it in items:
+        event = _cancel_events.get(it["job_id"])
+        if event and not event.is_set():
+            event.set()
+            cancelled += 1
+    return {"batch_id": batch_id, "requested_cancel": cancelled}
+
+
 @app.post("/api/v1/edit/keyframe-animate", response_model=JobResponse)
 async def edit_keyframe_animate(req: KeyframeAnimateRequest):
     """Alpha-blend two keyframe images into an mp4 of N frames at ``fps``
@@ -4239,91 +4336,8 @@ async def list_characters():
 
 
 # ---------------------------------------------------------------------------
-# Environment Variables & Logs
+# Logs (env-vars endpoints live in api/routers/env_vars.py)
 # ---------------------------------------------------------------------------
-
-# Env vars that are safe to expose/edit via the UI
-MANAGED_ENV_VARS = [
-    "HF_TOKEN", "HF_HOME", "NEXT_PUBLIC_API_URL",
-    "CUDA_VISIBLE_DEVICES", "PYTORCH_CUDA_ALLOC_CONF",
-]
-
-
-@app.get("/api/v1/system/env")
-async def get_env_vars():
-    """Get current environment variables relevant to StudioLite."""
-    env = {}
-    for key in MANAGED_ENV_VARS:
-        val = os.environ.get(key, "")
-        # Mask tokens (show first 8 chars only)
-        if "TOKEN" in key and val and len(val) > 8:
-            env[key] = val[:8] + "..." + val[-4:]
-        else:
-            env[key] = val
-    # Also include all HF_ and CUDA_ vars
-    for key, val in os.environ.items():
-        if key.startswith(("HF_", "CUDA_", "TORCH_", "PYTORCH_")) and key not in env:
-            if "TOKEN" in key and val and len(val) > 8:
-                env[key] = val[:8] + "..." + val[-4:]
-            else:
-                env[key] = val
-    return {"env": env, "managed_keys": MANAGED_ENV_VARS}
-
-
-@app.post("/api/v1/system/env")
-async def set_env_var(key: str, value: str):
-    """Set an environment variable. Takes effect immediately for this process.
-    Restricted to keys in MANAGED_ENV_VARS to prevent an attacker with API
-    access from smuggling arbitrary process state through this endpoint.
-    Auth enforced by the global middleware."""
-    k = key.strip()
-    if not k:
-        raise HTTPException(status_code=422, detail="Key cannot be empty")
-    if k not in MANAGED_ENV_VARS and not k.startswith(("HF_", "CUDA_", "TORCH_", "PYTORCH_")):
-        raise HTTPException(
-            status_code=403,
-            detail=f"Env key {k!r} is not on the managed allowlist. Add it to "
-                   "MANAGED_ENV_VARS in api_server.py if you need it exposed.",
-        )
-    os.environ[k] = value
-    # Persist to .env file for next startup
-    env_file = os.path.join(ROOT_DIR, ".env")
-    env_lines = []
-    if os.path.exists(env_file):
-        with open(env_file, "r", encoding="utf-8") as f:
-            env_lines = f.readlines()
-    # Update or add the key
-    found = False
-    for i, line in enumerate(env_lines):
-        if line.strip().startswith(f"{key.strip()}="):
-            env_lines[i] = f"{key.strip()}={value}\n"
-            found = True
-            break
-    if not found:
-        env_lines.append(f"{key.strip()}={value}\n")
-    with open(env_file, "w", encoding="utf-8") as f:
-        f.writelines(env_lines)
-    return {"status": "ok", "key": key.strip(), "persisted": True}
-
-
-@app.delete("/api/v1/system/env")
-async def delete_env_var(key: str):
-    """Remove an environment variable. Same allowlist as POST.
-    Auth enforced by the global middleware."""
-    k = key.strip()
-    if k not in MANAGED_ENV_VARS and not k.startswith(("HF_", "CUDA_", "TORCH_", "PYTORCH_")):
-        raise HTTPException(status_code=403, detail=f"Env key {k!r} is not managed.")
-    if k in os.environ:
-        del os.environ[k]
-    # Remove from .env file
-    env_file = os.path.join(ROOT_DIR, ".env")
-    if os.path.exists(env_file):
-        with open(env_file, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        lines = [l for l in lines if not l.strip().startswith(f"{key}=")]
-        with open(env_file, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-    return {"status": "ok", "key": key, "deleted": True}
 
 
 @app.get("/api/v1/system/logs")
@@ -5232,6 +5246,53 @@ def _film_stages_dict() -> list:
 async def film_list_stages():
     """The pipeline shape — static; used by the frontend to render the timeline."""
     return {"stages": _film_stages_dict()}
+
+
+@app.get("/api/v1/films/templates")
+async def film_list_templates():
+    """Starter templates for the "new project" screen. Static — the
+    catalog lives in filmmaker/film_templates.py so contributions are
+    a regular code review, not a database migration."""
+    from filmmaker import film_templates
+    return {"templates": [t.as_dict() for t in film_templates.list_templates()]}
+
+
+class FilmFromTemplateRequest(BaseModel):
+    template_id: str
+    title: Optional[str] = None
+    brief_override: Optional[str] = None       # falls back to template.sample_brief
+    config_override: Optional[Dict] = None     # merged on top of template config
+
+
+@app.post("/api/v1/films/from-template")
+async def film_create_from_template(req: FilmFromTemplateRequest):
+    """Spawn a project pre-populated from a template. The caller may
+    override the brief and any config knob; anything they leave out
+    picks up the template's defaults."""
+    from filmmaker import film_templates, projects as _fp
+    try:
+        template = film_templates.get_template(req.template_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    brief = (req.brief_override or template.sample_brief).strip()
+    if len(brief) < 8:
+        raise HTTPException(
+            status_code=422,
+            detail="Brief must be at least 8 characters — override the "
+                   "template's sample brief with something meaningful.",
+        )
+    config = film_templates.template_config(template.id)
+    if req.config_override:
+        config.update(req.config_override)
+    proj = _fp.create(OUTPUT_DIR, brief=brief,
+                      title=req.title or template.name,
+                      config_dict=config)
+    return {
+        "project": _film_meta_dict(proj),
+        "state": _film_state_dict(proj),
+        "template": template.as_dict(),
+    }
 
 
 @app.get("/api/v1/films")

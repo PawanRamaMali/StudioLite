@@ -5204,6 +5204,12 @@ class LibraryAddRootsBatchRequest(BaseModel):
 class LibraryBatchDeleteRequest(BaseModel):
     video_ids: list
     delete_file: bool = False
+    remove_empty_folders: bool = True
+
+
+class LibraryCleanupEmptyFoldersRequest(BaseModel):
+    root_ids: Optional[list] = None   # None = every configured root
+    dry_run: bool = False
 
 
 class LibraryDeletionPlanRequest(BaseModel):
@@ -5244,10 +5250,12 @@ async def library_delete_root(root_id: int):
 async def library_list_videos(limit: int = 200, offset: int = 0,
                               root_id: Optional[int] = None,
                               q: Optional[str] = None,
-                              include_missing: bool = False):
+                              include_missing: bool = False,
+                              kind: Optional[str] = None):
     videos, total = _library_store.list_videos(
         root_id=root_id, limit=max(1, min(1000, limit)),
         offset=max(0, offset), query=q, include_missing=include_missing,
+        kind=(kind if kind in ("video", "image") else None),
     )
     return {"total": total, "videos": [v.__dict__ for v in videos]}
 
@@ -5286,7 +5294,10 @@ async def library_thumb(video_id: int):
         raise HTTPException(404, "Video not found")
     if not os.path.isfile(v.abs_path):
         raise HTTPException(410, "Source file gone")
-    path = _lib_thumbs.ensure_thumb(LIBRARY_DIR, video_id, v.abs_path)
+    if v.kind == "image":
+        path = _lib_thumbs.ensure_image_thumb(LIBRARY_DIR, video_id, v.abs_path)
+    else:
+        path = _lib_thumbs.ensure_thumb(LIBRARY_DIR, video_id, v.abs_path)
     if not path or not os.path.isfile(path):
         raise HTTPException(500, "Could not generate thumbnail")
     return FileResponse(path, media_type="image/jpeg")
@@ -5304,6 +5315,18 @@ _VIDEO_MIME_MAP = {
     ".rm": "application/vnd.rn-realmedia", ".rmvb": "application/vnd.rn-realmedia-vbr",
 }
 
+_IMAGE_MIME_MAP = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".jfif": "image/jpeg", ".jpe": "image/jpeg",
+    ".png": "image/png", ".apng": "image/apng",
+    ".webp": "image/webp", ".avif": "image/avif",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp", ".dib": "image/bmp",
+    ".tif": "image/tiff", ".tiff": "image/tiff",
+    ".ico": "image/x-icon", ".cur": "image/x-icon",
+    ".heic": "image/heic", ".heif": "image/heif",
+    ".svg": "image/svg+xml",
+}
+
 
 @app.get("/api/v1/library/videos/{video_id}/stream")
 async def library_stream(video_id: int):
@@ -5317,7 +5340,7 @@ async def library_stream(video_id: int):
     if not os.path.isfile(v.abs_path):
         raise HTTPException(410, "Source file gone")
     ext = os.path.splitext(v.abs_path)[1].lower()
-    mime = _VIDEO_MIME_MAP.get(ext, "application/octet-stream")
+    mime = _IMAGE_MIME_MAP.get(ext) or _VIDEO_MIME_MAP.get(ext) or "application/octet-stream"
     return FileResponse(v.abs_path, media_type=mime,
                         filename=os.path.basename(v.abs_path))
 
@@ -5347,9 +5370,11 @@ async def library_deletion_plan(req: LibraryDeletionPlanRequest):
 async def library_batch_delete(req: LibraryBatchDeleteRequest):
     """Apply a deletion plan. Returns per-id results so the review UI can
     show which succeeded and which failed instead of a single yes/no."""
+    from library import scanner as _lib_scanner
     results = []
     total_freed = 0
     files_removed = 0
+    deleted_paths: list = []
     for vid in req.video_ids:
         try:
             vid_i = int(vid)
@@ -5370,6 +5395,7 @@ async def library_batch_delete(req: LibraryBatchDeleteRequest):
                     file_deleted = True
                     total_freed += int(size or 0)
                     files_removed += 1
+                    deleted_paths.append(v.abs_path)
             except OSError as e:
                 file_error = str(e)
         removed = _library_store.delete_video(vid_i)
@@ -5382,11 +5408,34 @@ async def library_batch_delete(req: LibraryBatchDeleteRequest):
             "file_deleted": file_deleted,
             "file_error": file_error,
         })
+    folders_removed: list = []
+    if req.remove_empty_folders and deleted_paths:
+        root_paths = [r["path"] for r in _library_store.list_roots()]
+        cleanup = _lib_scanner.cleanup_empty_parents(deleted_paths, root_paths)
+        folders_removed = cleanup["removed"]
     return {
         "results": results,
         "files_deleted": files_removed,
         "bytes_freed": total_freed,
+        "folders_removed": folders_removed,
     }
+
+
+@app.post("/api/v1/library/cleanup/empty-folders")
+async def library_cleanup_empty_folders(req: LibraryCleanupEmptyFoldersRequest):
+    """Walk each configured root bottom-up and remove any effectively-empty
+    subfolder. Root paths themselves are never removed, and folders that
+    hold only Thumbs.db / .DS_Store / desktop.ini are treated as empty."""
+    from library import scanner as _lib_scanner
+    all_roots = _library_store.list_roots()
+    if req.root_ids:
+        ids = {int(x) for x in req.root_ids}
+        selected = [r["path"] for r in all_roots if r["id"] in ids]
+    else:
+        selected = [r["path"] for r in all_roots]
+    if not selected:
+        raise HTTPException(400, "No library roots to clean")
+    return _lib_scanner.cleanup_empty_folders(selected, dry_run=req.dry_run)
 
 
 @app.post("/api/v1/library/roots/batch")

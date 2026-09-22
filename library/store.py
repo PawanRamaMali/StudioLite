@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS videos (
     embedded_at  REAL,
     tags_json    TEXT,       -- JSON array of {tag, score}
     cluster_id   INTEGER,    -- populated by the "clusters" job; null until then
+    -- Media kind — "video" (default, back-compat) or "image".
+    media_kind   TEXT DEFAULT 'video',
     FOREIGN KEY (root_id) REFERENCES library_roots(id) ON DELETE SET NULL
 );
 
@@ -104,6 +106,8 @@ class Video:
     tags: List[Dict[str, Any]] = None  # type: ignore[assignment]
     cluster_id: Optional[int] = None
     embedded: bool = False             # true when an embedding is stored
+    # "video" or "image" — set by the scanner at discovery.
+    kind: str = "video"
 
 
 class LibraryStore:
@@ -138,6 +142,7 @@ class LibraryStore:
             ("embedded_at", "REAL"),
             ("tags_json",   "TEXT"),
             ("cluster_id",  "INTEGER"),
+            ("media_kind",  "TEXT DEFAULT 'video'"),
         ]
         for name, coltype in needs:
             if name not in cols:
@@ -223,9 +228,12 @@ class LibraryStore:
     # ---- videos ------------------------------------------------------------
 
     def upsert_video_discovered(self, root_id: Optional[int], abs_path: str,
-                                rel_path: str, size_bytes: int, mtime: float) -> Optional[int]:
+                                rel_path: str, size_bytes: int, mtime: float,
+                                kind: str = "video") -> Optional[int]:
         """Called by the scanner when it FIRST sees a file. Only touches
-        identity/inode-shape fields — sha256/phash/probe come later."""
+        identity/inode-shape fields — sha256/phash/probe come later.
+        `kind` is either "video" or "image"; on re-scan we lock it in so
+        two different scanners agree."""
         if not self._ok: return None
         now = time.time()
         with self._lock:
@@ -235,9 +243,9 @@ class LibraryStore:
                                     (abs_path,)).fetchone()
                     if row is None:
                         cur = c.execute(
-                            "INSERT INTO videos(root_id, abs_path, rel_path, size_bytes, mtime, added_at, missing) "
-                            "VALUES(?,?,?,?,?,?,0)",
-                            (root_id, abs_path, rel_path, size_bytes, mtime, now),
+                            "INSERT INTO videos(root_id, abs_path, rel_path, size_bytes, mtime, added_at, missing, media_kind) "
+                            "VALUES(?,?,?,?,?,?,0,?)",
+                            (root_id, abs_path, rel_path, size_bytes, mtime, now, kind),
                         )
                         return int(cur.lastrowid)
                     # Existing row — refresh mtime/size/missing but keep hashes if
@@ -245,11 +253,12 @@ class LibraryStore:
                     unchanged = row["mtime"] == mtime and row["size_bytes"] == size_bytes
                     if not unchanged:
                         c.execute(
-                            "UPDATE videos SET size_bytes=?, mtime=?, sha256=NULL, phash_hex=NULL, missing=0 WHERE id=?",
-                            (size_bytes, mtime, row["id"]),
+                            "UPDATE videos SET size_bytes=?, mtime=?, sha256=NULL, phash_hex=NULL, missing=0, media_kind=? WHERE id=?",
+                            (size_bytes, mtime, kind, row["id"]),
                         )
                     else:
-                        c.execute("UPDATE videos SET missing=0 WHERE id=?", (row["id"],))
+                        c.execute("UPDATE videos SET missing=0, media_kind=? WHERE id=?",
+                                  (kind, row["id"]))
                     return int(row["id"])
             except Exception as e:
                 logger.warning("upsert_video_discovered(%s) failed: %s", abs_path, e)
@@ -307,13 +316,16 @@ class LibraryStore:
     def list_videos(self, *, root_id: Optional[int] = None,
                     limit: int = 200, offset: int = 0,
                     include_missing: bool = False,
-                    query: Optional[str] = None) -> Tuple[List[Video], int]:
+                    query: Optional[str] = None,
+                    kind: Optional[str] = None) -> Tuple[List[Video], int]:
         if not self._ok: return ([], 0)
         clauses, vals = [], []
         if not include_missing:
             clauses.append("missing=0")
         if root_id is not None:
             clauses.append("root_id=?"); vals.append(root_id)
+        if kind in ("video", "image"):
+            clauses.append("media_kind=?"); vals.append(kind)
         if query:
             clauses.append("(abs_path LIKE ? OR rel_path LIKE ?)")
             like = f"%{query}%"
@@ -605,6 +617,7 @@ def _video_from_row(r) -> Video:
     tags_raw = None
     cluster_id = None
     has_embedding = False
+    kind = "video"
     # SQLite Row supports both index and key access; guard when a query
     # doesn't project the T2 columns (older SELECT * calls).
     try:
@@ -617,6 +630,10 @@ def _video_from_row(r) -> Video:
         pass
     try:
         has_embedding = r["embedding"] is not None
+    except Exception:
+        pass
+    try:
+        kind = r["media_kind"] or "video"
     except Exception:
         pass
     if tags_raw:
@@ -641,4 +658,5 @@ def _video_from_row(r) -> Video:
         tags=tags,
         cluster_id=(int(cluster_id) if cluster_id is not None else None),
         embedded=has_embedding,
+        kind=kind,
     )

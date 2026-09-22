@@ -155,7 +155,8 @@ class ScanJob(threading.Thread):
         n = len(remaining)
         for i, v in enumerate(remaining, 1):
             if self._cancelled(): return
-            r = probe_mod.probe(v.abs_path)
+            r = probe_mod.probe_image(v.abs_path) if v.kind == "image" \
+                else probe_mod.probe(v.abs_path)
             if r.duration_sec or r.width or r.height:
                 self.store.update_video_metadata(
                     v.id,
@@ -199,7 +200,8 @@ class ScanJob(threading.Thread):
                 self.store.mark_missing(v.id)
                 self.counts["skipped"] += 1
                 continue
-            ph = phash_mod.phash_video(v.abs_path, v.duration_sec)
+            ph = (phash_mod.phash_image(v.abs_path) if v.kind == "image"
+                  else phash_mod.phash_video(v.abs_path, v.duration_sec))
             if ph:
                 self.store.update_video_metadata(v.id, phash_hex=ph)
                 self.counts["phashed"] += 1
@@ -284,9 +286,10 @@ class EmbedJob(threading.Thread):
                 self.counts["skipped"] += 1
                 continue
             try:
-                emb = _emb.encode_video(v.abs_path, v.duration_sec)
+                emb = (_emb.encode_image(v.abs_path) if v.kind == "image"
+                       else _emb.encode_video(v.abs_path, v.duration_sec))
             except Exception as e:
-                logger.warning("encode_video failed on %s: %s", v.abs_path, e)
+                logger.warning("encode failed on %s: %s", v.abs_path, e)
                 emb = None
             if emb is None:
                 self.counts["skipped"] += 1

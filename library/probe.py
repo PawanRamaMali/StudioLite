@@ -21,6 +21,27 @@ class ProbeResult:
     fps: Optional[float] = None
 
 
+def probe_image(path: str) -> ProbeResult:
+    """PIL-based probe for still images — width, height, and format-as-codec.
+    Duration is left as None (a still image has no duration).
+    Never raises."""
+    if not os.path.isfile(path):
+        return ProbeResult()
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            return ProbeResult(
+                duration_sec=None,
+                width=int(img.width) if img.width else None,
+                height=int(img.height) if img.height else None,
+                codec=(img.format or "").lower() or None,
+                fps=None,
+            )
+    except Exception as e:
+        logger.debug("probe_image failed on %s: %s", path, e)
+        return ProbeResult()
+
+
 def probe(path: str, *, timeout: float = 20.0) -> ProbeResult:
     if not os.path.isfile(path):
         return ProbeResult()

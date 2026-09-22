@@ -636,7 +636,11 @@ export interface LibraryVideo {
   tags?: { tag: string; score: number }[];
   cluster_id?: number | null;
   embedded?: boolean;
+  // "video" or "image"; legacy rows without the column read back as "video".
+  kind?: "video" | "image";
 }
+
+export type LibraryMediaKind = "video" | "image";
 
 export interface LibraryCluster {
   kind: "exact" | "near";
@@ -676,6 +680,7 @@ export const libraryDeleteRoot = (root_id: number) =>
 
 export const libraryListVideos = (params?: {
   limit?: number; offset?: number; root_id?: number; q?: string; include_missing?: boolean;
+  kind?: LibraryMediaKind;
 }) => {
   const qs = new URLSearchParams();
   if (params?.limit != null) qs.set("limit", String(params.limit));
@@ -683,9 +688,26 @@ export const libraryListVideos = (params?: {
   if (params?.root_id != null) qs.set("root_id", String(params.root_id));
   if (params?.q) qs.set("q", params.q);
   if (params?.include_missing) qs.set("include_missing", "true");
+  if (params?.kind) qs.set("kind", params.kind);
   const suffix = qs.toString() ? `?${qs}` : "";
   return apiFetch<{ total: number; videos: LibraryVideo[] }>(`/api/v1/library/videos${suffix}`);
 };
+
+export interface LibraryCleanupResult {
+  removed: string[];
+  remaining_empty: string[];
+  count_removed: number;
+  dry_run: boolean;
+}
+
+export const libraryCleanupEmptyFolders = (opts?: { root_ids?: number[]; dry_run?: boolean }) =>
+  apiFetch<LibraryCleanupResult>("/api/v1/library/cleanup/empty-folders", {
+    method: "POST",
+    body: JSON.stringify({
+      root_ids: opts?.root_ids ?? null,
+      dry_run: opts?.dry_run ?? false,
+    }),
+  });
 
 export const libraryDeleteVideo = (video_id: number, delete_file = false) =>
   apiFetch<{ deleted_index: boolean; file_deleted: boolean; file_error: string | null }>(
@@ -742,12 +764,14 @@ export interface LibraryBatchDeleteResult {
   }>;
   files_deleted: number;
   bytes_freed: number;
+  folders_removed?: string[];
 }
 
-export const libraryBatchDelete = (video_ids: number[], delete_file: boolean) =>
+export const libraryBatchDelete = (video_ids: number[], delete_file: boolean,
+                                   remove_empty_folders = true) =>
   apiFetch<LibraryBatchDeleteResult>("/api/v1/library/videos/batch-delete", {
     method: "POST",
-    body: JSON.stringify({ video_ids, delete_file }),
+    body: JSON.stringify({ video_ids, delete_file, remove_empty_folders }),
   });
 
 export const libraryStartScan = (root_ids?: number[]) =>

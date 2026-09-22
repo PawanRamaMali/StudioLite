@@ -227,7 +227,7 @@ class EnhanceJob(threading.Thread):
     def run(self) -> None:
         v = self.store.get_video(self.video_id)
         if not v or not os.path.isfile(v.abs_path):
-            self._error = "Source video not found"
+            self._error = "Source media not found"
             self._push(self._error, 1.0, "failed")
             return
         preset = PRESETS.get(self.preset)
@@ -236,12 +236,13 @@ class EnhanceJob(threading.Thread):
             self._push(self._error, 1.0, "failed")
             return
         os.makedirs(self.output_dir, exist_ok=True)
-        stem, ext = os.path.splitext(os.path.basename(v.abs_path))
-        out_name = f"{v.id}__{self.preset}{'__face' if self.face_restore else ''}.mp4"
+        is_image = (v.kind == "image")
+        ext = ".png" if is_image else ".mp4"
+        out_name = f"{v.id}__{self.preset}{'__face' if self.face_restore else ''}{ext}"
         out_path = os.path.join(self.output_dir, out_name)
 
         try:
-            from upscaler import upscale_video
+            from upscaler import upscale_video, upscale_image
         except Exception as e:
             self._error = f"Upscaler unavailable: {e}"
             self._push(self._error, 1.0, "failed")
@@ -253,14 +254,23 @@ class EnhanceJob(threading.Thread):
             self._push(msg, cur / max(total, 1) * (0.8 if self.face_restore else 1.0))
 
         try:
-            self._push("Starting upscale…", 0.02)
-            upscale_video(
-                v.abs_path,
-                scale=preset["scale"],
-                method=preset["method"],
-                output_path=out_path,
-                progress_callback=_cb,
-            )
+            self._push(f"Starting {'image' if is_image else 'video'} upscale…", 0.02)
+            if is_image:
+                upscale_image(
+                    v.abs_path,
+                    scale=preset["scale"],
+                    method=preset["method"],
+                    output_path=out_path,
+                )
+                self._push("Upscale complete", 0.90 if self.face_restore else 1.0)
+            else:
+                upscale_video(
+                    v.abs_path,
+                    scale=preset["scale"],
+                    method=preset["method"],
+                    output_path=out_path,
+                    progress_callback=_cb,
+                )
         except RuntimeError as e:
             if str(e) == "cancelled":
                 self._push("Cancelled", 1.0, "cancelled")
@@ -273,8 +283,11 @@ class EnhanceJob(threading.Thread):
             self._push(self._error, 1.0, "failed")
             return
 
-        # Optional face restoration pass on the upscaled output.
-        if self.face_restore and not self._cancelled():
+        # Optional face restoration pass on the upscaled video. Image-mode
+        # face restore is a future add — GFPGAN accepts still images too,
+        # but for T3 we keep it to the video path (which the recommender
+        # already flags for us).
+        if self.face_restore and not is_image and not self._cancelled():
             self._push("Face restoration…", 0.82)
             face_out = out_path.replace(".mp4", "_face.mp4")
             ok = _apply_face_restore(out_path, face_out,

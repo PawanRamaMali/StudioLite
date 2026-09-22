@@ -100,6 +100,23 @@ def phash_video(path: str, duration_sec: Optional[float]) -> Optional[str]:
     return str(accum)  # hex
 
 
+def phash_image(path: str) -> Optional[str]:
+    """Return a hex phash for a single still image. Handles anything Pillow
+    can open; failures (RAW without a codec, corrupt files) return None."""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        img = Image.open(path)
+        img.load()
+        # Convert to RGB — phash won't handle palettized modes cleanly.
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        return str(imagehash.phash(img))
+    except Exception as e:
+        logger.debug("phash_image failed on %s: %s", path, e)
+        return None
+
+
 def hamming(a: str, b: str) -> int:
     """Bit distance between two hex phashes. Length-invariant: pads the
     shorter side with 0s so a truncated hash doesn't blow up."""

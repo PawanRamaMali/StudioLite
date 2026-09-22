@@ -8,6 +8,7 @@ import {
   FolderPlus, RefreshCw, ScanSearch, Copy, Trash2,
   AlertCircle, Loader2, HardDrive, Folder, Film, Sparkles,
   Search, X, CheckCircle2, Layers, ArrowRight, Wand2, Zap, Grid3x3, Tag,
+  Image as ImageIcon, FolderX,
 } from "lucide-react";
 import {
   libraryAddRoot, libraryAddRootsBatch, libraryBatchDelete, libraryDeleteRoot,
@@ -17,11 +18,13 @@ import {
   libraryIndexStats, libraryStartEmbed, librarySearch, libraryBuildClusters,
   libraryClusterMembers,
   libraryEnhanceRecommend, libraryStartEnhance,
+  libraryCleanupEmptyFolders,
   getJob,
   type KeeperStrategy, type LibraryBatchDeleteResult, type LibraryDeletionPlan,
   type LibraryDuplicates, type LibraryRoot, type LibraryStats, type LibraryVideo,
   type LibrarySearchHit, type LibraryClusterSummary,
   type LibraryEnhanceRecommendResponse, type LibraryEnhancePreset,
+  type LibraryMediaKind,
   type Job,
 } from "@/lib/api";
 
@@ -279,11 +282,40 @@ function RootsPanel({
           <CardTitle className="text-sm flex items-center gap-2">
             <Folder className="w-4 h-4 text-indigo-400" /> Watched folders
           </CardTitle>
-          <Button variant="secondary" size="sm" onClick={onScanAll}
-                  disabled={!roots || roots.length === 0 || disabled}
-                  title={roots?.length ? "Scan every watched folder" : "Add a folder first"}>
-            <ScanSearch className="w-3.5 h-3.5 mr-1.5" /> Scan all
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button variant="secondary" size="sm"
+                    onClick={async () => {
+                      if (!roots || roots.length === 0) return;
+                      try {
+                        const dry = await libraryCleanupEmptyFolders({ dry_run: true });
+                        const n = dry.count_removed;
+                        const preview = dry.removed.slice(0, 5).join("\n") +
+                          (dry.removed.length > 5 ? `\n… +${dry.removed.length - 5} more` : "");
+                        if (n === 0) {
+                          window.alert("No empty folders found.");
+                          return;
+                        }
+                        const ok = window.confirm(
+                          `Remove ${n} empty folder${n === 1 ? "" : "s"}?\n\n${preview}\n\n` +
+                          "Watched-root folders themselves are never removed."
+                        );
+                        if (!ok) return;
+                        const res = await libraryCleanupEmptyFolders({ dry_run: false });
+                        setError(`Removed ${res.count_removed} empty folder${res.count_removed === 1 ? "" : "s"}.`);
+                      } catch (e) {
+                        setError(e instanceof Error ? e.message : "Cleanup failed");
+                      }
+                    }}
+                    disabled={!roots || roots.length === 0 || disabled}
+                    title="Bottom-up sweep of every watched folder — removes any subfolder whose only contents are junk (Thumbs.db, .DS_Store, desktop.ini)">
+              <FolderX className="w-3.5 h-3.5 mr-1.5" /> Clean empty
+            </Button>
+            <Button variant="secondary" size="sm" onClick={onScanAll}
+                    disabled={!roots || roots.length === 0 || disabled}
+                    title={roots?.length ? "Scan every watched folder" : "Add a folder first"}>
+              <ScanSearch className="w-3.5 h-3.5 mr-1.5" /> Scan all
+            </Button>
+          </div>
         </div>
         {!roots && <div className="text-xs text-zinc-500">Loading…</div>}
         {roots && roots.length === 0 && (
@@ -426,29 +458,34 @@ function BrowseView({ onError }: { onError: (s: string) => void }) {
   const [videos, setVideos] = useState<LibraryVideo[] | null>(null);
   const [total, setTotal] = useState(0);
   const [q, setQ] = useState("");
+  const [kind, setKind] = useState<LibraryMediaKind | "all">("all");
   const [pending, setPending] = useState(false);
   const [selected, setSelected] = useState<LibraryVideo | null>(null);
   const debounceRef = useRef<number | null>(null);
 
-  const load = useCallback(async (query: string) => {
+  const load = useCallback(async (query: string, filterKind: LibraryMediaKind | "all") => {
     setPending(true);
     try {
-      const res = await libraryListVideos({ limit: 60, q: query || undefined });
+      const res = await libraryListVideos({
+        limit: 60,
+        q: query || undefined,
+        kind: filterKind === "all" ? undefined : filterKind,
+      });
       setVideos(res.videos); setTotal(res.total);
     } catch (e) {
-      onError(e instanceof Error ? e.message : "Failed to list videos");
+      onError(e instanceof Error ? e.message : "Failed to list media");
     } finally {
       setPending(false);
     }
   }, [onError]);
 
-  useEffect(() => { load(""); }, [load]);
+  useEffect(() => { load("", kind); }, [load, kind]);
 
   useEffect(() => {
     if (debounceRef.current !== null) window.clearTimeout(debounceRef.current);
-    debounceRef.current = window.setTimeout(() => load(q), 250);
+    debounceRef.current = window.setTimeout(() => load(q, kind), 250);
     return () => { if (debounceRef.current !== null) window.clearTimeout(debounceRef.current); };
-  }, [q, load]);
+  }, [q, kind, load]);
 
   const del = useCallback(async (v: LibraryVideo, deleteFile: boolean) => {
     const label = deleteFile ? "DELETE FROM DISK" : "remove from index";
@@ -460,21 +497,37 @@ function BrowseView({ onError }: { onError: (s: string) => void }) {
     try {
       await libraryDeleteVideo(v.id, deleteFile);
       setSelected(null);
-      load(q);
+      load(q, kind);
     } catch (e) {
       onError(e instanceof Error ? e.message : `Failed to ${label}`);
     }
-  }, [load, q, onError]);
+  }, [load, q, kind, onError]);
 
   return (
     <Card className="min-h-[500px]">
       <div className="flex items-center gap-3 mb-3 flex-wrap">
         <CardTitle className="text-sm flex items-center gap-2">
-          <Film className="w-4 h-4 text-indigo-400" /> All videos
+          <Film className="w-4 h-4 text-indigo-400" /> All media
           <span className="text-[10px] text-zinc-500 font-mono">
             {videos ? `${videos.length} of ${total}` : "…"}
           </span>
         </CardTitle>
+        <div className="flex items-center rounded-lg border border-zinc-700 overflow-hidden">
+          {(["all", "video", "image"] as const).map((k) => (
+            <button
+              key={k}
+              onClick={() => setKind(k)}
+              className={`px-2.5 py-1 text-[11px] transition-colors ${
+                kind === k
+                  ? "bg-indigo-500/20 text-indigo-300"
+                  : "text-zinc-400 hover:text-zinc-200"
+              }`}
+              title={k === "all" ? "Show everything" : `Show only ${k}s`}
+            >
+              {k === "all" ? "All" : k === "video" ? "Videos" : "Images"}
+            </button>
+          ))}
+        </div>
         <div className="ml-auto relative">
           <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-2 top-1/2 -translate-y-1/2" />
           <input
@@ -507,8 +560,13 @@ function BrowseView({ onError }: { onError: (s: string) => void }) {
                 loading="lazy"
                 className="w-full h-full object-cover"
               />
+              <div className="absolute top-1 left-1 text-[9px] font-mono bg-black/70 text-zinc-300 rounded px-1 flex items-center gap-1">
+                {v.kind === "image"
+                  ? <><ImageIcon className="w-2.5 h-2.5" /> IMG</>
+                  : <><Film className="w-2.5 h-2.5" /> VID</>}
+              </div>
               <div className="absolute bottom-1 right-1 text-[9px] font-mono bg-black/70 text-zinc-200 rounded px-1">
-                {fmtDuration(v.duration_sec)}
+                {v.kind === "image" ? (v.width && v.height ? `${v.width}×${v.height}` : "IMG") : fmtDuration(v.duration_sec)}
               </div>
             </div>
             <div className="p-2">
@@ -747,6 +805,7 @@ function VideoDetailModal({
 }) {
   const [showEnhance, setShowEnhance] = useState(false);
   const tags = (video.tags ?? []) as { tag: string; score: number }[];
+  const isImage = video.kind === "image";
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={onClose}>
       <div
@@ -755,7 +814,12 @@ function VideoDetailModal({
       >
         <div className="flex items-start justify-between gap-3 mb-3">
           <div className="min-w-0">
-            <h2 className="text-base font-semibold text-zinc-100 truncate">{baseName(video.abs_path)}</h2>
+            <h2 className="text-base font-semibold text-zinc-100 truncate flex items-center gap-2">
+              {isImage
+                ? <ImageIcon className="w-4 h-4 text-indigo-400 flex-shrink-0" />
+                : <Film className="w-4 h-4 text-indigo-400 flex-shrink-0" />}
+              {baseName(video.abs_path)}
+            </h2>
             <p className="text-[11px] text-zinc-500 font-mono truncate">{video.abs_path}</p>
           </div>
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300">
@@ -763,16 +827,27 @@ function VideoDetailModal({
           </button>
         </div>
 
-        <video
-          src={libraryStreamUrl(video.id)}
-          controls preload="metadata"
-          className="w-full max-h-[55vh] bg-black rounded-lg"
-        />
+        {isImage ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={libraryStreamUrl(video.id)}
+            alt={baseName(video.abs_path)}
+            className="w-full max-h-[55vh] bg-black rounded-lg object-contain"
+          />
+        ) : (
+          <video
+            src={libraryStreamUrl(video.id)}
+            controls preload="metadata"
+            className="w-full max-h-[55vh] bg-black rounded-lg"
+          />
+        )}
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
-          <DetailField label="Duration" value={fmtDuration(video.duration_sec)} />
+          {isImage
+            ? <DetailField label="Kind" value="Image" />
+            : <DetailField label="Duration" value={fmtDuration(video.duration_sec)} />}
           <DetailField label="Resolution" value={video.width && video.height ? `${video.width}×${video.height}` : "—"} />
-          <DetailField label="Codec" value={video.codec ?? "—"} />
+          <DetailField label={isImage ? "Format" : "Codec"} value={video.codec ?? "—"} />
           <DetailField label="Size" value={fmtBytes(video.size_bytes)} />
         </div>
 
@@ -981,6 +1056,7 @@ function DeleteAllButOneReview({
   const [loading, setLoading] = useState(true);
   const [overrides, setOverrides] = useState<Record<string, number>>({});
   const [deleteFile, setDeleteFile] = useState(true);
+  const [removeEmptyFolders, setRemoveEmptyFolders] = useState(true);
   const [executing, setExecuting] = useState(false);
   const [result, setResult] = useState<LibraryBatchDeleteResult | null>(null);
 
@@ -1015,14 +1091,14 @@ function DeleteAllButOneReview({
     if (!ok) return;
     setExecuting(true);
     try {
-      const res = await libraryBatchDelete(plan.delete_ids, deleteFile);
+      const res = await libraryBatchDelete(plan.delete_ids, deleteFile, deleteFile && removeEmptyFolders);
       setResult(res);
     } catch (e) {
       onError(e instanceof Error ? e.message : "Batch delete failed");
     } finally {
       setExecuting(false);
     }
-  }, [plan, deleteFile, onError]);
+  }, [plan, deleteFile, removeEmptyFolders, onError]);
 
   const swapKeeper = (clusterKey: string, newKeeperId: number) => {
     setOverrides((o) => ({ ...o, [clusterKey]: newKeeperId }));
@@ -1099,6 +1175,15 @@ function DeleteAllButOneReview({
                        onChange={(e) => setDeleteFile(e.target.checked)}
                        className="accent-red-500" />
                 Also delete from disk (uncheck to only remove from the library index)
+              </label>
+              <label className={`flex items-center gap-2 text-xs cursor-pointer ${
+                deleteFile ? "text-zinc-300" : "text-zinc-600"
+              }`}>
+                <input type="checkbox" checked={removeEmptyFolders}
+                       disabled={!deleteFile}
+                       onChange={(e) => setRemoveEmptyFolders(e.target.checked)}
+                       className="accent-indigo-500" />
+                Remove folders left empty
               </label>
               <div className="flex-1" />
               <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
@@ -1190,7 +1275,9 @@ function ResultOverlay({ result, onClose }: {
         </h3>
         <p className="text-sm text-zinc-400 mt-1">
           Freed {humanBytes(result.bytes_freed)} of disk space
-          {failures.length > 0 && `, ${failures.length} skipped`}.
+          {failures.length > 0 && `, ${failures.length} skipped`}
+          {result.folders_removed && result.folders_removed.length > 0 &&
+            ` — plus ${result.folders_removed.length} emptied folder${result.folders_removed.length === 1 ? "" : "s"}`}.
         </p>
         {failures.length > 0 && (
           <div className="text-left mt-3 max-h-40 overflow-y-auto border border-zinc-800 rounded-lg p-2 text-[10px] font-mono text-red-300">

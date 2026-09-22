@@ -163,6 +163,23 @@ def encode_video(path: str, duration_sec: Optional[float]) -> Optional[np.ndarra
     return _encode_images_pooled(frames, rt)
 
 
+def encode_image(path: str) -> Optional[np.ndarray]:
+    """Same embedding shape as encode_video but skips ffmpeg — a still
+    image is one frame straight into CLIP."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        img = Image.open(path)
+        img.load()
+        if img.mode not in ("RGB",):
+            img = img.convert("RGB")
+    except Exception as e:
+        logger.debug("encode_image open failed on %s: %s", path, e)
+        return None
+    rt = get_runtime()
+    return _encode_images_pooled([img], rt)
+
+
 def encode_text(text: str) -> Optional[np.ndarray]:
     """Return one L2-normalized 512-d embedding for a text query."""
     import torch

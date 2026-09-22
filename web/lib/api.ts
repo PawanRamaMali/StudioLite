@@ -97,6 +97,17 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 export const getSystemStatus = () => apiFetch<SystemStatus>("/api/v1/system/status");
 export const getEngines = () => apiFetch<Record<string, unknown>>("/api/v1/system/engines");
 
+export interface LLMBackendInfo {
+  configured: boolean;
+  reachable: boolean;
+  host: string | null;
+  default_model: string;
+  env_var: string | null;
+}
+
+export const getLLMBackends = () =>
+  apiFetch<{ backends: Record<string, LLMBackendInfo> }>("/api/v1/system/llm-backends");
+
 // Models
 export interface ModelInventoryItem {
   key: string;

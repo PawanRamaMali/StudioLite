@@ -13,9 +13,9 @@ import {
 import {
   FILM_API_BASE, filmCreate, filmDelete, filmEditArtifact, filmGet,
   filmList, filmListStages, filmPause, filmRewind, filmRun,
-  filmStreamUrl,
+  filmStreamUrl, getLLMBackends,
   type FilmDetail, type FilmListItem, type FilmStageKey, type FilmStageSpec,
-  type FilmStageStatus,
+  type FilmStageStatus, type LLMBackendInfo,
 } from "@/lib/api";
 
 type ProjectListRes = { projects: FilmListItem[] };
@@ -117,6 +117,34 @@ export default function FilmStudioPanel() {
 }
 
 // ---------------------------------------------------------------------------
+// LLM backend catalog — used by the create form's advanced section
+// ---------------------------------------------------------------------------
+
+const _DEFAULT_MODELS: Record<"ollama" | "gemini" | "groq" | "hf", string> = {
+  ollama: "llama3.2",
+  gemini: "gemini-2.5-flash",
+  groq:   "llama-3.3-70b-versatile",
+  hf:     "meta-llama/Meta-Llama-3-70B-Instruct",
+};
+
+const _MODEL_SUGGESTIONS: Record<"ollama" | "gemini" | "groq" | "hf", string[]> = {
+  ollama: ["llama3.2", "llama3.2:3b", "llama3.1:8b", "qwen2.5-coder:7b", "phi3.5"],
+  gemini: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+  groq:   ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768",
+           "qwen/qwen3-32b", "openai/gpt-oss-120b"],
+  hf:     ["meta-llama/Meta-Llama-3-70B-Instruct",
+           "meta-llama/Meta-Llama-3-8B-Instruct",
+           "mistralai/Mistral-Nemo-Instruct-2407"],
+};
+
+const _BACKEND_HELP: Record<"ollama" | "gemini" | "groq" | "hf", string> = {
+  ollama: "Local. Requires `ollama serve` running.",
+  gemini: "Google Gemini free tier. Requires GEMINI_API_KEY.",
+  groq:   "Free OpenAI-compat inference. Requires GROQ_API_KEY.",
+  hf:     "Hugging Face Router. Requires HF_TOKEN.",
+};
+
+// ---------------------------------------------------------------------------
 // List view + create form
 // ---------------------------------------------------------------------------
 
@@ -133,7 +161,9 @@ function ProjectListView({
   const [title, setTitle] = useState("");
   const [style, setStyle] = useState<"stylized" | "photoreal">("stylized");
   const [targetMinutes, setTargetMinutes] = useState(2);
+  const [llmBackend, setLlmBackend] = useState<"ollama" | "gemini" | "groq" | "hf">("ollama");
   const [model, setModel] = useState("llama3.2");
+  const [llmBackends, setLlmBackends] = useState<Record<string, LLMBackendInfo> | null>(null);
   const [quality, setQuality] = useState<"draft" | "standard" | "high" | "ultra">("standard");
   const [sdxlVariant, setSdxlVariant] = useState("turbo");
   const [motionBackend, setMotionBackend] = useState("auto");
@@ -143,6 +173,19 @@ function ProjectListView({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [creating, setCreating] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Probe once so the backend picker can gate cloud options behind
+    // "API key configured" without the user having to guess.
+    getLLMBackends().then((r) => setLlmBackends(r.backends)).catch(() => { /* soft */ });
+  }, []);
+
+  // When the user switches backend, drop the model back to that backend's
+  // default so we don't send `llama3.2` to Groq or `gemini-2.5-flash` to Ollama.
+  const changeBackend = (b: "ollama" | "gemini" | "groq" | "hf") => {
+    setLlmBackend(b);
+    setModel(_DEFAULT_MODELS[b]);
+  };
 
   const create = async () => {
     if (brief.trim().length < 8) {
@@ -156,8 +199,8 @@ function ProjectListView({
         brief: brief.trim(),
         title: title.trim() || undefined,
         config: {
-          llm_backend: "ollama",
-          llm_model: model.trim() || "llama3.2",
+          llm_backend: llmBackend,
+          llm_model: model.trim() || _DEFAULT_MODELS[llmBackend],
           style,
           target_minutes: targetMinutes,
           quality,
@@ -269,14 +312,54 @@ function ProjectListView({
               </div>
             </div>
             <div>
-              <label className="text-[10px] uppercase tracking-wide text-zinc-500">Ollama model</label>
+              <label className="text-[10px] uppercase tracking-wide text-zinc-500">LLM backend</label>
+              <div className="grid grid-cols-4 gap-1 mt-1">
+                {(["ollama", "gemini", "groq", "hf"] as const).map((b) => {
+                  const info = llmBackends?.[b];
+                  const ready = b === "ollama"
+                    ? (info?.reachable ?? true)
+                    : (info?.configured ?? false);
+                  return (
+                    <button
+                      type="button"
+                      key={b}
+                      onClick={() => changeBackend(b)}
+                      title={_BACKEND_HELP[b] + (info && !ready
+                        ? ` — not ${b === "ollama" ? "reachable" : "configured"}`
+                        : "")}
+                      className={`px-2 py-1.5 text-xs rounded border transition-colors ${
+                        llmBackend === b
+                          ? "bg-indigo-500/15 border-indigo-500/40 text-indigo-300"
+                          : "bg-zinc-800/40 border-zinc-700 text-zinc-300 hover:border-zinc-600"
+                      } ${!ready && "opacity-60"}`}
+                    >
+                      <span className="capitalize">{b === "hf" ? "HF" : b}</span>
+                      <span className={`ml-1 inline-block w-1.5 h-1.5 rounded-full ${
+                        ready ? "bg-green-500" : "bg-zinc-600"
+                      }`} />
+                    </button>
+                  );
+                })}
+              </div>
+              <label className="text-[10px] uppercase tracking-wide text-zinc-500 mt-2 block">Model</label>
               <input
                 value={model} onChange={(e) => setModel(e.target.value)}
-                placeholder="llama3.2"
+                placeholder={_DEFAULT_MODELS[llmBackend]}
+                list={`llm-models-${llmBackend}`}
                 className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 font-mono"
               />
+              <datalist id={`llm-models-${llmBackend}`}>
+                {_MODEL_SUGGESTIONS[llmBackend].map((m) => <option key={m} value={m} />)}
+              </datalist>
               <p className="text-[10px] text-zinc-500 mt-1">
-                Must be pulled locally (`ollama pull llama3.2`).
+                {_BACKEND_HELP[llmBackend]}
+                {llmBackend !== "ollama" && llmBackends && !llmBackends[llmBackend]?.configured && (
+                  <>
+                    {" "}Set{" "}
+                    <code className="text-amber-300">{llmBackends[llmBackend]?.env_var}</code>
+                    {" "}in <code className="text-zinc-300">.env</code> next to <code className="text-zinc-300">api_server.py</code>.
+                  </>
+                )}
               </p>
             </div>
 

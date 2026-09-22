@@ -2483,6 +2483,23 @@ async def system_status():
     }
 
 
+@app.get("/api/v1/system/llm-backends")
+async def list_llm_backends():
+    """Report which LLM backends have credentials configured.
+
+    - Ollama is always reported; `reachable` reflects whether the daemon
+      is running right now.
+    - Cloud backends (gemini/groq/hf) are `configured` when their env var
+      is set. This is a read-only probe — we do not send a test request
+      against the provider, so a valid-looking key that has been rotated
+      will still show `configured: true` until the first real call fails.
+    - The env-var name for each backend is included so the UI can point
+      the user at the right knob when a backend isn't configured yet.
+    """
+    from filmmaker import llm as _llm
+    return {"backends": _llm.backend_status()}
+
+
 @app.get("/api/v1/system/engines")
 async def list_engines():
     """List available video generation engines (live availability) and TTS engines."""

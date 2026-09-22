@@ -5177,7 +5177,7 @@ app.mount("/static/library/thumbs", StaticFiles(directory=os.path.join(LIBRARY_D
           name="library_thumbs")
 
 from library import LibraryStore
-from library.jobs import ScanJob
+from library.jobs import ScanJob, EmbedJob
 from library import dedupe as _lib_dedupe, thumbs as _lib_thumbs
 
 _library_store = LibraryStore(os.path.join(LIBRARY_DIR, "library.sqlite3"))
@@ -5445,6 +5445,153 @@ async def library_scan(req: LibraryStartScanRequest):
 @app.get("/api/v1/library/scans")
 async def library_scan_history(limit: int = 20):
     return {"scans": _library_store.list_scans(limit=max(1, min(100, limit)))}
+
+
+# ---------- T2: content index (CLIP embeddings + search + clusters) --------
+
+class LibraryEmbedRequest(BaseModel):
+    with_tags: bool = True
+
+
+class LibrarySearchRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    top_k: int = 24
+    min_score: float = 0.15
+
+
+class LibraryClusterRequest(BaseModel):
+    k: Optional[int] = None
+
+
+@app.get("/api/v1/library/index-stats")
+async def library_index_stats():
+    """T2-aware stats — how many videos are embedded, which model, dim."""
+    try:
+        from library import index as _lib_index  # lazy
+        return _lib_index.stats(_library_store)
+    except Exception as e:
+        # Fall back to base stats so a torch failure never breaks the panel.
+        base = _library_store.stats()
+        base.update({"embedded": 0, "embed_model": "", "embed_dim": 0, "error": str(e)})
+        return base
+
+
+@app.post("/api/v1/library/embed")
+async def library_embed(req: LibraryEmbedRequest):
+    job_id = _create_job("library_embed", {"with_tags": req.with_tags})
+
+    def _on_update(payload: dict) -> None:
+        _update_job(
+            job_id,
+            status=payload.get("status") or "running",
+            progress=float(payload.get("progress") or 0.0),
+            message=payload.get("message") or "",
+            result={"counts": payload.get("counts")},
+            error=payload.get("error"),
+        )
+
+    thread = EmbedJob(_library_store, on_update=_on_update,
+                     cancel_event=_cancel_events.get(job_id),
+                     with_tags=req.with_tags)
+    _library_scans[job_id] = thread  # reuse the same registry so cancel works
+    _update_job(job_id, status="running")
+    thread.start()
+    return {"job_id": job_id}
+
+
+@app.post("/api/v1/library/search")
+async def library_search(req: LibrarySearchRequest):
+    try:
+        from library import index as _lib_index  # lazy
+        hits = _lib_index.semantic_search(
+            _library_store, req.query,
+            top_k=max(1, min(100, req.top_k)),
+            min_score=max(-1.0, min(1.0, req.min_score)),
+        )
+        return {"query": req.query, "hits": [{"video": h.video, "score": h.score} for h in hits]}
+    except Exception as e:
+        raise HTTPException(500, f"Search failed: {e}")
+
+
+@app.post("/api/v1/library/cluster")
+async def library_cluster(req: LibraryClusterRequest):
+    try:
+        from library import index as _lib_index  # lazy
+        clusters = _lib_index.build_clusters(_library_store, k=req.k)
+        return {"clusters": clusters}
+    except Exception as e:
+        raise HTTPException(500, f"Clustering failed: {e}")
+
+
+@app.get("/api/v1/library/cluster/{cluster_id}")
+async def library_cluster_members(cluster_id: int, limit: int = 60):
+    videos = _library_store.videos_in_cluster(cluster_id)[:max(1, min(500, limit))]
+    return {"cluster_id": cluster_id, "videos": [v.__dict__ for v in videos]}
+
+
+# ---------- T3: quality enhancement (Real-ESRGAN + optional GFPGAN) --------
+_ENHANCE_DIR = os.path.join(LIBRARY_DIR, "enhanced")
+os.makedirs(_ENHANCE_DIR, exist_ok=True)
+app.mount("/static/library/enhanced", StaticFiles(directory=_ENHANCE_DIR),
+          name="library_enhanced")
+
+
+class LibraryEnhanceRequest(BaseModel):
+    preset: str = "quality_2x"
+    face_restore: bool = False
+
+
+@app.get("/api/v1/library/videos/{video_id}/enhance-recommend")
+async def library_enhance_recommend(video_id: int):
+    from library import enhance as _lib_enh
+    v = _library_store.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    recs = _lib_enh.recommend(v)
+    return {
+        "video_id": video_id,
+        "recommendations": [
+            {"preset": r.preset, "reason": r.reason, "priority": r.priority,
+             "face_restore": r.face_restore}
+            for r in recs
+        ],
+        "face_restore_available": _lib_enh.face_restore_available(),
+        "presets": list(_lib_enh.PRESETS.keys()),
+    }
+
+
+@app.post("/api/v1/library/videos/{video_id}/enhance")
+async def library_enhance(video_id: int, req: LibraryEnhanceRequest):
+    from library.enhance import EnhanceJob, PRESETS
+    v = _library_store.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    if req.preset not in PRESETS:
+        raise HTTPException(400, f"Unknown preset: {req.preset}")
+    job_id = _create_job("library_enhance", {
+        "video_id": video_id, "preset": req.preset, "face_restore": req.face_restore,
+    })
+
+    def _on_update(payload: dict) -> None:
+        _update_job(
+            job_id,
+            status=payload.get("status") or "running",
+            progress=float(payload.get("progress") or 0.0),
+            message=payload.get("message") or "",
+            result={"output_path": payload.get("output_path"), "video_id": video_id,
+                    "preset": req.preset},
+            error=payload.get("error"),
+        )
+
+    thread = EnhanceJob(
+        _library_store, video_id, req.preset, _ENHANCE_DIR,
+        on_update=_on_update, face_restore=req.face_restore,
+        cancel_event=_cancel_events.get(job_id),
+    )
+    _library_scans[job_id] = thread
+    _update_job(job_id, status="running")
+    thread.start()
+    return {"job_id": job_id}
 
 
 # ---------------------------------------------------------------------------

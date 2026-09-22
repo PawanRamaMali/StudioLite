@@ -53,6 +53,12 @@ CREATE TABLE IF NOT EXISTS videos (
     added_at     REAL NOT NULL,
     scanned_at   REAL,
     missing      INTEGER DEFAULT 0,
+    -- T2 content-index columns.
+    embedding    BLOB,       -- float32[512], L2-normalized, mean-pooled CLIP
+    embed_model  TEXT,       -- e.g. "openai/clip-vit-base-patch32"
+    embedded_at  REAL,
+    tags_json    TEXT,       -- JSON array of {tag, score}
+    cluster_id   INTEGER,    -- populated by the "clusters" job; null until then
     FOREIGN KEY (root_id) REFERENCES library_roots(id) ON DELETE SET NULL
 );
 
@@ -94,6 +100,10 @@ class Video:
     added_at: float
     scanned_at: Optional[float]
     missing: bool
+    # T2 content-index fields — small, JSON-safe, no raw embedding bytes.
+    tags: List[Dict[str, Any]] = None  # type: ignore[assignment]
+    cluster_id: Optional[int] = None
+    embedded: bool = False             # true when an embedding is stored
 
 
 class LibraryStore:
@@ -108,10 +118,33 @@ class LibraryStore:
         try:
             with self._connect() as c:
                 c.executescript(_SCHEMA)
+                self._migrate(c)
                 c.commit()
         except Exception as e:
             logger.warning("library store failed to initialize (%s); fail-open", e)
             self._ok = False
+
+    def _migrate(self, c: sqlite3.Connection) -> None:
+        """Idempotently apply any column additions the current schema needs.
+        SQLite's `CREATE TABLE IF NOT EXISTS` never touches existing tables,
+        so new columns land here."""
+        try:
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(videos)").fetchall()}
+        except Exception:
+            return
+        needs = [
+            ("embedding",   "BLOB"),
+            ("embed_model", "TEXT"),
+            ("embedded_at", "REAL"),
+            ("tags_json",   "TEXT"),
+            ("cluster_id",  "INTEGER"),
+        ]
+        for name, coltype in needs:
+            if name not in cols:
+                try:
+                    c.execute(f"ALTER TABLE videos ADD COLUMN {name} {coltype}")
+                except Exception as e:
+                    logger.warning("could not add column %s (%s)", name, e)
 
     # ---- connection --------------------------------------------------------
 
@@ -321,6 +354,101 @@ class LibraryStore:
         except Exception:
             return []
 
+    def iter_videos_needing_embedding(self, limit: int = 500,
+                                       model_id: Optional[str] = None) -> List[Video]:
+        if not self._ok: return []
+        try:
+            with self._connect() as c:
+                if model_id:
+                    rows = c.execute(
+                        "SELECT * FROM videos WHERE missing=0 AND "
+                        "(embedding IS NULL OR embed_model IS NULL OR embed_model != ?) "
+                        "ORDER BY size_bytes ASC LIMIT ?",
+                        (model_id, limit),
+                    ).fetchall()
+                else:
+                    rows = c.execute(
+                        "SELECT * FROM videos WHERE embedding IS NULL AND missing=0 "
+                        "ORDER BY size_bytes ASC LIMIT ?", (limit,),
+                    ).fetchall()
+                return [_video_from_row(r) for r in rows]
+        except Exception:
+            return []
+
+    def load_all_embeddings(self, dim: int = 512):
+        """Return (video_ids, matrix) for every video that has an embedding.
+        `matrix` is (N, dim) float32. Rows preserve the row-order of ids."""
+        if not self._ok: return ([], None)
+        import numpy as np
+        ids: List[int] = []
+        blobs: List[bytes] = []
+        try:
+            with self._connect() as c:
+                for r in c.execute(
+                    "SELECT id, embedding FROM videos WHERE embedding IS NOT NULL AND missing=0"
+                ).fetchall():
+                    ids.append(int(r["id"]))
+                    blobs.append(r["embedding"])
+        except Exception:
+            return ([], None)
+        if not blobs:
+            return (ids, np.zeros((0, dim), dtype=np.float32))
+        try:
+            matrix = np.stack([np.frombuffer(b, dtype=np.float32)[:dim] for b in blobs])
+        except Exception:
+            return ([], None)
+        return (ids, matrix.astype(np.float32))
+
+    def set_embedding(self, video_id: int, embedding_blob: bytes, model_id: str,
+                       tags_json: Optional[str] = None) -> None:
+        if not self._ok: return
+        import time as _time
+        with self._lock:
+            try:
+                with self._connect() as c:
+                    fields = ["embedding=?", "embed_model=?", "embedded_at=?"]
+                    vals: list = [embedding_blob, model_id, _time.time()]
+                    if tags_json is not None:
+                        fields.append("tags_json=?"); vals.append(tags_json)
+                    vals.append(video_id)
+                    c.execute(f"UPDATE videos SET {', '.join(fields)} WHERE id=?", vals)
+            except Exception as e:
+                logger.warning("set_embedding failed: %s", e)
+
+    def clear_cluster_ids(self) -> None:
+        if not self._ok: return
+        with self._lock:
+            try:
+                with self._connect() as c:
+                    c.execute("UPDATE videos SET cluster_id=NULL WHERE missing=0")
+            except Exception:
+                pass
+
+    def set_cluster_ids(self, mapping: Dict[int, int]) -> None:
+        """Bulk assign cluster ids by video id."""
+        if not self._ok or not mapping: return
+        with self._lock:
+            try:
+                with self._connect() as c:
+                    c.executemany(
+                        "UPDATE videos SET cluster_id=? WHERE id=?",
+                        [(cid, vid) for vid, cid in mapping.items()],
+                    )
+            except Exception as e:
+                logger.warning("set_cluster_ids failed: %s", e)
+
+    def videos_in_cluster(self, cluster_id: int) -> List[Video]:
+        if not self._ok: return []
+        try:
+            with self._connect() as c:
+                rows = c.execute(
+                    "SELECT * FROM videos WHERE cluster_id=? AND missing=0 "
+                    "ORDER BY added_at DESC", (cluster_id,),
+                ).fetchall()
+                return [_video_from_row(r) for r in rows]
+        except Exception:
+            return []
+
     def iter_videos_needing_probe(self, limit: int = 500) -> List[Video]:
         if not self._ok: return []
         try:
@@ -473,6 +601,31 @@ class LibraryStore:
 
 
 def _video_from_row(r) -> Video:
+    tags: List[Dict[str, Any]] = []
+    tags_raw = None
+    cluster_id = None
+    has_embedding = False
+    # SQLite Row supports both index and key access; guard when a query
+    # doesn't project the T2 columns (older SELECT * calls).
+    try:
+        tags_raw = r["tags_json"]
+    except Exception:
+        pass
+    try:
+        cluster_id = r["cluster_id"]
+    except Exception:
+        pass
+    try:
+        has_embedding = r["embedding"] is not None
+    except Exception:
+        pass
+    if tags_raw:
+        try:
+            parsed = json.loads(tags_raw)
+            if isinstance(parsed, list):
+                tags = [t for t in parsed if isinstance(t, dict)]
+        except Exception:
+            tags = []
     return Video(
         id=int(r["id"]), root_id=(int(r["root_id"]) if r["root_id"] is not None else None),
         abs_path=r["abs_path"], rel_path=r["rel_path"],
@@ -485,4 +638,7 @@ def _video_from_row(r) -> Video:
         fps=(float(r["fps"]) if r["fps"] is not None else None),
         added_at=float(r["added_at"]), scanned_at=(float(r["scanned_at"]) if r["scanned_at"] is not None else None),
         missing=bool(r["missing"] or 0),
+        tags=tags,
+        cluster_id=(int(cluster_id) if cluster_id is not None else None),
+        embedded=has_embedding,
     )

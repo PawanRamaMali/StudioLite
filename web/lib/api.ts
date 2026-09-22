@@ -632,6 +632,10 @@ export interface LibraryVideo {
   added_at: number;
   scanned_at: number | null;
   missing: boolean;
+  // T2 content-index fields; absent on rows that haven't been embedded.
+  tags?: { tag: string; score: number }[];
+  cluster_id?: number | null;
+  embedded?: boolean;
 }
 
 export interface LibraryCluster {
@@ -763,5 +767,82 @@ export function libraryStreamUrl(video_id: number): string {
   const t = getApiToken();
   return `${API_BASE}/api/v1/library/videos/${video_id}/stream${t ? `?token=${encodeURIComponent(t)}` : ""}`;
 }
+
+// ---- T2: content index (CLIP embeddings + search + clusters) ------------
+
+export interface LibraryIndexStats extends LibraryStats {
+  embedded: number;
+  embed_model: string;
+  embed_dim: number;
+  error?: string;
+}
+
+export interface LibrarySearchHit {
+  video: LibraryVideo;
+  score: number;
+}
+
+export interface LibraryClusterSummary {
+  id: number;
+  label: string;
+  size: number;
+  preview: LibraryVideo | null;
+  member_ids: number[];
+}
+
+export const libraryIndexStats = () => apiFetch<LibraryIndexStats>("/api/v1/library/index-stats");
+
+export const libraryStartEmbed = (with_tags = true) =>
+  apiFetch<{ job_id: string }>("/api/v1/library/embed", {
+    method: "POST",
+    body: JSON.stringify({ with_tags }),
+  });
+
+export const librarySearch = (query: string, opts?: { top_k?: number; min_score?: number }) =>
+  apiFetch<{ query: string; hits: LibrarySearchHit[] }>("/api/v1/library/search", {
+    method: "POST",
+    body: JSON.stringify({ query, top_k: opts?.top_k ?? 24, min_score: opts?.min_score ?? 0.15 }),
+  });
+
+export const libraryBuildClusters = (k?: number) =>
+  apiFetch<{ clusters: LibraryClusterSummary[] }>("/api/v1/library/cluster", {
+    method: "POST",
+    body: JSON.stringify({ k: k ?? null }),
+  });
+
+export const libraryClusterMembers = (cluster_id: number, limit = 60) =>
+  apiFetch<{ cluster_id: number; videos: LibraryVideo[] }>(
+    `/api/v1/library/cluster/${cluster_id}?limit=${limit}`,
+  );
+
+// ---- T3: enhance ---------------------------------------------------------
+
+export type LibraryEnhancePreset = "fast_2x" | "quality_2x" | "ultra_4x" | "anime_4x";
+
+export interface LibraryEnhanceRecommendation {
+  preset: LibraryEnhancePreset;
+  reason: string;
+  priority: number;
+  face_restore: boolean;
+}
+
+export interface LibraryEnhanceRecommendResponse {
+  video_id: number;
+  recommendations: LibraryEnhanceRecommendation[];
+  face_restore_available: boolean;
+  presets: LibraryEnhancePreset[];
+}
+
+export const libraryEnhanceRecommend = (video_id: number) =>
+  apiFetch<LibraryEnhanceRecommendResponse>(
+    `/api/v1/library/videos/${video_id}/enhance-recommend`,
+  );
+
+export const libraryStartEnhance = (video_id: number, preset: LibraryEnhancePreset,
+                                    face_restore = false) =>
+  apiFetch<{ job_id: string }>(
+    `/api/v1/library/videos/${video_id}/enhance`,
+    { method: "POST", body: JSON.stringify({ preset, face_restore }) },
+  );
 
 export const LIBRARY_API_BASE = API_BASE;

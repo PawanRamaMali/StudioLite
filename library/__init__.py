@@ -14,3 +14,10 @@ Public surface used by api/routers/library.py:
 
 from . import store, scanner, dedupe, thumbs, probe, phash, hasher  # noqa: F401
 from .store import LibraryStore  # noqa: F401
+
+# T2 (content index) and T3 (enhance) are optional-import — they pull in
+# torch/transformers, which we don't want unloaded users to hit at import time.
+try:
+    from . import embeddings, tagger, clustering, index  # noqa: F401
+except Exception:  # pragma: no cover
+    embeddings = tagger = clustering = index = None  # type: ignore[assignment]

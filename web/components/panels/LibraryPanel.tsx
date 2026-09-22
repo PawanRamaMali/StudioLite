@@ -7,16 +7,21 @@ import { Badge } from "@/components/ui/Badge";
 import {
   FolderPlus, RefreshCw, ScanSearch, Copy, Trash2,
   AlertCircle, Loader2, HardDrive, Folder, Film, Sparkles,
-  Search, X, CheckCircle2, Layers, ArrowRight,
+  Search, X, CheckCircle2, Layers, ArrowRight, Wand2, Zap, Grid3x3, Tag,
 } from "lucide-react";
 import {
   libraryAddRoot, libraryAddRootsBatch, libraryBatchDelete, libraryDeleteRoot,
   libraryDeleteVideo, libraryDeletionPlan, libraryDuplicates, libraryListRoots,
   libraryListVideos, libraryStartScan, libraryStats,
   libraryStreamUrl, libraryThumbUrl,
+  libraryIndexStats, libraryStartEmbed, librarySearch, libraryBuildClusters,
+  libraryClusterMembers,
+  libraryEnhanceRecommend, libraryStartEnhance,
   getJob,
   type KeeperStrategy, type LibraryBatchDeleteResult, type LibraryDeletionPlan,
   type LibraryDuplicates, type LibraryRoot, type LibraryStats, type LibraryVideo,
+  type LibrarySearchHit, type LibraryClusterSummary,
+  type LibraryEnhanceRecommendResponse, type LibraryEnhancePreset,
   type Job,
 } from "@/lib/api";
 
@@ -45,7 +50,7 @@ function baseName(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
-type ViewMode = "browse" | "duplicates";
+type ViewMode = "browse" | "duplicates" | "search" | "clusters";
 
 export default function LibraryPanel() {
   const [stats, setStats] = useState<LibraryStats | null>(null);
@@ -112,9 +117,15 @@ export default function LibraryPanel() {
             Organize your video files locally — scan folders, find duplicates, browse everything in one place.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <Button variant={view === "browse" ? "primary" : "secondary"} size="sm" onClick={() => setView("browse")}>
             <Film className="w-3.5 h-3.5 mr-1.5" /> Browse
+          </Button>
+          <Button variant={view === "search" ? "primary" : "secondary"} size="sm" onClick={() => setView("search")}>
+            <Search className="w-3.5 h-3.5 mr-1.5" /> Search
+          </Button>
+          <Button variant={view === "clusters" ? "primary" : "secondary"} size="sm" onClick={() => setView("clusters")}>
+            <Grid3x3 className="w-3.5 h-3.5 mr-1.5" /> Clusters
           </Button>
           <Button variant={view === "duplicates" ? "primary" : "secondary"} size="sm" onClick={() => setView("duplicates")}>
             <Copy className="w-3.5 h-3.5 mr-1.5" /> Duplicates
@@ -152,9 +163,10 @@ export default function LibraryPanel() {
         </div>
 
         <div className="lg:col-span-2">
-          {view === "browse"
-            ? <BrowseView onError={setErr} />
-            : <DuplicatesView onError={setErr} onChange={refreshStatsAndRoots} />}
+          {view === "browse" && <BrowseView onError={setErr} />}
+          {view === "search" && <SearchView onError={setErr} />}
+          {view === "clusters" && <ClustersView onError={setErr} />}
+          {view === "duplicates" && <DuplicatesView onError={setErr} onChange={refreshStatsAndRoots} />}
         </div>
       </div>
     </div>
@@ -733,6 +745,8 @@ function VideoDetailModal({
   onRemoveIndex: () => void;
   onDeleteFile: () => void;
 }) {
+  const [showEnhance, setShowEnhance] = useState(false);
+  const tags = (video.tags ?? []) as { tag: string; score: number }[];
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={onClose}>
       <div
@@ -762,12 +776,31 @@ function VideoDetailModal({
           <DetailField label="Size" value={fmtBytes(video.size_bytes)} />
         </div>
 
+        {tags.length > 0 && (
+          <div className="mt-3">
+            <div className="text-[9px] uppercase tracking-wide text-zinc-500 mb-1 flex items-center gap-1">
+              <Tag className="w-3 h-3" /> Content tags
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {tags.map((t) => (
+                <span key={t.tag} className="text-[10px] px-2 py-0.5 rounded bg-indigo-500/10 border border-indigo-500/25 text-indigo-300">
+                  {t.tag} <span className="text-indigo-400/60">{Math.round(t.score * 100)}%</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="mt-3 flex items-center gap-2 flex-wrap">
           <a href={libraryStreamUrl(video.id)} target="_blank" rel="noreferrer"
              className="text-xs text-indigo-400 hover:text-indigo-300 inline-flex items-center gap-1">
             Open in new tab <ArrowRight className="w-3 h-3" />
           </a>
           <div className="ml-auto flex items-center gap-2">
+            <Button variant="primary" size="sm" onClick={() => setShowEnhance((s) => !s)}
+                    title="Upscale + optional face restoration">
+              <Zap className="w-3.5 h-3.5 mr-1.5" /> Enhance
+            </Button>
             <Button variant="secondary" size="sm" onClick={onRemoveIndex}
                     title="Drop from the library index; file on disk is untouched">
               <Layers className="w-3.5 h-3.5 mr-1.5" /> Remove from index
@@ -779,11 +812,145 @@ function VideoDetailModal({
           </div>
         </div>
 
+        {showEnhance && <EnhancePanel videoId={video.id} onClose={() => setShowEnhance(false)} />}
+
         <div className="mt-3 text-[10px] text-zinc-500 grid grid-cols-2 gap-x-4">
           {video.sha256 && <div>SHA-256: <span className="font-mono">{video.sha256.slice(0, 20)}…</span></div>}
           {video.phash_hex && <div>pHash: <span className="font-mono">{video.phash_hex}</span></div>}
         </div>
       </div>
+    </div>
+  );
+}
+
+function EnhancePanel({ videoId, onClose }: { videoId: number; onClose: () => void }) {
+  const [rec, setRec] = useState<LibraryEnhanceRecommendResponse | null>(null);
+  const [preset, setPreset] = useState<LibraryEnhancePreset>("quality_2x");
+  const [faceRestore, setFaceRestore] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [job, setJob] = useState<Job | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    libraryEnhanceRecommend(videoId).then((r) => {
+      setRec(r);
+      if (r.recommendations[0]) {
+        setPreset(r.recommendations[0].preset);
+        setFaceRestore(r.recommendations[0].face_restore && r.face_restore_available);
+      }
+    }).catch((e) => setErr(e instanceof Error ? e.message : "Recommend failed"));
+  }, [videoId]);
+
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const j = await getJob(jobId);
+        if (cancelled) return;
+        setJob(j);
+        if (j.status === "completed" || j.status === "failed" || j.status === "cancelled") return;
+      } catch { /* soft */ }
+      if (!cancelled) window.setTimeout(tick, 1500);
+    };
+    tick();
+    return () => { cancelled = true; };
+  }, [jobId]);
+
+  const start = useCallback(async () => {
+    setErr(null);
+    try {
+      const res = await libraryStartEnhance(videoId, preset, faceRestore);
+      setJobId(res.job_id);
+      setJob(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Start failed");
+    }
+  }, [videoId, preset, faceRestore]);
+
+  const result = job?.result as { output_path?: string } | undefined;
+  const outputPath = result?.output_path;
+  const outputFileName = outputPath ? outputPath.split(/[\\/]/).pop() : null;
+  const outputUrl = outputFileName ? `/static/library/enhanced/${outputFileName}` : null;
+
+  return (
+    <div className="mt-3 border border-zinc-800 rounded-lg bg-zinc-950/40 p-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs font-medium text-zinc-100 flex items-center gap-2">
+          <Wand2 className="w-4 h-4 text-indigo-400" /> Enhance video
+        </div>
+        <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300"><X className="w-3.5 h-3.5" /></button>
+      </div>
+
+      {rec && rec.recommendations.length > 0 && !jobId && (
+        <div className="mb-2 space-y-1">
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500">Recommendations</div>
+          {rec.recommendations.map((r) => (
+            <button key={r.preset + r.reason}
+                    onClick={() => { setPreset(r.preset); setFaceRestore(r.face_restore && rec.face_restore_available); }}
+                    className={`w-full text-left p-2 border rounded transition-colors ${
+                      preset === r.preset ? "border-indigo-500/40 bg-indigo-500/10" : "border-zinc-800 hover:border-zinc-700"
+                    }`}>
+              <div className="text-xs text-zinc-100">
+                {r.preset}
+                {r.face_restore && rec.face_restore_available && <span className="text-[10px] text-indigo-300 ml-1.5">+ face restore</span>}
+              </div>
+              <div className="text-[10px] text-zinc-400">{r.reason}</div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {!jobId && (
+        <div className="flex items-end gap-2 flex-wrap">
+          <div>
+            <label className="text-[10px] uppercase tracking-wide text-zinc-500">Preset</label>
+            <select value={preset} onChange={(e) => setPreset(e.target.value as LibraryEnhancePreset)}
+                    className="block bg-zinc-800/50 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 mt-1">
+              {(rec?.presets ?? ["fast_2x", "quality_2x", "ultra_4x", "anime_4x"]).map((p) => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+          </div>
+          {rec?.face_restore_available && (
+            <label className="flex items-center gap-1.5 text-xs text-zinc-300">
+              <input type="checkbox" checked={faceRestore} onChange={(e) => setFaceRestore(e.target.checked)}
+                     className="accent-indigo-500" />
+              Face restore (GFPGAN)
+            </label>
+          )}
+          <Button size="sm" onClick={start} className="ml-auto">
+            <Zap className="w-3.5 h-3.5 mr-1.5" /> Start
+          </Button>
+        </div>
+      )}
+
+      {jobId && job && (
+        <div className="space-y-1.5">
+          <div className="text-[11px] text-zinc-400 flex items-center gap-2">
+            {job.status === "completed"
+              ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
+              : job.status === "failed"
+              ? <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+              : <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin" />}
+            <span>{job.message || "…"}</span>
+            <span className="ml-auto font-mono">{Math.round(((job.progress ?? 0) as number) * 100)}%</span>
+          </div>
+          <div className="h-1 bg-zinc-800 rounded overflow-hidden">
+            <div className={`h-full transition-all ${job.status === "failed" ? "bg-red-500" : "bg-indigo-500"}`}
+                 style={{ width: `${Math.round(((job.progress ?? 0) as number) * 100)}%` }} />
+          </div>
+          {job.error && <p className="text-[10px] text-red-300">{job.error}</p>}
+          {job.status === "completed" && outputUrl && (
+            <a href={outputUrl} target="_blank" rel="noreferrer"
+               className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300">
+              Open enhanced video <ArrowRight className="w-3 h-3" />
+            </a>
+          )}
+        </div>
+      )}
+
+      {err && <p className="text-[10px] text-red-300 mt-1">{err}</p>}
     </div>
   );
 }
@@ -1042,3 +1209,314 @@ function ResultOverlay({ result, onClose }: {
 }
 
 function humanBytes(n: number): string { return fmtBytes(n); }
+
+// ---------------------------------------------------------------------------
+// T2: Semantic search view
+// ---------------------------------------------------------------------------
+
+function SearchView({ onError }: { onError: (s: string) => void }) {
+  const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<LibrarySearchHit[] | null>(null);
+  const [pending, setPending] = useState(false);
+  const [selected, setSelected] = useState<LibraryVideo | null>(null);
+  const [indexStats, setIndexStats] = useState<{ embedded: number; videos: number; embed_model: string } | null>(null);
+  const [embedJobId, setEmbedJobId] = useState<string | null>(null);
+  const [embedProgress, setEmbedProgress] = useState<Job | null>(null);
+
+  const loadStats = useCallback(async () => {
+    try {
+      const s = await libraryIndexStats();
+      setIndexStats({ embedded: s.embedded, videos: s.videos, embed_model: s.embed_model });
+    } catch { /* soft */ }
+  }, []);
+
+  useEffect(() => { loadStats(); }, [loadStats]);
+
+  // Poll the embed job while running.
+  useEffect(() => {
+    if (!embedJobId) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const j = await getJob(embedJobId);
+        if (cancelled) return;
+        setEmbedProgress(j);
+        if (j.status === "completed" || j.status === "failed" || j.status === "cancelled") {
+          loadStats();
+          window.setTimeout(() => setEmbedJobId(null), 1500);
+          return;
+        }
+      } catch { /* soft */ }
+      if (!cancelled) window.setTimeout(tick, 1500);
+    };
+    tick();
+    return () => { cancelled = true; };
+  }, [embedJobId, loadStats]);
+
+  const search = useCallback(async () => {
+    if (!query.trim()) return;
+    setPending(true);
+    try {
+      const res = await librarySearch(query.trim());
+      setHits(res.hits);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Search failed");
+    } finally { setPending(false); }
+  }, [query, onError]);
+
+  const startEmbed = useCallback(async () => {
+    try {
+      const res = await libraryStartEmbed(true);
+      setEmbedJobId(res.job_id);
+      setEmbedProgress(null);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Could not start indexing");
+    }
+  }, [onError]);
+
+  const canSearch = !indexStats || indexStats.embedded > 0;
+  return (
+    <Card className="min-h-[500px]">
+      <div className="flex items-center gap-2 mb-3 flex-wrap">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Search className="w-4 h-4 text-indigo-400" /> Semantic search
+        </CardTitle>
+        {indexStats && (
+          <span className="text-[10px] text-zinc-500">
+            {indexStats.embedded}/{indexStats.videos} indexed{indexStats.embed_model && ` · ${indexStats.embed_model}`}
+          </span>
+        )}
+        <div className="ml-auto flex items-center gap-2">
+          <Button variant="secondary" size="sm" onClick={startEmbed}
+                  disabled={!!embedJobId && embedProgress?.status === "running"}
+                  title={embedJobId ? "Indexing in progress" : "Encode CLIP embeddings for every video (uses the ~600 MB openai/clip-vit-base-patch32 model — downloaded on first run)"}>
+            <Sparkles className="w-3.5 h-3.5 mr-1.5" /> Index content
+          </Button>
+        </div>
+      </div>
+
+      {embedJobId && embedProgress && (
+        <div className="mb-3 p-2 border border-zinc-800 rounded-lg bg-zinc-950/40">
+          <div className="text-[11px] text-zinc-400 flex items-center gap-2 mb-1">
+            {embedProgress.status === "completed"
+              ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
+              : embedProgress.status === "failed"
+              ? <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+              : <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin" />}
+            <span>{embedProgress.message || "…"}</span>
+            <span className="ml-auto font-mono">{Math.round(((embedProgress.progress ?? 0) as number) * 100)}%</span>
+          </div>
+          <div className="h-1 bg-zinc-800 rounded overflow-hidden">
+            <div className="h-full bg-indigo-500 transition-all"
+                 style={{ width: `${Math.round(((embedProgress.progress ?? 0) as number) * 100)}%` }} />
+          </div>
+          {embedProgress.error && <p className="text-[10px] text-red-300 mt-1">{embedProgress.error}</p>}
+        </div>
+      )}
+
+      <div className="flex items-center gap-2 mb-3">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") search(); }}
+          placeholder="e.g. sunset beach, kids birthday, my dog running, city night traffic…"
+          className="flex-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200"
+        />
+        <Button onClick={search} disabled={pending || !query.trim() || !canSearch} size="md">
+          {pending
+            ? <><Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> Searching…</>
+            : <><Search className="w-4 h-4 mr-1.5" /> Search</>}
+        </Button>
+      </div>
+
+      {!canSearch && (
+        <div className="text-[11px] text-zinc-500 text-center py-8 border border-dashed border-zinc-800 rounded-lg">
+          The library has no content embeddings yet. Click <span className="text-zinc-200">Index content</span> above to encode every video.
+          The CLIP model downloads once (~600 MB); subsequent runs are offline.
+        </div>
+      )}
+
+      {hits && hits.length === 0 && canSearch && (
+        <p className="text-xs text-zinc-500 text-center py-10">
+          No videos matched. Try a broader description (drop specifics like names/dates — CLIP is best at general scenes).
+        </p>
+      )}
+
+      {hits && hits.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+          {hits.map((h) => (
+            <button
+              key={h.video.id}
+              onClick={() => setSelected(h.video)}
+              className="text-left group bg-zinc-950/40 border border-zinc-800 rounded-lg overflow-hidden hover:border-indigo-500/40 transition-colors"
+            >
+              <div className="relative bg-black aspect-video">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={libraryThumbUrl(h.video.id)} alt="" loading="lazy" className="w-full h-full object-cover" />
+                <div className="absolute top-1 right-1 text-[9px] font-mono bg-indigo-500/80 text-white rounded px-1">
+                  {(h.score * 100).toFixed(0)}%
+                </div>
+                <div className="absolute bottom-1 right-1 text-[9px] font-mono bg-black/70 text-zinc-200 rounded px-1">
+                  {fmtDuration(h.video.duration_sec)}
+                </div>
+              </div>
+              <div className="p-2">
+                <div className="text-[11px] text-zinc-200 truncate" title={h.video.abs_path}>{baseName(h.video.abs_path)}</div>
+                {h.video.tags && h.video.tags.length > 0 && (
+                  <div className="text-[10px] text-zinc-500 truncate" title={h.video.tags.map((t) => (t as { tag: string }).tag).join(", ")}>
+                    {(h.video.tags as { tag: string }[]).slice(0, 3).map((t) => t.tag).join(" · ")}
+                  </div>
+                )}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {selected && (
+        <VideoDetailModal
+          video={selected}
+          onClose={() => setSelected(null)}
+          onRemoveIndex={async () => { setSelected(null); }}
+          onDeleteFile={async () => { setSelected(null); }}
+        />
+      )}
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// T2: Clusters view
+// ---------------------------------------------------------------------------
+
+function ClustersView({ onError }: { onError: (s: string) => void }) {
+  const [clusters, setClusters] = useState<LibraryClusterSummary[] | null>(null);
+  const [k, setK] = useState<number | null>(null);
+  const [pending, setPending] = useState(false);
+  const [selectedClusterId, setSelectedClusterId] = useState<number | null>(null);
+  const [selectedMembers, setSelectedMembers] = useState<LibraryVideo[] | null>(null);
+  const [selectedVideo, setSelectedVideo] = useState<LibraryVideo | null>(null);
+
+  const buildClusters = useCallback(async () => {
+    setPending(true);
+    try {
+      const res = await libraryBuildClusters(k ?? undefined);
+      setClusters(res.clusters);
+      setSelectedClusterId(null);
+      setSelectedMembers(null);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Clustering failed");
+    } finally { setPending(false); }
+  }, [k, onError]);
+
+  const openCluster = useCallback(async (cid: number) => {
+    setSelectedClusterId(cid);
+    setSelectedMembers(null);
+    try {
+      const res = await libraryClusterMembers(cid);
+      setSelectedMembers(res.videos);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Failed to load cluster");
+    }
+  }, [onError]);
+
+  return (
+    <Card className="min-h-[500px]">
+      <div className="flex items-center gap-2 mb-3 flex-wrap">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Grid3x3 className="w-4 h-4 text-indigo-400" /> Content clusters
+        </CardTitle>
+        <div className="ml-auto flex items-center gap-2">
+          <label className="text-[10px] uppercase tracking-wide text-zinc-500">k</label>
+          <input
+            type="number" min={1} max={64} placeholder="auto"
+            value={k ?? ""}
+            onChange={(e) => setK(e.target.value === "" ? null : Math.max(1, Math.min(64, parseInt(e.target.value, 10))))}
+            className="w-16 bg-zinc-800/50 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200"
+          />
+          <Button size="sm" onClick={buildClusters} disabled={pending}>
+            {pending
+              ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Clustering…</>
+              : <><Sparkles className="w-3.5 h-3.5 mr-1.5" /> Compute clusters</>}
+          </Button>
+        </div>
+      </div>
+
+      {clusters === null && (
+        <p className="text-xs text-zinc-500 text-center py-10">
+          Click <span className="text-zinc-200">Compute clusters</span> to group videos by what they show. Requires content embeddings (Search tab → Index content).
+        </p>
+      )}
+
+      {clusters && clusters.length === 0 && (
+        <p className="text-xs text-zinc-500 text-center py-10">
+          No embeddings yet. Index the library first (Search tab → Index content).
+        </p>
+      )}
+
+      {clusters && clusters.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-4">
+          {clusters.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => openCluster(c.id)}
+              className={`text-left bg-zinc-950/40 border rounded-lg overflow-hidden transition-colors ${
+                selectedClusterId === c.id ? "border-indigo-500/50" : "border-zinc-800 hover:border-zinc-700"
+              }`}
+            >
+              {c.preview && (
+                <div className="relative bg-black aspect-video">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={libraryThumbUrl(c.preview.id)} alt="" loading="lazy" className="w-full h-full object-cover" />
+                  <div className="absolute bottom-1 right-1 text-[9px] font-mono bg-black/70 text-zinc-200 rounded px-1">
+                    {c.size} video{c.size === 1 ? "" : "s"}
+                  </div>
+                </div>
+              )}
+              <div className="p-2">
+                <div className="text-xs text-zinc-100 truncate">{c.label}</div>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {selectedClusterId !== null && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-2">
+            Members of cluster {selectedClusterId}
+          </div>
+          {selectedMembers === null && <div className="text-xs text-zinc-500">Loading…</div>}
+          {selectedMembers && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+              {selectedMembers.map((v) => (
+                <button
+                  key={v.id}
+                  onClick={() => setSelectedVideo(v)}
+                  className="text-left bg-zinc-950/40 border border-zinc-800 rounded-lg overflow-hidden hover:border-indigo-500/40 transition-colors"
+                >
+                  <div className="relative bg-black aspect-video">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={libraryThumbUrl(v.id)} alt="" loading="lazy" className="w-full h-full object-cover" />
+                  </div>
+                  <div className="p-1.5">
+                    <div className="text-[10px] text-zinc-200 truncate">{baseName(v.abs_path)}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {selectedVideo && (
+        <VideoDetailModal
+          video={selectedVideo}
+          onClose={() => setSelectedVideo(null)}
+          onRemoveIndex={async () => { setSelectedVideo(null); }}
+          onDeleteFile={async () => { setSelectedVideo(null); }}
+        />
+      )}
+    </Card>
+  );
+}

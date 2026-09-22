@@ -16,6 +16,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from typing import Any, Dict, List, Optional
 
 from . import llm
@@ -854,9 +855,74 @@ def _normalize_camera_move(raw: Any) -> str:
 # 7. Shot Generator — SDXL keyframe per shot (T1 stub, no motion)
 # ---------------------------------------------------------------------------
 
-# SDXL Turbo handles ~4 prompts per batch cleanly on 12 GB VRAM. Bigger cards
-# can push higher, but the wall-clock win flattens past ~4 anyway.
-_SDXL_BATCH_SIZE = 4
+# SDXL batch sizing.
+#
+# Turbo handles ~4 prompts per batch cleanly on 12 GB VRAM. Base uses CPU
+# offload, so it's tighter; we start it at 2 and let the adaptive loop
+# grow it if the card can take more. Any batch that OOMs halves the size
+# for the next attempt; several clean batches in a row grow it back one
+# step at a time. Env override:
+#
+#   STUDIOLITE_SDXL_BATCH       — start-of-run size (defaults per-variant)
+#   STUDIOLITE_SDXL_BATCH_MAX   — hard ceiling regardless of adaptive growth
+#
+# Setting both to 1 disables batching entirely (equivalent to running the
+# per-shot fallback path for every shot).
+_SDXL_BATCH_DEFAULTS = {"turbo": 4, "base": 2, "z-image-turbo": 2, "flux-schnell": 2}
+_SDXL_BATCH_MAX_ABS = 12  # ceiling even if the user asks for more
+_SDXL_GROWTH_STREAK = 2   # clean batches before we try one bigger
+
+
+def _initial_sdxl_batch(variant: str) -> int:
+    """Resolve the batch-size the adaptive loop starts at for `variant`."""
+    override = os.environ.get("STUDIOLITE_SDXL_BATCH")
+    if override:
+        try:
+            return max(1, min(_SDXL_BATCH_MAX_ABS, int(override)))
+        except ValueError:
+            pass
+    return _SDXL_BATCH_DEFAULTS.get(variant, 4)
+
+
+def _max_sdxl_batch(variant: str) -> int:
+    override = os.environ.get("STUDIOLITE_SDXL_BATCH_MAX")
+    if override:
+        try:
+            return max(1, min(_SDXL_BATCH_MAX_ABS, int(override)))
+        except ValueError:
+            pass
+    # Twice the initial is a sane growth ceiling — beyond that, wall-clock
+    # gains flatten and OOMs bite harder on any subsequent shot with a
+    # different aspect / ref image.
+    return min(_SDXL_BATCH_MAX_ABS, _SDXL_BATCH_DEFAULTS.get(variant, 4) * 2)
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    """Detect out-of-memory raised from either CUDA or CPU-offloaded runs.
+    diffusers surfaces the CUDA variant as torch.cuda.OutOfMemoryError, but
+    on CPU-offloaded pipelines the same failure shows up as a plain
+    RuntimeError with 'out of memory' in the message."""
+    if exc is None: return False
+    try:
+        import torch
+        if isinstance(exc, getattr(torch.cuda, "OutOfMemoryError", tuple())):
+            return True
+    except Exception:
+        pass
+    msg = str(exc).lower()
+    return ("out of memory" in msg
+            or "cuda oom" in msg
+            or "cudnn error: cudnn_status_alloc_failed" in msg)
+
+
+def _reclaim_cuda_memory() -> None:
+    try:
+        import torch, gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 _QUALITY_STEPS: Dict[str, int] = {
     "draft":    12,
@@ -886,9 +952,12 @@ def run_shots(project: Project) -> Dict[str, Any]:
     variant = project.meta.config.sdxl_variant
 
     render_one = _load_sdxl_renderer(variant=variant)
-    # Batch renderer is Turbo-only for now (SDXL base uses CPU offload; batching
-    # forces the whole pipeline back to GPU and pushes us into OOM territory).
-    render_batch = _load_sdxl_batch_renderer() if variant == "turbo" else None
+    # Batching is offered for every variant now — the adaptive loop below
+    # halves the batch on OOM (and eventually falls through to per-shot),
+    # so a base pipeline with CPU offload can't kill the render just by
+    # rejecting a group forward. Set STUDIOLITE_SDXL_BATCH=1 to force
+    # per-shot mode for debugging or minimum-VRAM machines.
+    render_batch = _load_sdxl_batch_renderer()
 
     # Parse character bios from the screenplay so we can bake them into
     # every shot prompt where the character appears. Same physical descriptors
@@ -1007,11 +1076,21 @@ def run_shots(project: Project) -> Dict[str, Any]:
     done = skipped
     i = 0
     total_pending = len(pending)
+    # Adaptive batch sizing — starts at the variant default, halves on OOM,
+    # grows back one step after `_SDXL_GROWTH_STREAK` consecutive clean
+    # batches. Never exceeds `max_batch` and never drops below 1 (at which
+    # point we fall through to the per-shot loop).
+    batch_size = _initial_sdxl_batch(variant)
+    max_batch = _max_sdxl_batch(variant)
+    clean_streak = 0
+    project.append_event({"type": "shots_batch", "size": batch_size, "max": max_batch})
+
     while i < total_pending:
-        chunk = pending[i:i + _SDXL_BATCH_SIZE]
+        chunk = pending[i:i + batch_size]
         used_batch = False
         chunk_has_refs = any(j["ref_image"] is not None for j in chunk)
         if render_batch is not None and len(chunk) > 1:
+            batch_started = time.time()
             try:
                 render_batch(
                     [j["prompt"] for j in chunk],
@@ -1022,11 +1101,40 @@ def run_shots(project: Project) -> Dict[str, Any]:
                 for j in chunk:
                     j["rendered"] = True
                 used_batch = True
+                clean_streak += 1
+                elapsed = time.time() - batch_started
+                # Grow the batch once a run of clean batches confirms the
+                # card is comfortable, so long-running renders speed up over
+                # time as the pipeline learns the VRAM ceiling.
+                if clean_streak >= _SDXL_GROWTH_STREAK and batch_size < max_batch:
+                    batch_size = min(max_batch, batch_size + 1)
+                    clean_streak = 0
+                    logger.info("SDXL batch: growing to %d after clean run", batch_size)
+                    project.append_event({
+                        "type": "shots_batch", "size": batch_size, "max": max_batch,
+                        "grew": True, "last_batch_sec": round(elapsed, 2),
+                    })
             except Exception as e:
+                if _is_cuda_oom(e) and batch_size > 1:
+                    # Halve batch size and retry this chunk. Don't advance `i`.
+                    new_size = max(1, batch_size // 2)
+                    logger.warning(
+                        "SDXL batch of %d OOMed (%s); halving to %d and retrying",
+                        batch_size, str(e)[:200], new_size,
+                    )
+                    batch_size = new_size
+                    clean_streak = 0
+                    _reclaim_cuda_memory()
+                    project.append_event({
+                        "type": "shots_batch", "size": batch_size, "max": max_batch,
+                        "shrunk": True, "reason": "oom",
+                    })
+                    continue  # retry the same range with the smaller size
                 logger.warning(
-                    "SDXL batch of %d failed (%s); dropping to per-shot for this chunk",
+                    "SDXL batch of %d failed non-OOM (%s); per-shot for this chunk",
                     len(chunk), e,
                 )
+                clean_streak = 0
 
         if not used_batch:
             for j in chunk:
@@ -1038,6 +1146,10 @@ def run_shots(project: Project) -> Dict[str, Any]:
                     else:
                         _placeholder_png(j["png_path"], f"{j['scene_id']}/{j['shot_id']}")
                 except Exception as e:
+                    if _is_cuda_oom(e):
+                        # Even per-shot OOMed — reclaim before the next shot;
+                        # the placeholder still lets us finish the run.
+                        _reclaim_cuda_memory()
                     logger.exception(
                         "SDXL render failed for %s/%s; using placeholder",
                         j["scene_id"], j["shot_id"],
@@ -1046,9 +1158,9 @@ def run_shots(project: Project) -> Dict[str, Any]:
                     _placeholder_png(j["png_path"], f"{j['scene_id']}/{j['shot_id']}")
 
         done += len(chunk)
-        i += _SDXL_BATCH_SIZE
+        i += len(chunk)
         project.append_event({"type": "shots_progress", "done": done, "total": total})
-        logger.info("shots progress: %d / %d", done, total)
+        logger.info("shots progress: %d / %d (batch=%d)", done, total, batch_size)
 
     result_shots = [{
         "scene_id":     j["scene_id"],

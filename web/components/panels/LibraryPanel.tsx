@@ -1,0 +1,1044 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Card, CardTitle } from "@/components/ui/Card";
+import { Button } from "@/components/ui/Button";
+import { Badge } from "@/components/ui/Badge";
+import {
+  FolderPlus, RefreshCw, ScanSearch, Copy, Trash2,
+  AlertCircle, Loader2, HardDrive, Folder, Film, Sparkles,
+  Search, X, CheckCircle2, Layers, ArrowRight,
+} from "lucide-react";
+import {
+  libraryAddRoot, libraryAddRootsBatch, libraryBatchDelete, libraryDeleteRoot,
+  libraryDeleteVideo, libraryDeletionPlan, libraryDuplicates, libraryListRoots,
+  libraryListVideos, libraryStartScan, libraryStats,
+  libraryStreamUrl, libraryThumbUrl,
+  getJob,
+  type KeeperStrategy, type LibraryBatchDeleteResult, type LibraryDeletionPlan,
+  type LibraryDuplicates, type LibraryRoot, type LibraryStats, type LibraryVideo,
+  type Job,
+} from "@/lib/api";
+
+function fmtBytes(n: number): string {
+  if (!n || n < 1024) return `${n | 0} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[i]}`;
+}
+
+function fmtDuration(sec: number | null | undefined): string {
+  if (!sec || sec < 0) return "—";
+  const s = Math.floor(sec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  return h > 0
+    ? `${h}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`
+    : `${m}:${String(r).padStart(2, "0")}`;
+}
+
+function baseName(p: string): string {
+  const parts = p.split(/[\\/]/);
+  return parts[parts.length - 1] || p;
+}
+
+type ViewMode = "browse" | "duplicates";
+
+export default function LibraryPanel() {
+  const [stats, setStats] = useState<LibraryStats | null>(null);
+  const [roots, setRoots] = useState<LibraryRoot[] | null>(null);
+  const [view, setView] = useState<ViewMode>("browse");
+  const [err, setErr] = useState<string | null>(null);
+  const [scanJobId, setScanJobId] = useState<string | null>(null);
+  const [scanProgress, setScanProgress] = useState<Job | null>(null);
+
+  const refreshStatsAndRoots = useCallback(async () => {
+    try {
+      const [s, r] = await Promise.all([libraryStats(), libraryListRoots()]);
+      setStats(s); setRoots(r.roots);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Failed to load library");
+    }
+  }, []);
+
+  useEffect(() => {
+    // refreshStatsAndRoots resolves setState via an await; the lint rule
+    // can't see through the returned promise — mark it explicitly.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    refreshStatsAndRoots();
+  }, [refreshStatsAndRoots]);
+
+  // Poll the scan job while it's running so the progress bar moves.
+  useEffect(() => {
+    if (!scanJobId) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const j = await getJob(scanJobId);
+        if (cancelled) return;
+        setScanProgress(j);
+        if (j.status === "completed" || j.status === "failed" || j.status === "cancelled") {
+          refreshStatsAndRoots();
+          window.setTimeout(() => setScanJobId(null), 1500);
+          return;
+        }
+      } catch { /* soft — try again */ }
+      if (!cancelled) window.setTimeout(tick, 1200);
+    };
+    tick();
+    return () => { cancelled = true; };
+  }, [scanJobId, refreshStatsAndRoots]);
+
+  const startScan = useCallback(async (rootIds?: number[]) => {
+    setErr(null);
+    try {
+      const res = await libraryStartScan(rootIds);
+      setScanJobId(res.job_id);
+      setScanProgress(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Failed to start scan");
+    }
+  }, []);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold gradient-text">Library</h1>
+          <p className="text-zinc-400 mt-1">
+            Organize your video files locally — scan folders, find duplicates, browse everything in one place.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant={view === "browse" ? "primary" : "secondary"} size="sm" onClick={() => setView("browse")}>
+            <Film className="w-3.5 h-3.5 mr-1.5" /> Browse
+          </Button>
+          <Button variant={view === "duplicates" ? "primary" : "secondary"} size="sm" onClick={() => setView("duplicates")}>
+            <Copy className="w-3.5 h-3.5 mr-1.5" /> Duplicates
+          </Button>
+        </div>
+      </div>
+
+      <StatsBar stats={stats} />
+
+      {err && (
+        <Card className="border-red-500/30 bg-red-500/5">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-red-400 mt-0.5" />
+              <p className="text-xs text-red-300">{err}</p>
+            </div>
+            <button onClick={() => setErr(null)} className="text-zinc-500 hover:text-zinc-300">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </Card>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-1 space-y-3">
+          <RootsPanel
+            roots={roots}
+            onChange={refreshStatsAndRoots}
+            onScanAll={() => startScan()}
+            onScanOne={(id) => startScan([id])}
+            disabled={!!scanJobId && scanProgress?.status === "running"}
+            setError={setErr}
+          />
+          {scanJobId && <ScanProgressCard job={scanProgress} />}
+        </div>
+
+        <div className="lg:col-span-2">
+          {view === "browse"
+            ? <BrowseView onError={setErr} />
+            : <DuplicatesView onError={setErr} onChange={refreshStatsAndRoots} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Stats bar
+// ---------------------------------------------------------------------------
+
+function StatsBar({ stats }: { stats: LibraryStats | null }) {
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <StatTile icon={<Folder className="w-4 h-4" />} label="Roots" value={stats?.roots ?? "…"} />
+      <StatTile icon={<Film className="w-4 h-4" />} label="Videos" value={stats?.videos ?? "…"} />
+      <StatTile icon={<HardDrive className="w-4 h-4" />}
+                label="Total size" value={stats ? fmtBytes(stats.total_bytes) : "…"} />
+      <StatTile icon={<Sparkles className="w-4 h-4" />}
+                label="Indexed"
+                value={stats
+                  ? `${stats.hashed}/${stats.videos} hash · ${stats.phashed}/${stats.videos} phash`
+                  : "…"} />
+    </div>
+  );
+}
+
+function StatTile({ icon, label, value }: { icon: React.ReactNode; label: string; value: React.ReactNode }) {
+  return (
+    <Card className="!py-3">
+      <div className="flex items-center gap-3">
+        <div className="w-8 h-8 rounded-lg bg-indigo-600/15 text-indigo-400 flex items-center justify-center flex-shrink-0">
+          {icon}
+        </div>
+        <div className="min-w-0">
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500">{label}</div>
+          <div className="text-sm font-medium text-zinc-100 truncate">{value}</div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Roots + Add root
+// ---------------------------------------------------------------------------
+
+function RootsPanel({
+  roots, onChange, onScanAll, onScanOne, disabled, setError,
+}: {
+  roots: LibraryRoot[] | null;
+  onChange: () => void;
+  onScanAll: () => void;
+  onScanOne: (id: number) => void;
+  disabled: boolean;
+  setError: (s: string) => void;
+}) {
+  const [newPath, setNewPath] = useState("");
+  const [include, setInclude] = useState("");
+  const [exclude, setExclude] = useState("");
+  const [adding, setAdding] = useState(false);
+
+  const add = useCallback(async () => {
+    const lines = newPath.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    if (lines.length === 0) return;
+    setAdding(true);
+    try {
+      if (lines.length === 1) {
+        await libraryAddRoot(lines[0], {
+          include_glob: include.trim() || undefined,
+          exclude_glob: exclude.trim() || undefined,
+        });
+      } else {
+        const res = await libraryAddRootsBatch(lines, {
+          include_glob: include.trim() || undefined,
+          exclude_glob: exclude.trim() || undefined,
+        });
+        if (res.skipped.length) {
+          setError(
+            `Skipped ${res.skipped.length} path${res.skipped.length === 1 ? "" : "s"}: ` +
+            res.skipped.slice(0, 3).map((s) => `${s.path} (${s.reason})`).join("; ") +
+            (res.skipped.length > 3 ? "…" : "")
+          );
+        }
+      }
+      setNewPath(""); setInclude(""); setExclude("");
+      onChange();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to add root");
+    } finally {
+      setAdding(false);
+    }
+  }, [newPath, include, exclude, onChange, setError]);
+
+  const remove = useCallback(async (id: number, path: string) => {
+    if (!window.confirm(
+      `Remove "${path}" from the library index?\n\nFiles on disk are NOT touched.`
+    )) return;
+    try {
+      await libraryDeleteRoot(id);
+      onChange();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to remove root");
+    }
+  }, [onChange, setError]);
+
+  return (
+    <>
+      <Card>
+        <div className="flex items-center justify-between mb-3">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Folder className="w-4 h-4 text-indigo-400" /> Watched folders
+          </CardTitle>
+          <Button variant="secondary" size="sm" onClick={onScanAll}
+                  disabled={!roots || roots.length === 0 || disabled}
+                  title={roots?.length ? "Scan every watched folder" : "Add a folder first"}>
+            <ScanSearch className="w-3.5 h-3.5 mr-1.5" /> Scan all
+          </Button>
+        </div>
+        {!roots && <div className="text-xs text-zinc-500">Loading…</div>}
+        {roots && roots.length === 0 && (
+          <p className="text-xs text-zinc-500">No folders yet. Add one below to start scanning.</p>
+        )}
+        <ul className="space-y-1.5">
+          {roots?.map((r) => (
+            <li key={r.id} className="group border border-zinc-800 rounded-lg p-2 hover:border-zinc-700 transition-colors">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs text-zinc-200 font-mono truncate" title={r.path}>{r.path}</div>
+                  <div className="text-[10px] text-zinc-500 flex flex-wrap gap-2 mt-0.5">
+                    <span>{r.video_count} video{r.video_count === 1 ? "" : "s"}</span>
+                    {r.include_glob && <span>include: {r.include_glob}</span>}
+                    {r.exclude_glob && <span>exclude: {r.exclude_glob}</span>}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  <Button variant="ghost" size="sm" onClick={() => onScanOne(r.id)} disabled={disabled}
+                          title="Scan just this folder">
+                    <ScanSearch className="w-3.5 h-3.5" />
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => remove(r.id, r.path)}
+                          title="Remove from index (files untouched)">
+                    <Trash2 className="w-3.5 h-3.5 text-zinc-500" />
+                  </Button>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </Card>
+
+      <Card>
+        <CardTitle className="text-sm mb-3 flex items-center gap-2">
+          <FolderPlus className="w-4 h-4 text-indigo-400" /> Add a folder
+        </CardTitle>
+        <div className="space-y-2">
+          <div>
+            <label className="text-[10px] uppercase tracking-wide text-zinc-500">
+              Path{"  "}<span className="text-zinc-600 lowercase">(one per line to add several at once)</span>
+            </label>
+            <textarea
+              value={newPath} onChange={(e) => setNewPath(e.target.value)}
+              placeholder={"C:\\Users\\you\\Videos\nD:\\Recordings\nE:\\Backups\\Family"}
+              rows={3}
+              className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 font-mono resize-y"
+              spellCheck={false}
+            />
+            <p className="text-[10px] text-zinc-500 mt-1">
+              Subfolders are searched automatically — no need to add each one.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-[10px] uppercase tracking-wide text-zinc-500">Include glob</label>
+              <input
+                value={include} onChange={(e) => setInclude(e.target.value)}
+                placeholder="*.mp4,*.mkv"
+                className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 font-mono"
+                spellCheck={false}
+              />
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-wide text-zinc-500">Exclude glob</label>
+              <input
+                value={exclude} onChange={(e) => setExclude(e.target.value)}
+                placeholder="*.tmp,*.part"
+                className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 font-mono"
+                spellCheck={false}
+              />
+            </div>
+          </div>
+          <Button className="w-full" size="sm" onClick={add} disabled={adding || !newPath.trim()}>
+            {adding ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Adding…</> :
+                      <><FolderPlus className="w-3.5 h-3.5 mr-1.5" /> Add folder(s)</>}
+          </Button>
+          <p className="text-[10px] text-zinc-500">
+            The path must exist on the server running the API. Nothing on disk is modified until you explicitly ask.
+          </p>
+        </div>
+      </Card>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Scan progress
+// ---------------------------------------------------------------------------
+
+function ScanProgressCard({ job }: { job: Job | null }) {
+  const counts = (job?.result as { counts?: Record<string, number> } | undefined)?.counts;
+  const pct = Math.round(((job?.progress ?? 0) as number) * 100);
+  const done = job?.status === "completed" || job?.status === "failed" || job?.status === "cancelled";
+  return (
+    <Card>
+      <CardTitle className="text-sm mb-2 flex items-center gap-2">
+        {done
+          ? <CheckCircle2 className="w-4 h-4 text-green-400" />
+          : <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />}
+        Scan
+      </CardTitle>
+      <div className="h-1.5 bg-zinc-800 rounded overflow-hidden mb-2">
+        <div
+          className={`h-full transition-all ${
+            job?.status === "failed" ? "bg-red-500"
+              : job?.status === "cancelled" ? "bg-zinc-500"
+              : "bg-indigo-500"}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="text-[11px] text-zinc-400">{job?.message || "…"}</div>
+      {counts && (
+        <div className="grid grid-cols-4 gap-2 mt-2">
+          <MiniCount label="Files"    value={counts.discovered} />
+          <MiniCount label="Hashed"   value={counts.hashed} />
+          <MiniCount label="pHashed"  value={counts.phashed} />
+          <MiniCount label="Skipped"  value={counts.skipped} tone="dim" />
+        </div>
+      )}
+      {job?.error && <p className="text-[10px] text-red-300 mt-2">{job.error}</p>}
+    </Card>
+  );
+}
+
+function MiniCount({ label, value, tone }: { label: string; value: number; tone?: "dim" }) {
+  return (
+    <div className="text-center bg-zinc-900/60 rounded px-1 py-1.5 border border-zinc-800">
+      <div className={`text-sm font-mono ${tone === "dim" ? "text-zinc-500" : "text-zinc-100"}`}>{value ?? 0}</div>
+      <div className="text-[9px] uppercase tracking-wide text-zinc-500">{label}</div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Browse
+// ---------------------------------------------------------------------------
+
+function BrowseView({ onError }: { onError: (s: string) => void }) {
+  const [videos, setVideos] = useState<LibraryVideo[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [q, setQ] = useState("");
+  const [pending, setPending] = useState(false);
+  const [selected, setSelected] = useState<LibraryVideo | null>(null);
+  const debounceRef = useRef<number | null>(null);
+
+  const load = useCallback(async (query: string) => {
+    setPending(true);
+    try {
+      const res = await libraryListVideos({ limit: 60, q: query || undefined });
+      setVideos(res.videos); setTotal(res.total);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Failed to list videos");
+    } finally {
+      setPending(false);
+    }
+  }, [onError]);
+
+  useEffect(() => { load(""); }, [load]);
+
+  useEffect(() => {
+    if (debounceRef.current !== null) window.clearTimeout(debounceRef.current);
+    debounceRef.current = window.setTimeout(() => load(q), 250);
+    return () => { if (debounceRef.current !== null) window.clearTimeout(debounceRef.current); };
+  }, [q, load]);
+
+  const del = useCallback(async (v: LibraryVideo, deleteFile: boolean) => {
+    const label = deleteFile ? "DELETE FROM DISK" : "remove from index";
+    if (!window.confirm(
+      deleteFile
+        ? `PERMANENTLY DELETE this file from disk?\n\n${v.abs_path}\n\nThis cannot be undone.`
+        : `Remove from library index?\n\n${v.abs_path}\n\nThe file on disk is not touched.`
+    )) return;
+    try {
+      await libraryDeleteVideo(v.id, deleteFile);
+      setSelected(null);
+      load(q);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : `Failed to ${label}`);
+    }
+  }, [load, q, onError]);
+
+  return (
+    <Card className="min-h-[500px]">
+      <div className="flex items-center gap-3 mb-3 flex-wrap">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Film className="w-4 h-4 text-indigo-400" /> All videos
+          <span className="text-[10px] text-zinc-500 font-mono">
+            {videos ? `${videos.length} of ${total}` : "…"}
+          </span>
+        </CardTitle>
+        <div className="ml-auto relative">
+          <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-2 top-1/2 -translate-y-1/2" />
+          <input
+            value={q} onChange={(e) => setQ(e.target.value)}
+            placeholder="Filter by path…"
+            className="pl-7 pr-3 py-1.5 bg-zinc-800/50 border border-zinc-700 rounded-lg text-xs text-zinc-200 w-56"
+          />
+          {pending && <Loader2 className="w-3 h-3 text-zinc-500 absolute right-2 top-1/2 -translate-y-1/2 animate-spin" />}
+        </div>
+      </div>
+
+      {videos && videos.length === 0 && (
+        <p className="text-xs text-zinc-500 text-center py-16">
+          {q ? "No matches for that filter." : "No videos indexed yet. Add a folder and run a scan."}
+        </p>
+      )}
+
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+        {videos?.map((v) => (
+          <button
+            key={v.id}
+            onClick={() => setSelected(v)}
+            className="text-left group bg-zinc-950/40 border border-zinc-800 rounded-lg overflow-hidden hover:border-indigo-500/40 transition-colors"
+          >
+            <div className="relative bg-black aspect-video">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={libraryThumbUrl(v.id)}
+                alt={baseName(v.abs_path)}
+                loading="lazy"
+                className="w-full h-full object-cover"
+              />
+              <div className="absolute bottom-1 right-1 text-[9px] font-mono bg-black/70 text-zinc-200 rounded px-1">
+                {fmtDuration(v.duration_sec)}
+              </div>
+            </div>
+            <div className="p-2">
+              <div className="text-[11px] text-zinc-200 truncate" title={v.abs_path}>{baseName(v.abs_path)}</div>
+              <div className="text-[10px] text-zinc-500 flex items-center gap-1.5">
+                {v.width && v.height && <span>{v.width}×{v.height}</span>}
+                {v.codec && <span>· {v.codec}</span>}
+                <span>· {fmtBytes(v.size_bytes)}</span>
+              </div>
+            </div>
+          </button>
+        ))}
+      </div>
+
+      {selected && (
+        <VideoDetailModal
+          video={selected}
+          onClose={() => setSelected(null)}
+          onRemoveIndex={() => del(selected, false)}
+          onDeleteFile={() => del(selected, true)}
+        />
+      )}
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Duplicates
+// ---------------------------------------------------------------------------
+
+function DuplicatesView({
+  onError, onChange,
+}: { onError: (s: string) => void; onChange: () => void }) {
+  const [data, setData] = useState<LibraryDuplicates | null>(null);
+  const [threshold, setThreshold] = useState(8);
+  const [pending, setPending] = useState(false);
+  const [planStrategy, setPlanStrategy] = useState<KeeperStrategy>("largest");
+  const [showReview, setShowReview] = useState(false);
+
+  const load = useCallback(async () => {
+    setPending(true);
+    try {
+      setData(await libraryDuplicates(threshold));
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Failed to load duplicates");
+    } finally {
+      setPending(false);
+    }
+  }, [threshold, onError]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const del = useCallback(async (v: LibraryVideo, deleteFile: boolean) => {
+    if (!window.confirm(deleteFile
+      ? `PERMANENTLY DELETE from disk?\n\n${v.abs_path}\n\nThis cannot be undone.`
+      : `Remove just this row from the library index?\n\n${v.abs_path}\n\nFile is not touched.`
+    )) return;
+    try {
+      await libraryDeleteVideo(v.id, deleteFile);
+      load(); onChange();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Delete failed");
+    }
+  }, [load, onChange, onError]);
+
+  const totalSaveable = (data?.exact_saveable_bytes ?? 0) + (data?.near_saveable_bytes ?? 0);
+  const hasClusters = !!data && (data.exact_clusters.length + data.near_clusters.length > 0);
+
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Copy className="w-4 h-4 text-indigo-400" /> Duplicate clusters
+            </CardTitle>
+            {data && (
+              <p className="text-[11px] text-zinc-500 mt-1">
+                {data.exact_clusters.length} exact · {data.near_clusters.length} near ·
+                {" "}~{fmtBytes(totalSaveable)} recoverable if you delete the extras
+              </p>
+            )}
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-[10px] uppercase tracking-wide text-zinc-500">Near threshold</label>
+            <input
+              type="range" min={0} max={20} value={threshold}
+              onChange={(e) => setThreshold(parseInt(e.target.value, 10))}
+              className="accent-indigo-500"
+            />
+            <span className="text-xs text-zinc-300 font-mono w-6 text-right">{threshold}</span>
+            <Button variant="secondary" size="sm" onClick={load} disabled={pending}
+                    title="Recompute clusters">
+              <RefreshCw className={`w-3.5 h-3.5 ${pending ? "animate-spin" : ""}`} />
+            </Button>
+            <div className="w-px h-6 bg-zinc-800 mx-1" />
+            <label className="text-[10px] uppercase tracking-wide text-zinc-500">Keep</label>
+            <select
+              value={planStrategy}
+              onChange={(e) => setPlanStrategy(e.target.value as KeeperStrategy)}
+              className="bg-zinc-800/50 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200"
+            >
+              <option value="largest">Largest file</option>
+              <option value="smallest">Smallest file</option>
+              <option value="oldest">Oldest</option>
+              <option value="newest">Newest</option>
+              <option value="shortest_path">Shortest path</option>
+            </select>
+            <Button variant="danger" size="sm"
+                    disabled={!hasClusters}
+                    onClick={() => setShowReview(true)}
+                    title="Review a full 'delete all but one' plan before anything runs">
+              <Layers className="w-3.5 h-3.5 mr-1.5" /> Delete all but 1
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      {showReview && (
+        <DeleteAllButOneReview
+          strategy={planStrategy}
+          threshold={threshold}
+          onClose={() => setShowReview(false)}
+          onDone={() => { setShowReview(false); load(); onChange(); }}
+          onError={onError}
+        />
+      )}
+
+      {data && data.exact_clusters.length === 0 && data.near_clusters.length === 0 && (
+        <Card className="text-center py-10">
+          <CheckCircle2 className="w-8 h-8 text-green-400 mx-auto mb-2" />
+          <p className="text-sm text-zinc-200">No duplicates found.</p>
+          <p className="text-[11px] text-zinc-500 mt-1">
+            Try lowering the near-threshold to catch fuzzier matches — or run a scan first to populate hashes.
+          </p>
+        </Card>
+      )}
+
+      {data?.exact_clusters.map((c) => (
+        <ClusterCard key={c.key} cluster={c} onDelete={del} />
+      ))}
+      {data?.near_clusters.map((c) => (
+        <ClusterCard key={c.key} cluster={c} onDelete={del} />
+      ))}
+    </div>
+  );
+}
+
+function ClusterCard({
+  cluster, onDelete,
+}: {
+  cluster: LibraryDuplicates["exact_clusters"][number];
+  onDelete: (v: LibraryVideo, deleteFile: boolean) => void;
+}) {
+  const totalWaste = useMemo(
+    () => cluster.members.slice(1).reduce((s, m) => s + m.size_bytes, 0),
+    [cluster.members],
+  );
+  return (
+    <Card>
+      <div className="flex items-center gap-2 mb-3 flex-wrap">
+        {cluster.kind === "exact"
+          ? <Badge className="text-[10px] bg-red-500/15 text-red-300 border border-red-500/25">EXACT</Badge>
+          : <Badge className="text-[10px] bg-orange-500/15 text-orange-300 border border-orange-500/25">NEAR</Badge>}
+        <span className="text-xs text-zinc-300 font-medium">
+          {cluster.members.length} files
+        </span>
+        <span className="text-[10px] text-zinc-500">· ~{fmtBytes(totalWaste)} freeable</span>
+        {cluster.kind === "exact" && (
+          <span className="text-[9px] font-mono text-zinc-600 ml-auto">{cluster.key.slice(0, 12)}…</span>
+        )}
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        {cluster.members.map((v, i) => (
+          <div key={v.id}
+               className={`border rounded-lg overflow-hidden ${
+                 i === 0 ? "border-green-500/30 bg-green-500/5" : "border-zinc-800"
+               }`}>
+            <div className="relative bg-black aspect-video">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={libraryThumbUrl(v.id)}
+                alt={baseName(v.abs_path)}
+                loading="lazy"
+                className="w-full h-full object-cover"
+              />
+              {i === 0 && (
+                <div className="absolute top-1 left-1 text-[9px] font-mono bg-green-500/80 text-black rounded px-1">
+                  KEEP
+                </div>
+              )}
+              <div className="absolute bottom-1 right-1 text-[9px] font-mono bg-black/70 text-zinc-200 rounded px-1">
+                {fmtDuration(v.duration_sec)}
+              </div>
+            </div>
+            <div className="p-2 text-[11px]">
+              <div className="text-zinc-200 truncate" title={v.abs_path}>{baseName(v.abs_path)}</div>
+              <div className="text-[10px] text-zinc-500 truncate" title={v.abs_path}>{v.abs_path}</div>
+              <div className="text-[10px] text-zinc-500 mt-0.5">
+                {v.width && v.height && <span>{v.width}×{v.height} · </span>}
+                {fmtBytes(v.size_bytes)}
+              </div>
+              {i > 0 && (
+                <div className="flex items-center gap-1 mt-1.5">
+                  <Button variant="secondary" size="sm" className="flex-1 !text-[10px] !py-1"
+                          onClick={() => onDelete(v, false)}
+                          title="Remove from library index only">
+                    Unindex
+                  </Button>
+                  <Button variant="danger" size="sm" className="flex-1 !text-[10px] !py-1"
+                          onClick={() => onDelete(v, true)}
+                          title="Delete from disk permanently">
+                    <Trash2 className="w-3 h-3 mr-1" /> Delete
+                  </Button>
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Video detail modal
+// ---------------------------------------------------------------------------
+
+function VideoDetailModal({
+  video, onClose, onRemoveIndex, onDeleteFile,
+}: {
+  video: LibraryVideo;
+  onClose: () => void;
+  onRemoveIndex: () => void;
+  onDeleteFile: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={onClose}>
+      <div
+        className="bg-zinc-900 border border-zinc-800 rounded-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto p-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3 mb-3">
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold text-zinc-100 truncate">{baseName(video.abs_path)}</h2>
+            <p className="text-[11px] text-zinc-500 font-mono truncate">{video.abs_path}</p>
+          </div>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <video
+          src={libraryStreamUrl(video.id)}
+          controls preload="metadata"
+          className="w-full max-h-[55vh] bg-black rounded-lg"
+        />
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+          <DetailField label="Duration" value={fmtDuration(video.duration_sec)} />
+          <DetailField label="Resolution" value={video.width && video.height ? `${video.width}×${video.height}` : "—"} />
+          <DetailField label="Codec" value={video.codec ?? "—"} />
+          <DetailField label="Size" value={fmtBytes(video.size_bytes)} />
+        </div>
+
+        <div className="mt-3 flex items-center gap-2 flex-wrap">
+          <a href={libraryStreamUrl(video.id)} target="_blank" rel="noreferrer"
+             className="text-xs text-indigo-400 hover:text-indigo-300 inline-flex items-center gap-1">
+            Open in new tab <ArrowRight className="w-3 h-3" />
+          </a>
+          <div className="ml-auto flex items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={onRemoveIndex}
+                    title="Drop from the library index; file on disk is untouched">
+              <Layers className="w-3.5 h-3.5 mr-1.5" /> Remove from index
+            </Button>
+            <Button variant="danger" size="sm" onClick={onDeleteFile}
+                    title="Permanently delete the file from disk">
+              <Trash2 className="w-3.5 h-3.5 mr-1.5" /> Delete from disk
+            </Button>
+          </div>
+        </div>
+
+        <div className="mt-3 text-[10px] text-zinc-500 grid grid-cols-2 gap-x-4">
+          {video.sha256 && <div>SHA-256: <span className="font-mono">{video.sha256.slice(0, 20)}…</span></div>}
+          {video.phash_hex && <div>pHash: <span className="font-mono">{video.phash_hex}</span></div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DetailField({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="bg-zinc-950/40 border border-zinc-800 rounded-lg p-2">
+      <div className="text-[9px] uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className="text-xs text-zinc-100 mt-0.5">{value}</div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// "Delete all but 1" review + execute
+// ---------------------------------------------------------------------------
+
+function DeleteAllButOneReview({
+  strategy, threshold, onClose, onDone, onError,
+}: {
+  strategy: KeeperStrategy;
+  threshold: number;
+  onClose: () => void;
+  onDone: () => void;
+  onError: (s: string) => void;
+}) {
+  const [plan, setPlan] = useState<LibraryDeletionPlan | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [overrides, setOverrides] = useState<Record<string, number>>({});
+  const [deleteFile, setDeleteFile] = useState(true);
+  const [executing, setExecuting] = useState(false);
+  const [result, setResult] = useState<LibraryBatchDeleteResult | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const p = await libraryDeletionPlan({
+        include_exact: true,
+        include_near: true,
+        near_threshold: threshold,
+        keeper_strategy: strategy,
+        cluster_keeper_overrides: overrides,
+      });
+      setPlan(p);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Failed to build plan");
+    } finally {
+      setLoading(false);
+    }
+  }, [threshold, strategy, overrides, onError]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const execute = useCallback(async () => {
+    if (!plan) return;
+    const label = deleteFile ? "PERMANENTLY DELETE FROM DISK" : "remove from the library index";
+    const ok = window.confirm(
+      `About to ${label} ${plan.total_delete_files} file${plan.total_delete_files === 1 ? "" : "s"}` +
+      (deleteFile ? ` (~${humanBytes(plan.total_delete_bytes)}).\n\nThis cannot be undone.` : ".") +
+      "\n\nContinue?"
+    );
+    if (!ok) return;
+    setExecuting(true);
+    try {
+      const res = await libraryBatchDelete(plan.delete_ids, deleteFile);
+      setResult(res);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Batch delete failed");
+    } finally {
+      setExecuting(false);
+    }
+  }, [plan, deleteFile, onError]);
+
+  const swapKeeper = (clusterKey: string, newKeeperId: number) => {
+    setOverrides((o) => ({ ...o, [clusterKey]: newKeeperId }));
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={onClose}>
+      <div
+        className="bg-zinc-900 border border-zinc-800 rounded-xl max-w-5xl w-full max-h-[92vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-4 border-b border-zinc-800 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold text-zinc-100 flex items-center gap-2">
+              <Layers className="w-4 h-4 text-orange-400" /> Delete all but one — review
+            </h2>
+            <p className="text-[11px] text-zinc-500 mt-0.5">
+              Nothing is deleted until you click Execute. Click a file within a cluster to make it the keeper instead.
+            </p>
+          </div>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {loading && (
+          <div className="p-10 text-center">
+            <Loader2 className="w-6 h-6 text-indigo-400 mx-auto mb-2 animate-spin" />
+            <p className="text-xs text-zinc-500">Building plan…</p>
+          </div>
+        )}
+
+        {!loading && plan && plan.clusters.length === 0 && (
+          <div className="p-10 text-center">
+            <CheckCircle2 className="w-8 h-8 text-green-400 mx-auto mb-2" />
+            <p className="text-sm text-zinc-200">Nothing to delete — no duplicates matched.</p>
+          </div>
+        )}
+
+        {!loading && plan && plan.clusters.length > 0 && (
+          <>
+            <div className="p-4 bg-orange-500/5 border-b border-orange-500/20 grid grid-cols-2 md:grid-cols-4 gap-3 text-center">
+              <SummaryTile label="Clusters affected" value={plan.clusters.length} />
+              <SummaryTile label="Files to delete" value={plan.total_delete_files} tone="warn" />
+              <SummaryTile label="Space to reclaim" value={humanBytes(plan.total_delete_bytes)} tone="warn" />
+              <SummaryTile label="Keeper policy"
+                value={<span className="capitalize">{plan.strategy.replace("_", " ")}</span>} />
+            </div>
+
+            <div className="overflow-y-auto flex-1 p-4 space-y-3">
+              {plan.clusters.map((c) => (
+                <div key={c.key} className="border border-zinc-800 rounded-lg overflow-hidden">
+                  <div className="bg-zinc-950/40 px-3 py-1.5 flex items-center gap-2 border-b border-zinc-800">
+                    {c.kind === "exact"
+                      ? <Badge className="text-[10px] bg-red-500/15 text-red-300 border border-red-500/25">EXACT</Badge>
+                      : <Badge className="text-[10px] bg-orange-500/15 text-orange-300 border border-orange-500/25">NEAR</Badge>}
+                    <span className="text-xs text-zinc-200">{c.delete.length + 1} files</span>
+                    <span className="text-[10px] text-zinc-500 ml-auto">-{humanBytes(c.delete_bytes)}</span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2 p-2">
+                    <PlanRow video={c.keeper} isKeeper onClick={() => { /* already keeper */ }} />
+                    {c.delete.map((v) => (
+                      <PlanRow key={v.id} video={v} isKeeper={false}
+                               onClick={() => swapKeeper(c.key, v.id)} />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="p-3 border-t border-zinc-800 flex items-center gap-3 flex-wrap bg-zinc-950/60">
+              <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
+                <input type="checkbox" checked={deleteFile}
+                       onChange={(e) => setDeleteFile(e.target.checked)}
+                       className="accent-red-500" />
+                Also delete from disk (uncheck to only remove from the library index)
+              </label>
+              <div className="flex-1" />
+              <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
+              <Button variant={deleteFile ? "danger" : "primary"} size="md"
+                      disabled={executing || plan.total_delete_files === 0}
+                      onClick={execute}>
+                {executing
+                  ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Deleting…</>
+                  : <>
+                      <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+                      Execute — {plan.total_delete_files} file{plan.total_delete_files === 1 ? "" : "s"}
+                    </>}
+              </Button>
+            </div>
+          </>
+        )}
+
+        {result && (
+          <ResultOverlay result={result} onClose={onDone} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PlanRow({ video, isKeeper, onClick }: {
+  video: LibraryVideo; isKeeper: boolean; onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`text-left flex items-center gap-2 p-2 rounded-md border transition-colors ${
+        isKeeper
+          ? "border-green-500/40 bg-green-500/5"
+          : "border-zinc-800 hover:border-zinc-700 bg-zinc-950/40"
+      }`}
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={libraryThumbUrl(video.id)}
+        alt=""
+        loading="lazy"
+        className="w-24 aspect-video object-cover rounded bg-black flex-shrink-0"
+      />
+      <div className="min-w-0 flex-1">
+        <div className="text-[11px] text-zinc-100 truncate" title={video.abs_path}>
+          {baseName(video.abs_path)}
+        </div>
+        <div className="text-[10px] text-zinc-500 truncate" title={video.abs_path}>
+          {video.abs_path}
+        </div>
+        <div className="text-[10px] mt-0.5 flex items-center gap-1.5">
+          {isKeeper
+            ? <span className="text-green-400 font-semibold">KEEP</span>
+            : <span className="text-red-400 font-semibold">DELETE</span>}
+          <span className="text-zinc-500">
+            · {video.width && video.height && `${video.width}×${video.height} · `}
+            {fmtBytes(video.size_bytes)}
+          </span>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function SummaryTile({ label, value, tone }: {
+  label: string; value: React.ReactNode; tone?: "warn";
+}) {
+  return (
+    <div className="bg-zinc-950/40 rounded-lg py-2 px-3 border border-zinc-800">
+      <div className="text-[9px] uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className={`text-sm font-medium mt-0.5 ${tone === "warn" ? "text-orange-300" : "text-zinc-100"}`}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function ResultOverlay({ result, onClose }: {
+  result: LibraryBatchDeleteResult; onClose: () => void;
+}) {
+  const failures = result.results.filter((r) => r.status === "failed" || r.file_error);
+  return (
+    <div className="absolute inset-0 bg-zinc-950/95 flex items-center justify-center p-4">
+      <div className="max-w-lg w-full text-center">
+        <CheckCircle2 className={`w-10 h-10 mx-auto mb-2 ${failures.length ? "text-orange-400" : "text-green-400"}`} />
+        <h3 className="text-lg font-semibold text-zinc-100">
+          Deleted {result.files_deleted} file{result.files_deleted === 1 ? "" : "s"}
+        </h3>
+        <p className="text-sm text-zinc-400 mt-1">
+          Freed {humanBytes(result.bytes_freed)} of disk space
+          {failures.length > 0 && `, ${failures.length} skipped`}.
+        </p>
+        {failures.length > 0 && (
+          <div className="text-left mt-3 max-h-40 overflow-y-auto border border-zinc-800 rounded-lg p-2 text-[10px] font-mono text-red-300">
+            {failures.slice(0, 12).map((f) => (
+              <div key={f.id} className="truncate">
+                {f.abs_path || f.id}: {f.file_error || f.reason || f.status}
+              </div>
+            ))}
+            {failures.length > 12 && <div className="text-zinc-500">…{failures.length - 12} more</div>}
+          </div>
+        )}
+        <Button className="mt-4" onClick={onClose}>Done</Button>
+      </div>
+    </div>
+  );
+}
+
+function humanBytes(n: number): string { return fmtBytes(n); }

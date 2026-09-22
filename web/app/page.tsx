@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Sidebar from "@/components/Sidebar";
 import HomePanel from "@/components/panels/HomePanel";
 import FilmStudioPanel from "@/components/panels/FilmStudioPanel";
+import LibraryPanel from "@/components/panels/LibraryPanel";
 import GeneratePanel from "@/components/panels/GeneratePanel";
 import StoryPanel from "@/components/panels/StoryPanel";
 import ImagesPanel from "@/components/panels/ImagesPanel";
@@ -76,6 +77,7 @@ export default function Home() {
       case "upscale":           return <UpscalePanel />;
       case "characters":        return <CharactersPanel />;
       case "keyframes":         return <KeyframesPanel />;
+      case "library":           return <LibraryPanel />;
       case "jobs":              return <JobsPanel />;
       case "settings":          return <SettingsPanel />;
       default:                  return <GeneratePanel />;

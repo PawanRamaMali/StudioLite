@@ -5168,6 +5168,286 @@ _ensure_ffmpeg_on_path()
 
 
 # ---------------------------------------------------------------------------
+# Library — local video organizer (T1: scan + dedupe + browse)
+# ---------------------------------------------------------------------------
+LIBRARY_DIR = os.path.join(OUTPUT_DIR, "library")
+os.makedirs(LIBRARY_DIR, exist_ok=True)
+os.makedirs(os.path.join(LIBRARY_DIR, "thumbs"), exist_ok=True)
+app.mount("/static/library/thumbs", StaticFiles(directory=os.path.join(LIBRARY_DIR, "thumbs")),
+          name="library_thumbs")
+
+from library import LibraryStore
+from library.jobs import ScanJob
+from library import dedupe as _lib_dedupe, thumbs as _lib_thumbs
+
+_library_store = LibraryStore(os.path.join(LIBRARY_DIR, "library.sqlite3"))
+# job_id -> ScanJob thread, so we can cancel individually
+_library_scans: dict[str, "ScanJob"] = {}
+
+
+class LibraryAddRootRequest(BaseModel):
+    path: str = Field(..., min_length=1)
+    include_glob: Optional[str] = None
+    exclude_glob: Optional[str] = None
+
+
+class LibraryStartScanRequest(BaseModel):
+    root_ids: Optional[list] = None   # None = scan every root
+
+
+class LibraryAddRootsBatchRequest(BaseModel):
+    paths: list = Field(..., description="One or more directory paths.")
+    include_glob: Optional[str] = None
+    exclude_glob: Optional[str] = None
+
+
+class LibraryBatchDeleteRequest(BaseModel):
+    video_ids: list
+    delete_file: bool = False
+
+
+class LibraryDeletionPlanRequest(BaseModel):
+    include_exact: bool = True
+    include_near: bool = True
+    near_threshold: int = 8
+    keeper_strategy: str = "largest"   # largest|smallest|oldest|newest|shortest_path
+    cluster_keeper_overrides: Optional[dict] = None
+
+
+@app.get("/api/v1/library/stats")
+async def library_stats():
+    return _library_store.stats()
+
+
+@app.get("/api/v1/library/roots")
+async def library_list_roots():
+    return {"roots": _library_store.list_roots()}
+
+
+@app.post("/api/v1/library/roots")
+async def library_add_root(req: LibraryAddRootRequest):
+    if not os.path.isdir(req.path):
+        raise HTTPException(400, f"Not a directory: {req.path}")
+    root_id = _library_store.add_root(req.path, req.include_glob or "", req.exclude_glob or "")
+    if root_id is None:
+        raise HTTPException(500, "Could not add root")
+    return {"root_id": root_id, "roots": _library_store.list_roots()}
+
+
+@app.delete("/api/v1/library/roots/{root_id}")
+async def library_delete_root(root_id: int):
+    n = _library_store.remove_root(root_id)
+    return {"deleted": n, "roots": _library_store.list_roots()}
+
+
+@app.get("/api/v1/library/videos")
+async def library_list_videos(limit: int = 200, offset: int = 0,
+                              root_id: Optional[int] = None,
+                              q: Optional[str] = None,
+                              include_missing: bool = False):
+    videos, total = _library_store.list_videos(
+        root_id=root_id, limit=max(1, min(1000, limit)),
+        offset=max(0, offset), query=q, include_missing=include_missing,
+    )
+    return {"total": total, "videos": [v.__dict__ for v in videos]}
+
+
+@app.get("/api/v1/library/videos/{video_id}")
+async def library_get_video(video_id: int):
+    v = _library_store.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    return v.__dict__
+
+
+@app.delete("/api/v1/library/videos/{video_id}")
+async def library_delete_video(video_id: int, delete_file: bool = False):
+    v = _library_store.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    file_deleted = False
+    file_error: Optional[str] = None
+    if delete_file:
+        try:
+            if os.path.isfile(v.abs_path):
+                os.remove(v.abs_path)
+                file_deleted = True
+        except OSError as e:
+            file_error = str(e)
+    _library_store.delete_video(video_id)
+    _lib_thumbs.clear_thumb(LIBRARY_DIR, video_id)
+    return {"deleted_index": True, "file_deleted": file_deleted, "file_error": file_error}
+
+
+@app.get("/api/v1/library/videos/{video_id}/thumb")
+async def library_thumb(video_id: int):
+    v = _library_store.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    if not os.path.isfile(v.abs_path):
+        raise HTTPException(410, "Source file gone")
+    path = _lib_thumbs.ensure_thumb(LIBRARY_DIR, video_id, v.abs_path)
+    if not path or not os.path.isfile(path):
+        raise HTTPException(500, "Could not generate thumbnail")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+_VIDEO_MIME_MAP = {
+    ".mp4": "video/mp4", ".m4v": "video/mp4",
+    ".mov": "video/quicktime", ".qt": "video/quicktime",
+    ".mkv": "video/x-matroska", ".webm": "video/webm",
+    ".avi": "video/x-msvideo", ".wmv": "video/x-ms-wmv",
+    ".flv": "video/x-flv", ".ogv": "video/ogg",
+    ".3gp": "video/3gpp", ".3g2": "video/3gpp2",
+    ".mpg": "video/mpeg", ".mpeg": "video/mpeg",
+    ".ts": "video/mp2t", ".m2ts": "video/mp2t", ".mts": "video/mp2t",
+    ".rm": "application/vnd.rn-realmedia", ".rmvb": "application/vnd.rn-realmedia-vbr",
+}
+
+
+@app.get("/api/v1/library/videos/{video_id}/stream")
+async def library_stream(video_id: int):
+    """Direct-serve the video file. HTTP Range support comes from FileResponse.
+    Browsers only natively play a subset (mp4/webm/ogv) — the rest still stream
+    but may only render when opened in a native player. The mime type at least
+    won't be a lie."""
+    v = _library_store.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    if not os.path.isfile(v.abs_path):
+        raise HTTPException(410, "Source file gone")
+    ext = os.path.splitext(v.abs_path)[1].lower()
+    mime = _VIDEO_MIME_MAP.get(ext, "application/octet-stream")
+    return FileResponse(v.abs_path, media_type=mime,
+                        filename=os.path.basename(v.abs_path))
+
+
+@app.get("/api/v1/library/duplicates")
+async def library_duplicates(near_threshold: int = 8):
+    threshold = max(0, min(32, near_threshold))
+    return _lib_dedupe.combined_clusters(_library_store, near_threshold=threshold)
+
+
+@app.post("/api/v1/library/duplicates/plan")
+async def library_deletion_plan(req: LibraryDeletionPlanRequest):
+    """Preview 'delete all but one' — what the user will see in the review
+    modal before the batch delete actually runs. Pure read: nothing on disk
+    or in the index changes."""
+    return _lib_dedupe.build_deletion_plan(
+        _library_store,
+        include_exact=req.include_exact,
+        include_near=req.include_near,
+        near_threshold=max(0, min(32, req.near_threshold)),
+        keeper_strategy=req.keeper_strategy,
+        cluster_keeper_overrides=req.cluster_keeper_overrides,
+    )
+
+
+@app.post("/api/v1/library/videos/batch-delete")
+async def library_batch_delete(req: LibraryBatchDeleteRequest):
+    """Apply a deletion plan. Returns per-id results so the review UI can
+    show which succeeded and which failed instead of a single yes/no."""
+    results = []
+    total_freed = 0
+    files_removed = 0
+    for vid in req.video_ids:
+        try:
+            vid_i = int(vid)
+        except Exception:
+            results.append({"id": vid, "status": "skipped", "reason": "bad id"})
+            continue
+        v = _library_store.get_video(vid_i)
+        if not v:
+            results.append({"id": vid_i, "status": "skipped", "reason": "not found"})
+            continue
+        file_deleted = False
+        file_error: Optional[str] = None
+        if req.delete_file:
+            try:
+                if os.path.isfile(v.abs_path):
+                    size = v.size_bytes or os.path.getsize(v.abs_path)
+                    os.remove(v.abs_path)
+                    file_deleted = True
+                    total_freed += int(size or 0)
+                    files_removed += 1
+            except OSError as e:
+                file_error = str(e)
+        removed = _library_store.delete_video(vid_i)
+        _lib_thumbs.clear_thumb(LIBRARY_DIR, vid_i)
+        results.append({
+            "id": vid_i,
+            "abs_path": v.abs_path,
+            "status": "failed" if file_error else "ok",
+            "removed_index": removed,
+            "file_deleted": file_deleted,
+            "file_error": file_error,
+        })
+    return {
+        "results": results,
+        "files_deleted": files_removed,
+        "bytes_freed": total_freed,
+    }
+
+
+@app.post("/api/v1/library/roots/batch")
+async def library_add_roots_batch(req: LibraryAddRootsBatchRequest):
+    """Add multiple watched folders in one go. Ignores blank lines and
+    de-duplicates so the user can paste a whole list from anywhere."""
+    added: list = []
+    skipped: list = []
+    seen: set = set()
+    for raw in req.paths:
+        p = (raw or "").strip().strip('"').strip("'")
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        if not os.path.isdir(p):
+            skipped.append({"path": p, "reason": "not a directory"})
+            continue
+        rid = _library_store.add_root(p, req.include_glob or "", req.exclude_glob or "")
+        if rid:
+            added.append({"path": p, "root_id": rid})
+        else:
+            skipped.append({"path": p, "reason": "could not add"})
+    return {"added": added, "skipped": skipped, "roots": _library_store.list_roots()}
+
+
+@app.post("/api/v1/library/scan")
+async def library_scan(req: LibraryStartScanRequest):
+    root_ids = req.root_ids
+    if not root_ids:
+        root_ids = [r["id"] for r in _library_store.list_roots()]
+    if not root_ids:
+        raise HTTPException(400, "No library roots to scan — add one first.")
+
+    job_id = _create_job("library_scan", {"root_ids": root_ids})
+    # Bridge library-job payload → shared jobs dict so /api/v1/jobs and the
+    # Jobs panel see progress just like any other render job.
+    def _on_update(payload: dict) -> None:
+        status = payload.get("status") or "running"
+        _update_job(
+            job_id,
+            status=status,
+            progress=float(payload.get("progress") or 0.0),
+            message=payload.get("message") or "",
+            result={"counts": payload.get("counts"), "scan_id": payload.get("scan_id")},
+            error=payload.get("error"),
+        )
+
+    thread = ScanJob(_library_store, root_ids, on_update=_on_update,
+                     cancel_event=_cancel_events.get(job_id))
+    _library_scans[job_id] = thread
+    _update_job(job_id, status="running")
+    thread.start()
+    return {"job_id": job_id, "root_ids": root_ids}
+
+
+@app.get("/api/v1/library/scans")
+async def library_scan_history(limit: int = 20):
+    return {"scans": _library_store.list_scans(limit=max(1, min(100, limit)))}
+
+
+# ---------------------------------------------------------------------------
 # Film Studio — multi-agent short-film pipeline (T1)
 # ---------------------------------------------------------------------------
 

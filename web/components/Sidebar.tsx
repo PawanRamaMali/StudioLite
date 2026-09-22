@@ -5,7 +5,7 @@ import {
   Home, Video, Wand2, BookOpen, Scissors, Music, ArrowUpCircle,
   Users, KeyRound, Briefcase, Settings, ChevronLeft, ChevronRight,
   Sparkles, Image as ImageIcon, Radio, ScanText, FileVideo, Cpu,
-  Film, LayoutList,
+  Film, LayoutList, Library,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getSystemStatus, type SystemStatus } from "@/lib/api";
@@ -34,6 +34,7 @@ const NAV_ITEMS: { id: string; label: string; icon: typeof Video; group: string;
   { id: "upscale", label: "Upscale Video", icon: ArrowUpCircle, group: "Tools" },
   { id: "characters", label: "Characters", icon: Users, group: "Assets" },
   { id: "keyframes", label: "Keyframes", icon: KeyRound, group: "Assets" },
+  { id: "library", label: "Library", icon: Library, group: "Assets" },
   { id: "jobs", label: "Jobs", icon: Briefcase, group: "System" },
   { id: "settings", label: "Settings", icon: Settings, group: "System" },
 ];

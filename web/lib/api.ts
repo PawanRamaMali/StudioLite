@@ -593,3 +593,175 @@ export function filmStreamUrl(id: string): string {
 }
 
 export const FILM_API_BASE = API_BASE;
+
+// ---------------------------------------------------------------------------
+// Library
+// ---------------------------------------------------------------------------
+
+export interface LibraryStats {
+  videos: number;
+  roots: number;
+  total_bytes: number;
+  hashed: number;
+  phashed: number;
+}
+
+export interface LibraryRoot {
+  id: number;
+  path: string;
+  include_glob: string;
+  exclude_glob: string;
+  added_at: number;
+  video_count: number;
+}
+
+export interface LibraryVideo {
+  id: number;
+  root_id: number | null;
+  abs_path: string;
+  rel_path: string;
+  size_bytes: number;
+  mtime: number;
+  sha256: string | null;
+  phash_hex: string | null;
+  duration_sec: number | null;
+  width: number | null;
+  height: number | null;
+  codec: string | null;
+  fps: number | null;
+  added_at: number;
+  scanned_at: number | null;
+  missing: boolean;
+}
+
+export interface LibraryCluster {
+  kind: "exact" | "near";
+  key: string;
+  members: LibraryVideo[];
+}
+
+export interface LibraryDuplicates {
+  exact_clusters: LibraryCluster[];
+  near_clusters: LibraryCluster[];
+  near_threshold: number;
+  exact_saveable_bytes: number;
+  near_saveable_bytes: number;
+}
+
+export interface LibraryScanResp {
+  job_id: string;
+  root_ids: number[];
+}
+
+export const libraryStats = () => apiFetch<LibraryStats>("/api/v1/library/stats");
+export const libraryListRoots = () => apiFetch<{ roots: LibraryRoot[] }>("/api/v1/library/roots");
+export const libraryAddRoot = (path: string, opts?: { include_glob?: string; exclude_glob?: string }) =>
+  apiFetch<{ root_id: number; roots: LibraryRoot[] }>(
+    "/api/v1/library/roots",
+    { method: "POST", body: JSON.stringify({ path, ...opts }) },
+  );
+export const libraryAddRootsBatch = (paths: string[], opts?: { include_glob?: string; exclude_glob?: string }) =>
+  apiFetch<{ added: { path: string; root_id: number }[]; skipped: { path: string; reason: string }[]; roots: LibraryRoot[] }>(
+    "/api/v1/library/roots/batch",
+    { method: "POST", body: JSON.stringify({ paths, ...opts }) },
+  );
+export const libraryDeleteRoot = (root_id: number) =>
+  apiFetch<{ deleted: number; roots: LibraryRoot[] }>(
+    `/api/v1/library/roots/${root_id}`, { method: "DELETE" },
+  );
+
+export const libraryListVideos = (params?: {
+  limit?: number; offset?: number; root_id?: number; q?: string; include_missing?: boolean;
+}) => {
+  const qs = new URLSearchParams();
+  if (params?.limit != null) qs.set("limit", String(params.limit));
+  if (params?.offset != null) qs.set("offset", String(params.offset));
+  if (params?.root_id != null) qs.set("root_id", String(params.root_id));
+  if (params?.q) qs.set("q", params.q);
+  if (params?.include_missing) qs.set("include_missing", "true");
+  const suffix = qs.toString() ? `?${qs}` : "";
+  return apiFetch<{ total: number; videos: LibraryVideo[] }>(`/api/v1/library/videos${suffix}`);
+};
+
+export const libraryDeleteVideo = (video_id: number, delete_file = false) =>
+  apiFetch<{ deleted_index: boolean; file_deleted: boolean; file_error: string | null }>(
+    `/api/v1/library/videos/${video_id}?delete_file=${delete_file}`, { method: "DELETE" },
+  );
+
+export const libraryDuplicates = (near_threshold = 8) =>
+  apiFetch<LibraryDuplicates>(`/api/v1/library/duplicates?near_threshold=${near_threshold}`);
+
+export type KeeperStrategy = "largest" | "smallest" | "oldest" | "newest" | "shortest_path";
+
+export interface LibraryDeletionPlan {
+  strategy: KeeperStrategy;
+  near_threshold: number;
+  clusters: Array<{
+    kind: "exact" | "near";
+    key: string;
+    keeper: LibraryVideo;
+    delete: LibraryVideo[];
+    delete_bytes: number;
+  }>;
+  total_delete_files: number;
+  total_delete_bytes: number;
+  delete_ids: number[];
+}
+
+export const libraryDeletionPlan = (opts: {
+  include_exact?: boolean;
+  include_near?: boolean;
+  near_threshold?: number;
+  keeper_strategy?: KeeperStrategy;
+  cluster_keeper_overrides?: Record<string, number>;
+}) =>
+  apiFetch<LibraryDeletionPlan>("/api/v1/library/duplicates/plan", {
+    method: "POST",
+    body: JSON.stringify({
+      include_exact: opts.include_exact ?? true,
+      include_near:  opts.include_near  ?? true,
+      near_threshold: opts.near_threshold ?? 8,
+      keeper_strategy: opts.keeper_strategy ?? "largest",
+      cluster_keeper_overrides: opts.cluster_keeper_overrides ?? null,
+    }),
+  });
+
+export interface LibraryBatchDeleteResult {
+  results: Array<{
+    id: number;
+    abs_path?: string;
+    status: "ok" | "failed" | "skipped";
+    reason?: string;
+    removed_index?: boolean;
+    file_deleted?: boolean;
+    file_error?: string | null;
+  }>;
+  files_deleted: number;
+  bytes_freed: number;
+}
+
+export const libraryBatchDelete = (video_ids: number[], delete_file: boolean) =>
+  apiFetch<LibraryBatchDeleteResult>("/api/v1/library/videos/batch-delete", {
+    method: "POST",
+    body: JSON.stringify({ video_ids, delete_file }),
+  });
+
+export const libraryStartScan = (root_ids?: number[]) =>
+  apiFetch<LibraryScanResp>("/api/v1/library/scan", {
+    method: "POST",
+    body: JSON.stringify(root_ids && root_ids.length ? { root_ids } : {}),
+  });
+
+export function libraryThumbUrl(video_id: number): string {
+  // Auth is enforced by middleware for /api routes. Token query param works
+  // both for GETs and for the img src (browsers can't set custom headers there).
+  const t = getApiToken();
+  return `${API_BASE}/api/v1/library/videos/${video_id}/thumb${t ? `?token=${encodeURIComponent(t)}` : ""}`;
+}
+
+export function libraryStreamUrl(video_id: number): string {
+  const t = getApiToken();
+  return `${API_BASE}/api/v1/library/videos/${video_id}/stream${t ? `?token=${encodeURIComponent(t)}` : ""}`;
+}
+
+export const LIBRARY_API_BASE = API_BASE;

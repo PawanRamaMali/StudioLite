@@ -7,7 +7,8 @@ import { Badge } from "@/components/ui/Badge";
 import {
   Film, Play, Pause, RotateCcw, Trash2, Plus, ArrowLeft, Save, X,
   Loader2, CheckCircle2, Circle, AlertCircle, Clock, ChevronRight,
-  Download, Sparkles,
+  Download, Sparkles, Music, Mic, Volume2, Image as ImageIcon,
+  Palette, Type as TypeIcon, ArrowUpCircle,
 } from "lucide-react";
 import {
   FILM_API_BASE, filmCreate, filmDelete, filmEditArtifact, filmGet,
@@ -133,6 +134,13 @@ function ProjectListView({
   const [style, setStyle] = useState<"stylized" | "photoreal">("stylized");
   const [targetMinutes, setTargetMinutes] = useState(2);
   const [model, setModel] = useState("llama3.2");
+  const [quality, setQuality] = useState<"draft" | "standard" | "high" | "ultra">("standard");
+  const [sdxlVariant, setSdxlVariant] = useState("turbo");
+  const [motionBackend, setMotionBackend] = useState("auto");
+  const [voiceBackend, setVoiceBackend] = useState("piper");
+  const [musicBackend, setMusicBackend] = useState("musicgen");
+  const [upscaleBackend, setUpscaleBackend] = useState("none");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [creating, setCreating] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -152,6 +160,12 @@ function ProjectListView({
           llm_model: model.trim() || "llama3.2",
           style,
           target_minutes: targetMinutes,
+          quality,
+          sdxl_variant: sdxlVariant,
+          motion_backend: motionBackend,
+          voice_backend: voiceBackend,
+          music_backend: musicBackend,
+          upscale_backend: upscaleBackend,
         },
       });
       onCreated(res.project.id);
@@ -262,9 +276,85 @@ function ProjectListView({
                 className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 font-mono"
               />
               <p className="text-[10px] text-zinc-500 mt-1">
-                Must be pulled locally (`ollama pull llama3.2`). Gemini / Groq / HF backends land in T2.
+                Must be pulled locally (`ollama pull llama3.2`).
               </p>
             </div>
+
+            <button type="button"
+                    onClick={() => setShowAdvanced((v) => !v)}
+                    className="w-full text-left text-[10px] uppercase tracking-wide text-zinc-500 hover:text-zinc-300 flex items-center gap-1">
+              <ChevronRight className={`w-3 h-3 transition-transform ${showAdvanced ? "rotate-90" : ""}`} />
+              Advanced backends
+            </button>
+            {showAdvanced && (
+              <div className="border-l-2 border-zinc-800 pl-3 space-y-2">
+                <div>
+                  <label className="text-[10px] uppercase tracking-wide text-zinc-500">Image quality preset</label>
+                  <select value={quality} onChange={(e) => setQuality(e.target.value as typeof quality)}
+                          className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
+                    <option value="draft">draft — fast iteration</option>
+                    <option value="standard">standard — default</option>
+                    <option value="high">high — finishing look</option>
+                    <option value="ultra">ultra — final render</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-wide text-zinc-500">SDXL variant</label>
+                  <select value={sdxlVariant} onChange={(e) => setSdxlVariant(e.target.value)}
+                          className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
+                    <option value="turbo">SDXL Turbo — 1–4 steps (default)</option>
+                    <option value="base">SDXL 1.0 — sharper, 30–50 steps</option>
+                    <option value="z-image-turbo">Z-Image Turbo — Flux-tier at Turbo cost (if cached)</option>
+                    <option value="flux-schnell">Flux Schnell — 4 steps (if cached)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-wide text-zinc-500">Motion backend</label>
+                  <select value={motionBackend} onChange={(e) => setMotionBackend(e.target.value)}
+                          className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
+                    <option value="auto">auto (SVD → AnimateDiff → Wan → Ken Burns)</option>
+                    <option value="svd">SVD 1.1</option>
+                    <option value="animatediff">AnimateDiff</option>
+                    <option value="wan22">Wan 2.2 TI2V-5B (12 GB VRAM)</option>
+                    <option value="framepack">FramePack (~6 GB VRAM, any length)</option>
+                    <option value="ltx">LTX-Video (fastest)</option>
+                    <option value="kenburns">Ken Burns only (no ML motion)</option>
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wide text-zinc-500">Voice backend</label>
+                    <select value={voiceBackend} onChange={(e) => setVoiceBackend(e.target.value)}
+                            className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
+                      <option value="piper">Piper (fast, flat)</option>
+                      <option value="xtts">XTTS v2 (24 kHz)</option>
+                      <option value="indextts2">IndexTTS-2 (emotion)</option>
+                      <option value="qwen3tts">Qwen3-TTS (voice-design)</option>
+                      <option value="chatterbox">Chatterbox (expressive)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wide text-zinc-500">Music backend</label>
+                    <select value={musicBackend} onChange={(e) => setMusicBackend(e.target.value)}
+                            className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
+                      <option value="musicgen">MusicGen (CC-BY-NC)</option>
+                      <option value="acestep">ACE-Step (MIT)</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-wide text-zinc-500">Final upscale</label>
+                  <select value={upscaleBackend} onChange={(e) => setUpscaleBackend(e.target.value)}
+                          className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
+                    <option value="none">Off (finish at Editor / Titles)</option>
+                    <option value="realesrgan">Real-ESRGAN to ~1440p</option>
+                  </select>
+                </div>
+                <p className="text-[10px] text-zinc-500">
+                  Unavailable backends fall through to defaults automatically — nothing you pick here breaks the run.
+                </p>
+              </div>
+            )}
             {err && <p className="text-xs text-red-300">{err}</p>}
             <Button className="w-full" onClick={create} disabled={creating}>
               {creating ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Creating…</> :
@@ -727,7 +817,21 @@ function ArtifactView({
           <div>
             <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Notes</div>
             <pre className="text-xs text-zinc-300 whitespace-pre-wrap bg-zinc-950/50 border border-zinc-800 rounded p-3">
-              {(artifact as { notes?: string }).notes || ""}
+              {(() => {
+                const n = (artifact as { notes?: unknown }).notes;
+                if (typeof n === "string") return n;
+                if (Array.isArray(n)) {
+                  return n.map((entry) => {
+                    if (typeof entry === "string") return `• ${entry}`;
+                    if (entry && typeof entry === "object") {
+                      const e = entry as { fail?: string; quote?: string; why?: string };
+                      return `• ${e.fail || ""}${e.quote ? `\n  "${e.quote}"` : ""}${e.why ? `\n  ${e.why}` : ""}`;
+                    }
+                    return String(entry);
+                  }).join("\n");
+                }
+                return "";
+              })()}
             </pre>
           </div>
           <div>
@@ -743,8 +847,32 @@ function ArtifactView({
         <ShotsGallery projectId={projectId} artifact={artifact} />
       )}
 
+      {stage.key === "voice_cast" && artifact && !editing && (
+        <VoiceCastView artifact={artifact} />
+      )}
+      {stage.key === "character_portraits" && artifact && !editing && (
+        <PortraitsGallery projectId={projectId} artifact={artifact} />
+      )}
+      {stage.key === "voice_actor" && artifact && !editing && (
+        <VoiceActorView projectId={projectId} artifact={artifact} />
+      )}
+      {stage.key === "motion_shots" && artifact && !editing && (
+        <MotionShotsGallery projectId={projectId} artifact={artifact} />
+      )}
+      {(stage.key === "ambient" || stage.key === "composer") && artifact && !editing && (
+        <SingleTrackView projectId={projectId} artifact={artifact} kind={stage.key as "ambient" | "composer"} />
+      )}
+      {(stage.key === "mixer" || stage.key === "colorist" || stage.key === "titles" || stage.key === "upscale" || stage.key === "editor") && artifact && !editing && (
+        <SingleVideoView projectId={projectId} artifact={artifact}
+                         stageKey={stage.key as "mixer" | "colorist" | "titles" | "upscale" | "editor"} />
+      )}
+
       {/* Fallback: raw JSON viewer for everything else */}
-      {editing || (artifact && !["producer","screenwriter","story_editor","shots"].includes(stage.key)) ? (
+      {editing || (artifact && ![
+        "producer","screenwriter","story_editor","shots","editor",
+        "voice_cast","character_portraits","voice_actor","motion_shots",
+        "ambient","composer","mixer","colorist","titles","upscale",
+      ].includes(stage.key)) ? (
         <>
           {editing && (
             <div className="mb-2 flex items-center gap-2">
@@ -844,6 +972,321 @@ function ShotsGallery({ projectId, artifact }: {
             </div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Viewers for T2/T3 stages
+// ---------------------------------------------------------------------------
+
+function filmStatic(projectId: string, path: string): string {
+  return `${FILM_API_BASE}/static/films/${projectId}/${path.replace(/^\.?\/+/, "")}`;
+}
+
+function fmtClock(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  return h > 0
+    ? `${h}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`
+    : `${m}:${String(r).padStart(2, "0")}`;
+}
+
+type CastVoice = { voice?: string; gender?: string; why?: string };
+
+function VoiceCastView({ artifact }: { artifact: Record<string, unknown> }) {
+  const cast = (artifact.cast as Record<string, CastVoice>) || {};
+  const rows = Object.entries(cast);
+  if (rows.length === 0) {
+    return <p className="text-xs text-zinc-500">No cast assigned yet.</p>;
+  }
+  return (
+    <div className="space-y-1.5">
+      <p className="text-[11px] text-zinc-500 mb-2">
+        <Mic className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
+        {rows.length} character{rows.length === 1 ? "" : "s"} cast.
+      </p>
+      {rows.map(([name, v]) => (
+        <div key={name} className="border border-zinc-800 rounded-lg p-2 flex items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-sm text-zinc-100 font-semibold">{name}</div>
+            {v.why && <p className="text-[10px] text-zinc-500 line-clamp-2">{v.why}</p>}
+          </div>
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            {v.gender && <Badge className="text-[9px] uppercase">{v.gender}</Badge>}
+            <code className="text-[10px] font-mono text-indigo-300 bg-indigo-500/10 border border-indigo-500/25 rounded px-1.5 py-0.5">
+              {v.voice || "—"}
+            </code>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PortraitsGallery({ projectId, artifact }: {
+  projectId: string;
+  artifact: Record<string, unknown>;
+}) {
+  const portraits = (artifact.portraits as Record<string, { path: string; prompt: string; rendered: boolean; error?: string | null }>) || {};
+  const rows = Object.entries(portraits);
+  if (rows.length === 0) {
+    return <p className="text-xs text-zinc-500">No portraits rendered yet.</p>;
+  }
+  return (
+    <div>
+      <p className="text-[11px] text-zinc-500 mb-3">
+        <ImageIcon className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
+        {rows.length} portrait{rows.length === 1 ? "" : "s"}.
+      </p>
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+        {rows.map(([name, p]) => (
+          <div key={name} className="bg-zinc-950/50 border border-zinc-800 rounded-lg overflow-hidden">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={filmStatic(projectId, p.path)} alt={name}
+                 loading="lazy" className="w-full aspect-square object-cover bg-black" />
+            <div className="p-2">
+              <div className="text-xs text-zinc-100 font-semibold truncate">{name}</div>
+              <p className="text-[10px] text-zinc-500 mt-0.5 line-clamp-2" title={p.prompt}>{p.prompt}</p>
+              {!p.rendered && (
+                <div className="text-[10px] text-amber-400 mt-1">placeholder</div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type VoiceLine = {
+  scene_id: string; shot_id: string;
+  speaker: string; voice: string; backend: string;
+  text: string; wav: string;
+  duration_sec: number; synthesized: boolean; error?: string | null;
+};
+
+function VoiceActorView({ projectId, artifact }: {
+  projectId: string; artifact: Record<string, unknown>;
+}) {
+  const lines = (artifact.lines as VoiceLine[]) || [];
+  if (lines.length === 0) {
+    return <p className="text-xs text-zinc-500">No dialogue lines synthesized yet.</p>;
+  }
+  const speakers = new Set(lines.map((l) => l.speaker));
+  return (
+    <div className="space-y-1.5">
+      <p className="text-[11px] text-zinc-500 mb-2">
+        <Volume2 className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
+        {lines.length} line{lines.length === 1 ? "" : "s"} across {speakers.size} speaker{speakers.size === 1 ? "" : "s"}.
+      </p>
+      <div className="space-y-1.5 max-h-[70vh] overflow-y-auto pr-1">
+        {lines.map((l, i) => (
+          <div key={`${l.scene_id}-${l.shot_id}-${i}`}
+               className="border border-zinc-800 rounded-lg p-2 bg-zinc-950/40">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-[10px] font-mono text-zinc-500">
+                {l.scene_id} · {l.shot_id}
+              </span>
+              <Badge className="text-[9px]">{l.speaker}</Badge>
+              <code className="text-[9px] text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 rounded px-1">
+                {l.voice}
+              </code>
+              <span className="text-[9px] text-zinc-500 ml-auto">{l.duration_sec.toFixed(1)}s</span>
+            </div>
+            <p className="text-xs text-zinc-200 leading-relaxed mb-1.5">{l.text}</p>
+            {l.wav && (
+              <audio src={filmStatic(projectId, l.wav)} controls preload="none"
+                     className="w-full h-8" />
+            )}
+            {l.error && <p className="text-[10px] text-red-300 mt-1">{l.error}</p>}
+            {!l.synthesized && !l.error && (
+              <p className="text-[10px] text-amber-400 mt-1">
+                silent placeholder — TTS backend unavailable
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type MotionShot = {
+  scene_id: string; shot_id: string; path: string;
+  duration_sec: number; backend: string; rendered: boolean; error?: string | null;
+};
+
+function MotionShotsGallery({ projectId, artifact }: {
+  projectId: string; artifact: Record<string, unknown>;
+}) {
+  const shots = (artifact.motion_shots as MotionShot[]) || [];
+  const counts = (artifact.backend_counts as Record<string, number> | undefined) || {};
+  if (shots.length === 0) {
+    return <p className="text-xs text-zinc-500">No motion clips rendered yet.</p>;
+  }
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-3 flex-wrap">
+        <p className="text-[11px] text-zinc-500">
+          <Film className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
+          {shots.length} motion clip{shots.length === 1 ? "" : "s"}.
+        </p>
+        {Object.entries(counts).filter(([, n]) => n).map(([k, n]) => (
+          <Badge key={k} className="text-[9px] uppercase">
+            {k}: {n as number}
+          </Badge>
+        ))}
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+        {shots.map((s) => (
+          <div key={`${s.scene_id}-${s.shot_id}`}
+               className="bg-zinc-950/50 border border-zinc-800 rounded-lg overflow-hidden">
+            <video src={filmStatic(projectId, s.path)} controls preload="metadata"
+                   className="w-full aspect-video bg-black" />
+            <div className="p-2">
+              <div className="text-[10px] font-mono text-zinc-500 flex items-center justify-between">
+                <span>{s.scene_id} · {s.shot_id}</span>
+                <span>{s.duration_sec}s · {s.backend}</span>
+              </div>
+              {!s.rendered && (
+                <div className="text-[10px] text-amber-400 mt-1">
+                  Ken Burns fallback (motion model OOM)
+                </div>
+              )}
+              {s.error && (
+                <p className="text-[10px] text-red-300 mt-1 line-clamp-2">{s.error}</p>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SingleTrackView({ projectId, artifact, kind }: {
+  projectId: string;
+  artifact: Record<string, unknown>;
+  kind: "ambient" | "composer";
+}) {
+  const a = artifact as { path?: string; prompt?: string; duration_sec?: number; rendered?: boolean; error?: string | null };
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        {kind === "composer"
+          ? <Music className="w-4 h-4 text-indigo-400" />
+          : <Volume2 className="w-4 h-4 text-indigo-400" />}
+        <span className="text-xs text-zinc-100 font-medium">
+          {kind === "composer" ? "Score" : "Ambient bed"}
+        </span>
+        {a.duration_sec && (
+          <span className="text-[10px] text-zinc-500 ml-auto">
+            {fmtClock(a.duration_sec)}
+          </span>
+        )}
+      </div>
+      {a.path && (
+        <audio src={filmStatic(projectId, a.path)} controls preload="metadata"
+               className="w-full" />
+      )}
+      {a.prompt && (
+        <div className="text-[10px] text-zinc-500 border border-zinc-800 rounded p-2">
+          <div className="uppercase tracking-wide text-zinc-600 mb-0.5">Prompt</div>
+          {a.prompt}
+        </div>
+      )}
+      {a.rendered === false && (
+        <p className="text-[10px] text-amber-400">
+          Silent placeholder — backend model unavailable.
+        </p>
+      )}
+      {a.error && <p className="text-[10px] text-red-300">{a.error}</p>}
+    </div>
+  );
+}
+
+function SingleVideoView({ projectId, artifact, stageKey }: {
+  projectId: string;
+  artifact: Record<string, unknown>;
+  stageKey: "mixer" | "colorist" | "titles" | "upscale" | "editor";
+}) {
+  const a = artifact as {
+    output_path?: string; title?: string; grade_name?: string;
+    grade_vf?: string; backend?: string; scale?: number;
+    cast_line_count?: number; has_dialogue?: boolean; has_score?: boolean;
+    has_ambient?: boolean; dialogue_lines?: number; source?: string;
+    duration_sec?: number; shot_count?: number;
+  };
+  const icon = stageKey === "mixer" ? <Volume2 className="w-4 h-4 text-indigo-400" />
+             : stageKey === "colorist" ? <Palette className="w-4 h-4 text-indigo-400" />
+             : stageKey === "titles" ? <TypeIcon className="w-4 h-4 text-indigo-400" />
+             : stageKey === "editor" ? <Film className="w-4 h-4 text-indigo-400" />
+             : <ArrowUpCircle className="w-4 h-4 text-indigo-400" />;
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        {icon}
+        <span className="text-xs text-zinc-100 font-medium capitalize">{stageKey}</span>
+        {stageKey === "titles" && a.title &&
+          <Badge className="text-[10px]">{a.title}</Badge>}
+        {stageKey === "colorist" && a.grade_name &&
+          <Badge className="text-[10px] uppercase">{a.grade_name}</Badge>}
+        {stageKey === "upscale" && a.backend &&
+          <Badge className="text-[10px] uppercase">{a.backend}{a.scale ? ` · ${a.scale}×` : ""}</Badge>}
+      </div>
+      {a.output_path && (
+        <video src={filmStatic(projectId, a.output_path)} controls preload="metadata"
+               className="w-full max-h-[55vh] bg-black rounded-lg" />
+      )}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+        {stageKey === "mixer" && (
+          <>
+            <Meta label="Dialogue" value={a.has_dialogue ? "yes" : "no"} tone={a.has_dialogue ? "ok" : "dim"} />
+            <Meta label="Score" value={a.has_score ? "yes" : "no"} tone={a.has_score ? "ok" : "dim"} />
+            <Meta label="Ambient" value={a.has_ambient ? "yes" : "no"} tone={a.has_ambient ? "ok" : "dim"} />
+            <Meta label="Lines" value={a.dialogue_lines ?? 0} />
+          </>
+        )}
+        {stageKey === "titles" && (
+          <Meta label="Cast lines" value={a.cast_line_count ?? 0} />
+        )}
+        {stageKey === "editor" && (
+          <>
+            <Meta label="Duration" value={a.duration_sec ? fmtClock(a.duration_sec) : "—"} />
+            <Meta label="Shots" value={a.shot_count ?? 0} />
+          </>
+        )}
+      </div>
+      {stageKey === "colorist" && a.grade_vf && (
+        <div className="text-[10px] font-mono text-zinc-500 border border-zinc-800 rounded p-2 whitespace-pre-wrap">
+          {a.grade_vf}
+        </div>
+      )}
+      {a.source && (
+        <div className="text-[10px] text-zinc-600 font-mono truncate">
+          source: {a.source}
+        </div>
+      )}
+      {a.output_path && (
+        <a href={filmStatic(projectId, a.output_path)} target="_blank" rel="noreferrer"
+           className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300">
+          Open MP4 <Download className="w-3 h-3" />
+        </a>
+      )}
+    </div>
+  );
+}
+
+function Meta({ label, value, tone }: { label: string; value: React.ReactNode; tone?: "ok" | "dim" }) {
+  return (
+    <div className="bg-zinc-950/40 border border-zinc-800 rounded px-2 py-1">
+      <div className="text-[9px] uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className={`text-xs mt-0.5 ${tone === "ok" ? "text-green-400" : tone === "dim" ? "text-zinc-500" : "text-zinc-100"}`}>
+        {value}
       </div>
     </div>
   );

@@ -483,7 +483,13 @@ export const getImagesHistory = (limit = 50) =>
 
 export type FilmStageKey =
   | "producer" | "screenwriter" | "story_editor" | "breakdown"
-  | "storyboard" | "cinematographer" | "shots" | "editor";
+  | "storyboard" | "cinematographer"
+  | "voice_cast" | "character_portraits" | "voice_actor"
+  | "shots" | "motion_shots" | "editor"
+  | "ambient" | "composer" | "mixer"
+  | "colorist" | "titles" | "upscale"
+  // Any newer stage added server-side falls through as a plain string.
+  | (string & {});
 
 export type FilmStageStatus =
   | "pending" | "running" | "paused" | "done"
@@ -503,6 +509,12 @@ export interface FilmConfig {
   style: "stylized" | "photoreal";
   target_minutes: number;
   quality: "draft" | "standard" | "high" | "ultra";
+  // Backend picks — every one is optional; the server keeps its own defaults.
+  sdxl_variant?: "turbo" | "base" | "z-image-turbo" | "flux-schnell" | string;
+  motion_backend?: "auto" | "svd" | "animatediff" | "wan" | "wan22" | "framepack" | "ltx" | "kenburns" | string;
+  voice_backend?: "piper" | "xtts" | "indextts2" | "qwen3tts" | "chatterbox" | string;
+  music_backend?: "musicgen" | "acestep" | string;
+  upscale_backend?: "none" | "realesrgan" | string;
   per_stage: Record<string, Record<string, unknown>>;
 }
 

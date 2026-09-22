@@ -8,7 +8,7 @@ import {
   FolderPlus, RefreshCw, ScanSearch, Copy, Trash2,
   AlertCircle, Loader2, HardDrive, Folder, Film, Sparkles,
   Search, X, CheckCircle2, Layers, ArrowRight, Wand2, Zap, Grid3x3, Tag,
-  Image as ImageIcon, FolderX,
+  Image as ImageIcon, FolderX, Mic, Type as TypeIcon,
 } from "lucide-react";
 import {
   libraryAddRoot, libraryAddRootsBatch, libraryBatchDelete, libraryDeleteRoot,
@@ -19,12 +19,13 @@ import {
   libraryClusterMembers,
   libraryEnhanceRecommend, libraryStartEnhance,
   libraryCleanupEmptyFolders,
+  libraryStartTranscribe, libraryGetTranscript, librarySearchTranscripts,
   getJob,
   type KeeperStrategy, type LibraryBatchDeleteResult, type LibraryDeletionPlan,
   type LibraryDuplicates, type LibraryRoot, type LibraryStats, type LibraryVideo,
   type LibrarySearchHit, type LibraryClusterSummary,
   type LibraryEnhanceRecommendResponse, type LibraryEnhancePreset,
-  type LibraryMediaKind,
+  type LibraryMediaKind, type LibraryTranscript, type LibraryTranscriptHit,
   type Job,
 } from "@/lib/api";
 
@@ -184,13 +185,19 @@ function StatsBar({ stats }: { stats: LibraryStats | null }) {
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
       <StatTile icon={<Folder className="w-4 h-4" />} label="Roots" value={stats?.roots ?? "…"} />
-      <StatTile icon={<Film className="w-4 h-4" />} label="Videos" value={stats?.videos ?? "…"} />
+      <StatTile
+        icon={<Film className="w-4 h-4" />}
+        label="Media"
+        value={stats
+          ? `${stats.videos}${stats.video_count != null && stats.image_count != null ? ` (${stats.video_count} vid · ${stats.image_count} img)` : ""}`
+          : "…"}
+      />
       <StatTile icon={<HardDrive className="w-4 h-4" />}
                 label="Total size" value={stats ? fmtBytes(stats.total_bytes) : "…"} />
       <StatTile icon={<Sparkles className="w-4 h-4" />}
                 label="Indexed"
                 value={stats
-                  ? `${stats.hashed}/${stats.videos} hash · ${stats.phashed}/${stats.videos} phash`
+                  ? `${stats.hashed}/${stats.videos} hash · ${stats.phashed}/${stats.videos} phash${stats.transcribed != null ? ` · ${stats.transcribed} speech` : ""}`
                   : "…"} />
     </div>
   );
@@ -889,11 +896,68 @@ function VideoDetailModal({
 
         {showEnhance && <EnhancePanel videoId={video.id} onClose={() => setShowEnhance(false)} />}
 
+        {!isImage && video.transcribed && (
+          <TranscriptPanel videoId={video.id} />
+        )}
+
         <div className="mt-3 text-[10px] text-zinc-500 grid grid-cols-2 gap-x-4">
           {video.sha256 && <div>SHA-256: <span className="font-mono">{video.sha256.slice(0, 20)}…</span></div>}
           {video.phash_hex && <div>pHash: <span className="font-mono">{video.phash_hex}</span></div>}
         </div>
       </div>
+    </div>
+  );
+}
+
+function TranscriptPanel({ videoId }: { videoId: number }) {
+  const [t, setT] = useState<LibraryTranscript | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    libraryGetTranscript(videoId)
+      .then((r) => setT(r.transcript))
+      .catch((e) => setErr(e instanceof Error ? e.message : "Transcript load failed"));
+  }, [videoId]);
+  if (err) return null;
+  if (!t) return (
+    <div className="mt-3 border border-zinc-800 rounded-lg bg-zinc-950/40 p-3 text-[11px] text-zinc-500">
+      <Loader2 className="w-3.5 h-3.5 inline mr-1 animate-spin" /> Loading transcript…
+    </div>
+  );
+  if (t.empty || (t.segments || []).length === 0) {
+    return (
+      <div className="mt-3 border border-zinc-800 rounded-lg bg-zinc-950/40 p-3 text-[11px] text-zinc-500">
+        <Mic className="w-3.5 h-3.5 inline mr-1" /> Whisper found no speech in this video.
+      </div>
+    );
+  }
+  const shown = expanded ? t.segments : t.segments.slice(0, 8);
+  return (
+    <div className="mt-3 border border-zinc-800 rounded-lg bg-zinc-950/40 p-3">
+      <div className="flex items-center gap-2 mb-2">
+        <Mic className="w-3.5 h-3.5 text-indigo-400" />
+        <span className="text-xs text-zinc-100 font-medium">Transcript</span>
+        {t.language && <Badge className="text-[9px] uppercase">{t.language}</Badge>}
+        <span className="text-[10px] text-zinc-500 ml-auto">
+          {t.segments.length} segment{t.segments.length === 1 ? "" : "s"}
+        </span>
+      </div>
+      <div className="max-h-56 overflow-y-auto space-y-1 pr-1">
+        {shown.map((s, i) => (
+          <div key={i} className="text-[11px] text-zinc-300 leading-relaxed">
+            <span className="text-[10px] font-mono text-zinc-600 mr-2">
+              [{fmtDuration(s.start)}]
+            </span>
+            {s.text}
+          </div>
+        ))}
+      </div>
+      {t.segments.length > 8 && (
+        <button onClick={() => setExpanded((v) => !v)}
+                className="text-[10px] text-indigo-400 hover:text-indigo-300 mt-1">
+          {expanded ? "Collapse" : `Show all ${t.segments.length}`}
+        </button>
+      )}
     </div>
   );
 }
@@ -1301,36 +1365,52 @@ function humanBytes(n: number): string { return fmtBytes(n); }
 // T2: Semantic search view
 // ---------------------------------------------------------------------------
 
+type SearchMode = "content" | "speech";
+
 function SearchView({ onError }: { onError: (s: string) => void }) {
+  const [mode, setMode] = useState<SearchMode>("content");
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<LibrarySearchHit[] | null>(null);
+  const [speechHits, setSpeechHits] = useState<LibraryTranscriptHit[] | null>(null);
   const [pending, setPending] = useState(false);
   const [selected, setSelected] = useState<LibraryVideo | null>(null);
-  const [indexStats, setIndexStats] = useState<{ embedded: number; videos: number; embed_model: string } | null>(null);
+  const [indexStats, setIndexStats] = useState<{ embedded: number; videos: number; embed_model: string; transcribed: number; video_count: number } | null>(null);
   const [embedJobId, setEmbedJobId] = useState<string | null>(null);
   const [embedProgress, setEmbedProgress] = useState<Job | null>(null);
+  const [transcribeJobId, setTranscribeJobId] = useState<string | null>(null);
+  const [transcribeProgress, setTranscribeProgress] = useState<Job | null>(null);
+  const [transcribeModel, setTranscribeModel] = useState<string>("tiny");
 
   const loadStats = useCallback(async () => {
     try {
       const s = await libraryIndexStats();
-      setIndexStats({ embedded: s.embedded, videos: s.videos, embed_model: s.embed_model });
+      setIndexStats({
+        embedded: s.embedded, videos: s.videos, embed_model: s.embed_model,
+        transcribed: s.transcribed ?? 0, video_count: s.video_count ?? s.videos,
+      });
     } catch { /* soft */ }
   }, []);
 
   useEffect(() => { loadStats(); }, [loadStats]);
 
-  // Poll the embed job while running.
+  // Poll whichever job is running (embed OR transcribe).
   useEffect(() => {
-    if (!embedJobId) return;
+    const runningId = embedJobId || transcribeJobId;
+    if (!runningId) return;
+    const isEmbed = !!embedJobId;
     let cancelled = false;
     const tick = async () => {
       try {
-        const j = await getJob(embedJobId);
+        const j = await getJob(runningId);
         if (cancelled) return;
-        setEmbedProgress(j);
+        if (isEmbed) setEmbedProgress(j);
+        else setTranscribeProgress(j);
         if (j.status === "completed" || j.status === "failed" || j.status === "cancelled") {
           loadStats();
-          window.setTimeout(() => setEmbedJobId(null), 1500);
+          window.setTimeout(() => {
+            if (isEmbed) setEmbedJobId(null);
+            else setTranscribeJobId(null);
+          }, 1500);
           return;
         }
       } catch { /* soft */ }
@@ -1338,18 +1418,23 @@ function SearchView({ onError }: { onError: (s: string) => void }) {
     };
     tick();
     return () => { cancelled = true; };
-  }, [embedJobId, loadStats]);
+  }, [embedJobId, transcribeJobId, loadStats]);
 
   const search = useCallback(async () => {
     if (!query.trim()) return;
     setPending(true);
     try {
-      const res = await librarySearch(query.trim());
-      setHits(res.hits);
+      if (mode === "content") {
+        const res = await librarySearch(query.trim());
+        setHits(res.hits); setSpeechHits(null);
+      } else {
+        const res = await librarySearchTranscripts(query.trim());
+        setSpeechHits(res.hits); setHits(null);
+      }
     } catch (e) {
       onError(e instanceof Error ? e.message : "Search failed");
     } finally { setPending(false); }
-  }, [query, onError]);
+  }, [query, mode, onError]);
 
   const startEmbed = useCallback(async () => {
     try {
@@ -1361,43 +1446,97 @@ function SearchView({ onError }: { onError: (s: string) => void }) {
     }
   }, [onError]);
 
-  const canSearch = !indexStats || indexStats.embedded > 0;
+  const startTranscribe = useCallback(async () => {
+    try {
+      const res = await libraryStartTranscribe({ model_size: transcribeModel });
+      setTranscribeJobId(res.job_id);
+      setTranscribeProgress(null);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Could not start speech indexing");
+    }
+  }, [transcribeModel, onError]);
+
+  const canSearchContent = !indexStats || indexStats.embedded > 0;
+  const canSearchSpeech = !indexStats || indexStats.transcribed > 0;
+  const canSearch = mode === "content" ? canSearchContent : canSearchSpeech;
+  const progress = mode === "content" ? embedProgress : transcribeProgress;
+  const activeJobId = mode === "content" ? embedJobId : transcribeJobId;
   return (
     <Card className="min-h-[500px]">
       <div className="flex items-center gap-2 mb-3 flex-wrap">
         <CardTitle className="text-sm flex items-center gap-2">
-          <Search className="w-4 h-4 text-indigo-400" /> Semantic search
+          <Search className="w-4 h-4 text-indigo-400" /> Search
         </CardTitle>
-        {indexStats && (
+        <div className="flex items-center rounded-lg border border-zinc-700 overflow-hidden">
+          <button onClick={() => setMode("content")}
+                  className={`px-2.5 py-1 text-[11px] flex items-center gap-1 transition-colors ${
+                    mode === "content" ? "bg-indigo-500/20 text-indigo-300" : "text-zinc-400 hover:text-zinc-200"
+                  }`}
+                  title="CLIP visual/semantic search">
+            <ImageIcon className="w-3 h-3" /> Content
+          </button>
+          <button onClick={() => setMode("speech")}
+                  className={`px-2.5 py-1 text-[11px] flex items-center gap-1 transition-colors ${
+                    mode === "speech" ? "bg-indigo-500/20 text-indigo-300" : "text-zinc-400 hover:text-zinc-200"
+                  }`}
+                  title="Full-text search of spoken words in every video">
+            <TypeIcon className="w-3 h-3" /> Speech
+          </button>
+        </div>
+        {indexStats && mode === "content" && (
           <span className="text-[10px] text-zinc-500">
-            {indexStats.embedded}/{indexStats.videos} indexed{indexStats.embed_model && ` · ${indexStats.embed_model}`}
+            {indexStats.embedded}/{indexStats.videos} indexed
+            {indexStats.embed_model && ` · ${indexStats.embed_model}`}
+          </span>
+        )}
+        {indexStats && mode === "speech" && (
+          <span className="text-[10px] text-zinc-500">
+            {indexStats.transcribed}/{indexStats.video_count} videos transcribed
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">
-          <Button variant="secondary" size="sm" onClick={startEmbed}
-                  disabled={!!embedJobId && embedProgress?.status === "running"}
-                  title={embedJobId ? "Indexing in progress" : "Encode CLIP embeddings for every video (uses the ~600 MB openai/clip-vit-base-patch32 model — downloaded on first run)"}>
-            <Sparkles className="w-3.5 h-3.5 mr-1.5" /> Index content
-          </Button>
+          {mode === "content" ? (
+            <Button variant="secondary" size="sm" onClick={startEmbed}
+                    disabled={!!embedJobId && embedProgress?.status === "running"}
+                    title={embedJobId ? "Indexing in progress" : "Encode CLIP embeddings for every video (uses the ~600 MB openai/clip-vit-base-patch32 model — downloaded on first run)"}>
+              <Sparkles className="w-3.5 h-3.5 mr-1.5" /> Index content
+            </Button>
+          ) : (
+            <>
+              <select value={transcribeModel} onChange={(e) => setTranscribeModel(e.target.value)}
+                      disabled={!!transcribeJobId && transcribeProgress?.status === "running"}
+                      className="bg-zinc-800/50 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200">
+                <option value="tiny">tiny (fast · ~75 MB)</option>
+                <option value="base">base (balanced · ~150 MB)</option>
+                <option value="small">small (accurate · ~500 MB)</option>
+                <option value="medium">medium (~1.5 GB)</option>
+              </select>
+              <Button variant="secondary" size="sm" onClick={startTranscribe}
+                      disabled={!!transcribeJobId && transcribeProgress?.status === "running"}
+                      title={transcribeJobId ? "Speech indexing in progress" : "Run whisper on every video to build a searchable spoken-text index"}>
+                <Mic className="w-3.5 h-3.5 mr-1.5" /> Index speech
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
-      {embedJobId && embedProgress && (
+      {activeJobId && progress && (
         <div className="mb-3 p-2 border border-zinc-800 rounded-lg bg-zinc-950/40">
           <div className="text-[11px] text-zinc-400 flex items-center gap-2 mb-1">
-            {embedProgress.status === "completed"
+            {progress.status === "completed"
               ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
-              : embedProgress.status === "failed"
+              : progress.status === "failed"
               ? <AlertCircle className="w-3.5 h-3.5 text-red-400" />
               : <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin" />}
-            <span>{embedProgress.message || "…"}</span>
-            <span className="ml-auto font-mono">{Math.round(((embedProgress.progress ?? 0) as number) * 100)}%</span>
+            <span>{progress.message || "…"}</span>
+            <span className="ml-auto font-mono">{Math.round(((progress.progress ?? 0) as number) * 100)}%</span>
           </div>
           <div className="h-1 bg-zinc-800 rounded overflow-hidden">
             <div className="h-full bg-indigo-500 transition-all"
-                 style={{ width: `${Math.round(((embedProgress.progress ?? 0) as number) * 100)}%` }} />
+                 style={{ width: `${Math.round(((progress.progress ?? 0) as number) * 100)}%` }} />
           </div>
-          {embedProgress.error && <p className="text-[10px] text-red-300 mt-1">{embedProgress.error}</p>}
+          {progress.error && <p className="text-[10px] text-red-300 mt-1">{progress.error}</p>}
         </div>
       )}
 
@@ -1406,7 +1545,9 @@ function SearchView({ onError }: { onError: (s: string) => void }) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") search(); }}
-          placeholder="e.g. sunset beach, kids birthday, my dog running, city night traffic…"
+          placeholder={mode === "content"
+            ? "e.g. sunset beach, kids birthday, my dog running, city night traffic…"
+            : "e.g. 'mom's recipe', birthday cake, the surprise, someone laughing…"}
           className="flex-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200"
         />
         <Button onClick={search} disabled={pending || !query.trim() || !canSearch} size="md">
@@ -1416,20 +1557,32 @@ function SearchView({ onError }: { onError: (s: string) => void }) {
         </Button>
       </div>
 
-      {!canSearch && (
+      {!canSearch && mode === "content" && (
         <div className="text-[11px] text-zinc-500 text-center py-8 border border-dashed border-zinc-800 rounded-lg">
-          The library has no content embeddings yet. Click <span className="text-zinc-200">Index content</span> above to encode every video.
+          No content embeddings yet. Click <span className="text-zinc-200">Index content</span> to encode every video.
           The CLIP model downloads once (~600 MB); subsequent runs are offline.
         </div>
       )}
+      {!canSearch && mode === "speech" && (
+        <div className="text-[11px] text-zinc-500 text-center py-8 border border-dashed border-zinc-800 rounded-lg">
+          No videos transcribed yet. Click <span className="text-zinc-200">Index speech</span> to run whisper on each one.
+          The <span className="text-zinc-200">tiny</span> model is fast enough for a whole library; bigger models are more accurate.
+        </div>
+      )}
 
-      {hits && hits.length === 0 && canSearch && (
+      {mode === "content" && hits && hits.length === 0 && canSearch && (
         <p className="text-xs text-zinc-500 text-center py-10">
           No videos matched. Try a broader description (drop specifics like names/dates — CLIP is best at general scenes).
         </p>
       )}
+      {mode === "speech" && speechHits && speechHits.length === 0 && canSearch && (
+        <p className="text-xs text-zinc-500 text-center py-10">
+          Nothing said. FTS matches whole words — try shorter phrases, or an
+          alternate spelling. Very quiet or music-heavy clips may transcribe as empty.
+        </p>
+      )}
 
-      {hits && hits.length > 0 && (
+      {mode === "content" && hits && hits.length > 0 && (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
           {hits.map((h) => (
             <button
@@ -1460,6 +1613,36 @@ function SearchView({ onError }: { onError: (s: string) => void }) {
         </div>
       )}
 
+      {mode === "speech" && speechHits && speechHits.length > 0 && (
+        <div className="space-y-2">
+          {speechHits.map((h) => (
+            <button
+              key={h.video.id}
+              onClick={() => setSelected(h.video)}
+              className="w-full text-left bg-zinc-950/40 border border-zinc-800 rounded-lg overflow-hidden hover:border-indigo-500/40 transition-colors flex items-stretch"
+            >
+              <div className="relative bg-black w-40 flex-shrink-0 aspect-video">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={libraryThumbUrl(h.video.id)} alt="" loading="lazy" className="w-full h-full object-cover" />
+                <div className="absolute bottom-1 right-1 text-[9px] font-mono bg-black/70 text-zinc-200 rounded px-1">
+                  {fmtDuration(h.video.duration_sec)}
+                </div>
+              </div>
+              <div className="p-2 min-w-0 flex-1">
+                <div className="text-xs text-zinc-200 truncate flex items-center gap-1.5" title={h.video.abs_path}>
+                  <Mic className="w-3 h-3 text-indigo-400 flex-shrink-0" />
+                  {baseName(h.video.abs_path)}
+                </div>
+                <p className="text-[11px] text-zinc-400 mt-1 leading-relaxed line-clamp-3">
+                  {renderSpeechSnippet(h.snippet)}
+                </p>
+                <div className="text-[9px] text-zinc-600 font-mono mt-1 truncate">{h.video.abs_path}</div>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
       {selected && (
         <VideoDetailModal
           video={selected}
@@ -1470,6 +1653,17 @@ function SearchView({ onError }: { onError: (s: string) => void }) {
       )}
     </Card>
   );
+}
+
+/** FTS5 wraps matches in ⟪…⟫; render those spans as highlighted <mark>. */
+function renderSpeechSnippet(raw: string): React.ReactNode {
+  const parts = raw.split(/(⟪[^⟫]*⟫)/g);
+  return parts.map((p, i) => {
+    if (p.startsWith("⟪") && p.endsWith("⟫")) {
+      return <mark key={i} className="bg-indigo-500/25 text-indigo-200 rounded px-0.5">{p.slice(1, -1)}</mark>;
+    }
+    return <span key={i}>{p}</span>;
+  });
 }
 
 // ---------------------------------------------------------------------------

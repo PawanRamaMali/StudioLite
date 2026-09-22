@@ -12,7 +12,7 @@ Public surface used by api/routers/library.py:
     from library.store import LibraryStore
 """
 
-from . import store, scanner, dedupe, thumbs, probe, phash, hasher  # noqa: F401
+from . import store, scanner, dedupe, thumbs, probe, phash, hasher, transcribe  # noqa: F401
 from .store import LibraryStore  # noqa: F401
 
 # T2 (content index) and T3 (enhance) are optional-import — they pull in

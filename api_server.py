@@ -5178,6 +5178,7 @@ app.mount("/static/library/thumbs", StaticFiles(directory=os.path.join(LIBRARY_D
 
 from library import LibraryStore
 from library.jobs import ScanJob, EmbedJob
+from library.transcribe import TranscribeJob
 from library import dedupe as _lib_dedupe, thumbs as _lib_thumbs
 
 _library_store = LibraryStore(os.path.join(LIBRARY_DIR, "library.sqlite3"))
@@ -5576,6 +5577,72 @@ async def library_cluster(req: LibraryClusterRequest):
 async def library_cluster_members(cluster_id: int, limit: int = 60):
     videos = _library_store.videos_in_cluster(cluster_id)[:max(1, min(500, limit))]
     return {"cluster_id": cluster_id, "videos": [v.__dict__ for v in videos]}
+
+
+# ---------- Speech-to-text index (whisper on every library video) ----------
+
+class LibraryTranscribeRequest(BaseModel):
+    model_size: str = "tiny"                # tiny|base|small|medium|large-v2|large-v3
+    language: Optional[str] = None          # ISO 639-1, or None for auto-detect
+
+
+class LibrarySearchTranscriptsRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    limit: int = 24
+
+
+@app.post("/api/v1/library/transcribe")
+async def library_transcribe(req: LibraryTranscribeRequest):
+    """Kick off a background pass that transcribes every un-indexed video."""
+    job_id = _create_job("library_transcribe", {"model_size": req.model_size,
+                                                 "language": req.language})
+
+    def _on_update(payload: dict) -> None:
+        _update_job(
+            job_id,
+            status=payload.get("status") or "running",
+            progress=float(payload.get("progress") or 0.0),
+            message=payload.get("message") or "",
+            result={"counts": payload.get("counts"), "model": payload.get("model")},
+            error=payload.get("error"),
+        )
+
+    thread = TranscribeJob(
+        _library_store,
+        on_update=_on_update,
+        cancel_event=_cancel_events.get(job_id),
+        model_size=req.model_size,
+        language=req.language,
+    )
+    _library_scans[job_id] = thread
+    _update_job(job_id, status="running")
+    thread.start()
+    return {"job_id": job_id}
+
+
+@app.get("/api/v1/library/videos/{video_id}/transcript")
+async def library_get_transcript(video_id: int):
+    v = _library_store.get_video(video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    t = _library_store.get_transcript(video_id)
+    if t is None:
+        raise HTTPException(404, "No transcript indexed for this video yet.")
+    return {"video_id": video_id, "transcript": t}
+
+
+@app.delete("/api/v1/library/videos/{video_id}/transcript")
+async def library_delete_transcript(video_id: int):
+    _library_store.clear_transcript(video_id)
+    return {"cleared": video_id}
+
+
+@app.post("/api/v1/library/search-transcripts")
+async def library_search_transcripts(req: LibrarySearchTranscriptsRequest):
+    """FTS5 search across every stored transcript. Returns hits with a
+    short highlighted snippet and the video metadata."""
+    hits = _library_store.search_transcripts(req.query, limit=max(1, min(100, req.limit)))
+    return {"query": req.query, "hits": hits}
 
 
 # ---------- T3: quality enhancement (Real-ESRGAN + optional GFPGAN) --------

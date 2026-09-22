@@ -61,7 +61,21 @@ CREATE TABLE IF NOT EXISTS videos (
     cluster_id   INTEGER,    -- populated by the "clusters" job; null until then
     -- Media kind — "video" (default, back-compat) or "image".
     media_kind   TEXT DEFAULT 'video',
+    -- Speech-to-text index. `transcript_json` holds the raw segment list;
+    -- the full-text-search index below joins on video_id for search.
+    transcript_json  TEXT,
+    transcript_model TEXT,
+    transcribed_at   REAL,
     FOREIGN KEY (root_id) REFERENCES library_roots(id) ON DELETE SET NULL
+);
+
+-- FTS5 mirror of transcript text for fast "find the clip where X was said"
+-- lookups. Kept in sync manually from set_transcript(); we don't wire
+-- triggers because the source column is JSON that FTS can't index directly.
+CREATE VIRTUAL TABLE IF NOT EXISTS transcripts_fts USING fts5(
+    video_id UNINDEXED,
+    text,
+    tokenize='porter unicode61 remove_diacritics 2'
 );
 
 CREATE INDEX IF NOT EXISTS idx_videos_sha256 ON videos(sha256);
@@ -108,6 +122,10 @@ class Video:
     embedded: bool = False             # true when an embedding is stored
     # "video" or "image" — set by the scanner at discovery.
     kind: str = "video"
+    # Speech index — True when a transcript is stored. Actual segments
+    # live in a dedicated read via `get_transcript()` to keep list rows small.
+    transcribed: bool = False
+    transcript_language: Optional[str] = None
 
 
 class LibraryStore:
@@ -137,12 +155,15 @@ class LibraryStore:
         except Exception:
             return
         needs = [
-            ("embedding",   "BLOB"),
-            ("embed_model", "TEXT"),
-            ("embedded_at", "REAL"),
-            ("tags_json",   "TEXT"),
-            ("cluster_id",  "INTEGER"),
-            ("media_kind",  "TEXT DEFAULT 'video'"),
+            ("embedding",        "BLOB"),
+            ("embed_model",      "TEXT"),
+            ("embedded_at",      "REAL"),
+            ("tags_json",        "TEXT"),
+            ("cluster_id",       "INTEGER"),
+            ("media_kind",       "TEXT DEFAULT 'video'"),
+            ("transcript_json",  "TEXT"),
+            ("transcript_model", "TEXT"),
+            ("transcribed_at",   "REAL"),
         ]
         for name, coltype in needs:
             if name not in cols:
@@ -449,6 +470,121 @@ class LibraryStore:
             except Exception as e:
                 logger.warning("set_cluster_ids failed: %s", e)
 
+    # ---- transcripts ------------------------------------------------------
+
+    def iter_videos_needing_transcript(self, limit: int = 500,
+                                        model_id: Optional[str] = None) -> List[Video]:
+        """Videos without a transcript (or transcribed by a different model
+        than `model_id`). Images always skip — no audio to transcribe."""
+        if not self._ok: return []
+        try:
+            with self._connect() as c:
+                if model_id:
+                    rows = c.execute(
+                        "SELECT * FROM videos WHERE missing=0 AND media_kind='video' AND "
+                        "(transcript_json IS NULL OR transcript_model IS NULL OR transcript_model != ?) "
+                        "ORDER BY size_bytes ASC LIMIT ?",
+                        (model_id, limit),
+                    ).fetchall()
+                else:
+                    rows = c.execute(
+                        "SELECT * FROM videos WHERE transcript_json IS NULL AND missing=0 "
+                        "AND media_kind='video' ORDER BY size_bytes ASC LIMIT ?", (limit,),
+                    ).fetchall()
+                return [_video_from_row(r) for r in rows]
+        except Exception:
+            return []
+
+    def set_transcript(self, video_id: int, transcript: Dict[str, Any],
+                       model_id: str) -> None:
+        """Write the transcript blob AND refresh the FTS mirror in one txn.
+        `transcript` shape: {language, text, segments:[{start,end,text}]}."""
+        if not self._ok: return
+        import time as _time
+        text_all = str(transcript.get("text") or "").strip()
+        if not text_all:
+            segs = transcript.get("segments") or []
+            if isinstance(segs, list):
+                text_all = " ".join(str(s.get("text", "")).strip()
+                                    for s in segs if isinstance(s, dict))
+        payload = json.dumps(transcript, ensure_ascii=False)
+        with self._lock:
+            try:
+                with self._connect() as c:
+                    c.execute("BEGIN")
+                    c.execute(
+                        "UPDATE videos SET transcript_json=?, transcript_model=?, transcribed_at=? WHERE id=?",
+                        (payload, model_id, _time.time(), video_id),
+                    )
+                    # Refresh FTS row.
+                    c.execute("DELETE FROM transcripts_fts WHERE video_id=?", (video_id,))
+                    if text_all:
+                        c.execute(
+                            "INSERT INTO transcripts_fts(video_id, text) VALUES(?, ?)",
+                            (video_id, text_all),
+                        )
+                    c.execute("COMMIT")
+            except Exception as e:
+                logger.warning("set_transcript failed: %s", e)
+
+    def get_transcript(self, video_id: int) -> Optional[Dict[str, Any]]:
+        if not self._ok: return None
+        try:
+            with self._connect() as c:
+                r = c.execute("SELECT transcript_json, transcript_model, transcribed_at "
+                              "FROM videos WHERE id=?", (video_id,)).fetchone()
+                if not r or not r["transcript_json"]:
+                    return None
+                try:
+                    payload = json.loads(r["transcript_json"])
+                except Exception:
+                    return None
+                payload["_model"] = r["transcript_model"]
+                payload["_at"] = r["transcribed_at"]
+                return payload
+        except Exception:
+            return None
+
+    def clear_transcript(self, video_id: int) -> None:
+        if not self._ok: return
+        with self._lock:
+            try:
+                with self._connect() as c:
+                    c.execute("UPDATE videos SET transcript_json=NULL, transcript_model=NULL, "
+                              "transcribed_at=NULL WHERE id=?", (video_id,))
+                    c.execute("DELETE FROM transcripts_fts WHERE video_id=?", (video_id,))
+            except Exception:
+                pass
+
+    def search_transcripts(self, query: str, *, limit: int = 24) -> List[Dict[str, Any]]:
+        """FTS5 search across every stored transcript. Returns hits with a
+        short snippet and the video row so the caller can also pull the
+        segment timestamps from get_transcript() for click-to-seek."""
+        if not self._ok or not query.strip():
+            return []
+        try:
+            with self._connect() as c:
+                # `snippet` returns text with the match wrapped in ⟨…⟩ so the
+                # UI can highlight without re-searching client-side.
+                rows = c.execute(
+                    "SELECT v.*, "
+                    "snippet(transcripts_fts, 1, '⟪', '⟫', '…', 12) AS snippet, "
+                    "bm25(transcripts_fts) AS rank "
+                    "FROM transcripts_fts JOIN videos v ON v.id = transcripts_fts.video_id "
+                    "WHERE transcripts_fts MATCH ? AND v.missing=0 "
+                    "ORDER BY rank LIMIT ?",
+                    (query, limit),
+                ).fetchall()
+                out = []
+                for r in rows:
+                    v = _video_from_row(r)
+                    out.append({"video": v.__dict__, "snippet": r["snippet"],
+                                "rank": float(r["rank"])})
+                return out
+        except Exception as e:
+            logger.warning("search_transcripts failed: %s", e)
+            return []
+
     def videos_in_cluster(self, cluster_id: int) -> List[Video]:
         if not self._ok: return []
         try:
@@ -592,13 +728,18 @@ class LibraryStore:
     # ---- summary -----------------------------------------------------------
 
     def stats(self) -> Dict[str, Any]:
-        if not self._ok: return {"videos": 0, "roots": 0, "total_bytes": 0, "hashed": 0, "phashed": 0}
+        if not self._ok:
+            return {"videos": 0, "roots": 0, "total_bytes": 0, "hashed": 0, "phashed": 0,
+                    "transcribed": 0, "video_count": 0, "image_count": 0}
         try:
             with self._connect() as c:
                 v = c.execute(
                     "SELECT COUNT(*) as n, IFNULL(SUM(size_bytes),0) as bytes, "
                     "SUM(CASE WHEN sha256 IS NOT NULL THEN 1 ELSE 0 END) as hashed, "
-                    "SUM(CASE WHEN phash_hex IS NOT NULL THEN 1 ELSE 0 END) as phashed "
+                    "SUM(CASE WHEN phash_hex IS NOT NULL THEN 1 ELSE 0 END) as phashed, "
+                    "SUM(CASE WHEN transcript_json IS NOT NULL THEN 1 ELSE 0 END) as transcribed, "
+                    "SUM(CASE WHEN media_kind='video' THEN 1 ELSE 0 END) as vids, "
+                    "SUM(CASE WHEN media_kind='image' THEN 1 ELSE 0 END) as imgs "
                     "FROM videos WHERE missing=0"
                 ).fetchone()
                 r = c.execute("SELECT COUNT(*) as n FROM library_roots").fetchone()
@@ -607,9 +748,13 @@ class LibraryStore:
                     "total_bytes": int(v["bytes"] or 0),
                     "hashed": int(v["hashed"] or 0),
                     "phashed": int(v["phashed"] or 0),
+                    "transcribed": int(v["transcribed"] or 0),
+                    "video_count": int(v["vids"] or 0),
+                    "image_count": int(v["imgs"] or 0),
                 }
         except Exception:
-            return {"videos": 0, "roots": 0, "total_bytes": 0, "hashed": 0, "phashed": 0}
+            return {"videos": 0, "roots": 0, "total_bytes": 0, "hashed": 0, "phashed": 0,
+                    "transcribed": 0, "video_count": 0, "image_count": 0}
 
 
 def _video_from_row(r) -> Video:
@@ -618,6 +763,8 @@ def _video_from_row(r) -> Video:
     cluster_id = None
     has_embedding = False
     kind = "video"
+    transcribed = False
+    transcript_language: Optional[str] = None
     # SQLite Row supports both index and key access; guard when a query
     # doesn't project the T2 columns (older SELECT * calls).
     try:
@@ -634,6 +781,18 @@ def _video_from_row(r) -> Video:
         pass
     try:
         kind = r["media_kind"] or "video"
+    except Exception:
+        pass
+    try:
+        tj = r["transcript_json"]
+        if tj:
+            transcribed = True
+            try:
+                parsed = json.loads(tj)
+                if isinstance(parsed, dict):
+                    transcript_language = parsed.get("language")
+            except Exception:
+                pass
     except Exception:
         pass
     if tags_raw:
@@ -659,4 +818,6 @@ def _video_from_row(r) -> Video:
         cluster_id=(int(cluster_id) if cluster_id is not None else None),
         embedded=has_embedding,
         kind=kind,
+        transcribed=transcribed,
+        transcript_language=transcript_language,
     )

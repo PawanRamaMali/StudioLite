@@ -616,6 +616,9 @@ export interface LibraryStats {
   total_bytes: number;
   hashed: number;
   phashed: number;
+  transcribed?: number;
+  video_count?: number;
+  image_count?: number;
 }
 
 export interface LibraryRoot {
@@ -650,6 +653,9 @@ export interface LibraryVideo {
   embedded?: boolean;
   // "video" or "image"; legacy rows without the column read back as "video".
   kind?: "video" | "image";
+  // Speech-to-text index — true when a whisper transcript is stored.
+  transcribed?: boolean;
+  transcript_language?: string | null;
 }
 
 export type LibraryMediaKind = "video" | "image";
@@ -879,6 +885,54 @@ export const libraryStartEnhance = (video_id: number, preset: LibraryEnhancePres
   apiFetch<{ job_id: string }>(
     `/api/v1/library/videos/${video_id}/enhance`,
     { method: "POST", body: JSON.stringify({ preset, face_restore }) },
+  );
+
+// ---- Speech-to-text index ------------------------------------------------
+
+export interface LibraryTranscriptSegment {
+  start: number;
+  end: number;
+  text: string;
+}
+
+export interface LibraryTranscript {
+  language?: string;
+  text: string;
+  segments: LibraryTranscriptSegment[];
+  empty?: boolean;
+  _model?: string;
+  _at?: number;
+}
+
+export interface LibraryTranscriptHit {
+  video: LibraryVideo;
+  snippet: string;   // FTS5 snippet with match wrapped in ⟪…⟫
+  rank: number;
+}
+
+export const libraryStartTranscribe = (opts?: { model_size?: string; language?: string | null }) =>
+  apiFetch<{ job_id: string }>("/api/v1/library/transcribe", {
+    method: "POST",
+    body: JSON.stringify({
+      model_size: opts?.model_size ?? "tiny",
+      language: opts?.language ?? null,
+    }),
+  });
+
+export const libraryGetTranscript = (video_id: number) =>
+  apiFetch<{ video_id: number; transcript: LibraryTranscript }>(
+    `/api/v1/library/videos/${video_id}/transcript`,
+  );
+
+export const libraryDeleteTranscript = (video_id: number) =>
+  apiFetch<{ cleared: number }>(
+    `/api/v1/library/videos/${video_id}/transcript`, { method: "DELETE" },
+  );
+
+export const librarySearchTranscripts = (query: string, limit = 24) =>
+  apiFetch<{ query: string; hits: LibraryTranscriptHit[] }>(
+    "/api/v1/library/search-transcripts",
+    { method: "POST", body: JSON.stringify({ query, limit }) },
   );
 
 export const LIBRARY_API_BASE = API_BASE;

@@ -946,4 +946,42 @@ export const librarySearchTranscripts = (query: string, limit = 24) =>
     { method: "POST", body: JSON.stringify({ query, limit }) },
   );
 
+// ---- Batch re-encode of legacy formats ------------------------------------
+
+export type LibraryReencodeTarget = "h264" | "h265";
+
+export interface LibraryLegacyVideosResponse {
+  target_codecs: LibraryReencodeTarget[];
+  legacy_codecs: string[];
+  videos: LibraryVideo[];
+  total: number;
+  total_bytes: number;
+}
+
+export interface LibraryReencodeOptions {
+  video_ids?: number[] | null;
+  target_codec?: LibraryReencodeTarget;
+  crf?: number;
+  replace_original?: boolean;
+}
+
+export const libraryLegacyVideos = (limit = 1000) =>
+  apiFetch<LibraryLegacyVideosResponse>(
+    `/api/v1/library/legacy-videos?limit=${limit}`,
+  );
+
+export const libraryStartReencode = (opts: LibraryReencodeOptions = {}) =>
+  apiFetch<{ job_id: string; count: number }>(
+    "/api/v1/library/reencode",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        video_ids: opts.video_ids ?? null,
+        target_codec: opts.target_codec ?? "h264",
+        crf: opts.crf ?? 20,
+        replace_original: opts.replace_original ?? false,
+      }),
+    },
+  );
+
 export const LIBRARY_API_BASE = API_BASE;

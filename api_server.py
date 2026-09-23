@@ -5196,6 +5196,7 @@ app.mount("/static/library/thumbs", StaticFiles(directory=os.path.join(LIBRARY_D
 from library import LibraryStore
 from library.jobs import ScanJob, EmbedJob
 from library.transcribe import TranscribeJob
+from library.reencode import ReencodeJob, TARGET_CODECS, LEGACY_CODECS
 from library import dedupe as _lib_dedupe, thumbs as _lib_thumbs
 
 _library_store = LibraryStore(os.path.join(LIBRARY_DIR, "library.sqlite3"))
@@ -5660,6 +5661,88 @@ async def library_search_transcripts(req: LibrarySearchTranscriptsRequest):
     short highlighted snippet and the video metadata."""
     hits = _library_store.search_transcripts(req.query, limit=max(1, min(100, req.limit)))
     return {"query": req.query, "hits": hits}
+
+
+# ---------- Batch re-encode of legacy formats -----------------------------
+
+class LibraryReencodeRequest(BaseModel):
+    video_ids: Optional[list] = None  # explicit list; if omitted, every legacy video
+    target_codec: str = "h264"        # h264 | h265
+    crf: int = 20                     # 18=lossless-ish, 23=default, 28=small
+    replace_original: bool = False    # move source to .legacy sidecar
+
+
+_REENCODE_DIR = os.path.join(LIBRARY_DIR, "reencoded")
+os.makedirs(_REENCODE_DIR, exist_ok=True)
+app.mount("/static/library/reencoded", StaticFiles(directory=_REENCODE_DIR),
+          name="library_reencoded")
+
+
+@app.get("/api/v1/library/legacy-videos")
+async def library_legacy_videos(limit: int = 1000):
+    """List videos whose codec is legacy (mpeg2 / wmv / rmvb / dv / etc.).
+    Anything a probe hasn't touched is excluded — a null codec is un-probed,
+    not legacy."""
+    videos = _library_store.list_legacy_videos(limit=max(1, min(5000, limit)))
+    return {
+        "target_codecs": sorted(TARGET_CODECS.keys()),
+        "legacy_codecs": sorted(LEGACY_CODECS),
+        "videos": [v.__dict__ for v in videos],
+        "total": len(videos),
+        "total_bytes": sum(v.size_bytes for v in videos),
+    }
+
+
+@app.post("/api/v1/library/reencode")
+async def library_reencode(req: LibraryReencodeRequest):
+    """Kick off a background ffmpeg-conversion job.
+
+    Passing `video_ids=None` targets every currently-legacy video, so a
+    frontend can offer a one-click "modernize the whole library" flow
+    without maintaining its own selection state."""
+    if req.target_codec not in TARGET_CODECS:
+        raise HTTPException(400, f"Unknown target_codec {req.target_codec!r}; "
+                                  f"pick one of {sorted(TARGET_CODECS)}")
+    if req.video_ids is None:
+        ids: list = [v.id for v in _library_store.list_legacy_videos(limit=5000)]
+    else:
+        ids = [int(x) for x in req.video_ids if str(x).isdigit()]
+    if not ids:
+        raise HTTPException(400, "No videos to re-encode. Run a scan first or pass "
+                                  "explicit video_ids.")
+
+    job_id = _create_job("library_reencode", {
+        "count": len(ids),
+        "target_codec": req.target_codec,
+        "crf": req.crf,
+        "replace_original": req.replace_original,
+    })
+
+    def _on_update(payload: dict) -> None:
+        _update_job(
+            job_id,
+            status=payload.get("status") or "running",
+            progress=float(payload.get("progress") or 0.0),
+            message=payload.get("message") or "",
+            result={"counts": payload.get("counts"),
+                    "results": payload.get("results")},
+            error=payload.get("error"),
+        )
+
+    thread = ReencodeJob(
+        _library_store,
+        video_ids=ids,
+        output_dir=_REENCODE_DIR,
+        on_update=_on_update,
+        target_codec=req.target_codec,
+        crf=req.crf,
+        replace_original=req.replace_original,
+        cancel_event=_cancel_events.get(job_id),
+    )
+    _library_scans[job_id] = thread
+    _update_job(job_id, status="running")
+    thread.start()
+    return {"job_id": job_id, "count": len(ids)}
 
 
 # ---------- T3: quality enhancement (Real-ESRGAN + optional GFPGAN) --------

@@ -8,7 +8,7 @@ import {
   FolderPlus, RefreshCw, ScanSearch, Copy, Trash2,
   AlertCircle, Loader2, HardDrive, Folder, Film, Sparkles,
   Search, X, CheckCircle2, Layers, ArrowRight, Wand2, Zap, Grid3x3, Tag,
-  Image as ImageIcon, FolderX, Mic, Type as TypeIcon,
+  Image as ImageIcon, FolderX, Mic, Type as TypeIcon, ArrowRightLeft,
 } from "lucide-react";
 import {
   libraryAddRoot, libraryAddRootsBatch, libraryBatchDelete, libraryDeleteRoot,
@@ -20,12 +20,14 @@ import {
   libraryEnhanceRecommend, libraryStartEnhance,
   libraryCleanupEmptyFolders,
   libraryStartTranscribe, libraryGetTranscript, librarySearchTranscripts,
+  libraryLegacyVideos, libraryStartReencode,
   getJob,
   type KeeperStrategy, type LibraryBatchDeleteResult, type LibraryDeletionPlan,
   type LibraryDuplicates, type LibraryRoot, type LibraryStats, type LibraryVideo,
   type LibrarySearchHit, type LibraryClusterSummary,
   type LibraryEnhanceRecommendResponse, type LibraryEnhancePreset,
   type LibraryMediaKind, type LibraryTranscript, type LibraryTranscriptHit,
+  type LibraryLegacyVideosResponse, type LibraryReencodeTarget,
   type Job,
 } from "@/lib/api";
 
@@ -164,6 +166,7 @@ export default function LibraryPanel() {
             setError={setErr}
           />
           {scanJobId && <ScanProgressCard job={scanProgress} />}
+          <ReencodeCard onError={setErr} onChanged={refreshStatsAndRoots} />
         </div>
 
         <div className="lg:col-span-2">
@@ -412,6 +415,251 @@ function RootsPanel({
 // ---------------------------------------------------------------------------
 // Scan progress
 // ---------------------------------------------------------------------------
+
+function ReencodeCard({
+  onError, onChanged,
+}: { onError: (s: string) => void; onChanged: () => void }) {
+  const [summary, setSummary] = useState<LibraryLegacyVideosResponse | null>(null);
+  const [showReview, setShowReview] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [progress, setProgress] = useState<Job | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setSummary(await libraryLegacyVideos(1000));
+    } catch { /* soft — probably nothing scanned yet */ }
+  }, []);
+  useEffect(() => {
+    // load resolves setState via await; ESLint can't see through the returned promise.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    load();
+  }, [load]);
+
+  // Poll the running job.
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const j = await getJob(jobId);
+        if (cancelled) return;
+        setProgress(j);
+        if (j.status === "completed" || j.status === "failed" || j.status === "cancelled") {
+          load(); onChanged();
+          window.setTimeout(() => setJobId(null), 1500);
+          return;
+        }
+      } catch { /* soft */ }
+      if (!cancelled) window.setTimeout(tick, 1500);
+    };
+    tick();
+    return () => { cancelled = true; };
+  }, [jobId, load, onChanged]);
+
+  const legacyCount = summary?.total ?? 0;
+  const legacyBytes = summary?.total_bytes ?? 0;
+
+  const running = !!jobId && progress?.status === "running";
+
+  return (
+    <>
+      <Card>
+        <CardTitle className="text-sm mb-2 flex items-center gap-2">
+          <ArrowRightLeft className="w-4 h-4 text-indigo-400" /> Convert legacy formats
+        </CardTitle>
+        {legacyCount === 0 ? (
+          <p className="text-[11px] text-zinc-500">
+            No legacy-codec videos indexed yet. Once a scan finishes, this card
+            reports anything encoded as mpeg2, wmv, rmvb, dv, and so on — with a
+            one-click convert to h264 / h265.
+          </p>
+        ) : (
+          <>
+            <p className="text-[11px] text-zinc-400">
+              <span className="text-zinc-100 font-medium">{legacyCount}</span>{" "}
+              video{legacyCount === 1 ? "" : "s"} in a legacy codec, totalling{" "}
+              <span className="text-zinc-100">{fmtBytes(legacyBytes)}</span>.
+            </p>
+            <p className="text-[10px] text-zinc-500 mt-1">
+              Modernizing lets browsers, phones, and editors handle them
+              natively. Typical h264 CRF 20 keeps quality; the .legacy sidecar
+              option preserves originals.
+            </p>
+            <div className="flex items-center gap-2 mt-2">
+              <Button size="sm" onClick={() => setShowReview(true)} disabled={running}>
+                <ArrowRightLeft className="w-3.5 h-3.5 mr-1.5" />
+                Review & convert
+              </Button>
+              <button
+                onClick={load}
+                className="text-[10px] text-zinc-500 hover:text-zinc-300"
+                title="Refresh legacy count"
+              >
+                Refresh
+              </button>
+            </div>
+          </>
+        )}
+
+        {jobId && progress && (
+          <div className="mt-3 p-2 border border-zinc-800 rounded-lg bg-zinc-950/40">
+            <div className="text-[11px] text-zinc-400 flex items-center gap-2 mb-1">
+              {progress.status === "completed"
+                ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
+                : progress.status === "failed"
+                ? <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+                : <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin" />}
+              <span>{progress.message || "…"}</span>
+              <span className="ml-auto font-mono">
+                {Math.round(((progress.progress ?? 0) as number) * 100)}%
+              </span>
+            </div>
+            <div className="h-1 bg-zinc-800 rounded overflow-hidden">
+              <div
+                className={`h-full transition-all ${progress.status === "failed" ? "bg-red-500" : "bg-indigo-500"}`}
+                style={{ width: `${Math.round(((progress.progress ?? 0) as number) * 100)}%` }}
+              />
+            </div>
+            {progress.error && <p className="text-[10px] text-red-300 mt-1">{progress.error}</p>}
+          </div>
+        )}
+      </Card>
+
+      {showReview && summary && (
+        <ReencodeReviewModal
+          summary={summary}
+          onClose={() => setShowReview(false)}
+          onStarted={(job_id) => {
+            setJobId(job_id);
+            setProgress(null);
+            setShowReview(false);
+          }}
+          onError={onError}
+        />
+      )}
+    </>
+  );
+}
+
+function ReencodeReviewModal({
+  summary, onClose, onStarted, onError,
+}: {
+  summary: LibraryLegacyVideosResponse;
+  onClose: () => void;
+  onStarted: (jobId: string) => void;
+  onError: (s: string) => void;
+}) {
+  const [target, setTarget] = useState<LibraryReencodeTarget>("h264");
+  const [crf, setCrf] = useState(20);
+  const [replaceOriginal, setReplaceOriginal] = useState(false);
+  const [starting, setStarting] = useState(false);
+
+  const start = async () => {
+    setStarting(true);
+    try {
+      const r = await libraryStartReencode({
+        video_ids: null, // hit every legacy video
+        target_codec: target,
+        crf,
+        replace_original: replaceOriginal,
+      });
+      onStarted(r.job_id);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Failed to start re-encode");
+      setStarting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={onClose}>
+      <div className="bg-zinc-900 border border-zinc-800 rounded-xl max-w-3xl w-full max-h-[90vh] overflow-hidden flex flex-col"
+           onClick={(e) => e.stopPropagation()}>
+        <div className="p-4 border-b border-zinc-800 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold text-zinc-100 flex items-center gap-2">
+              <ArrowRightLeft className="w-4 h-4 text-indigo-400" /> Convert legacy formats
+            </h2>
+            <p className="text-[11px] text-zinc-500 mt-0.5">
+              {summary.total} file{summary.total === 1 ? "" : "s"} · {fmtBytes(summary.total_bytes)} total on disk
+            </p>
+          </div>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-4 grid grid-cols-2 md:grid-cols-4 gap-3 border-b border-zinc-800">
+          <div>
+            <label className="text-[9px] uppercase tracking-wide text-zinc-500">Target codec</label>
+            <select value={target}
+                    onChange={(e) => setTarget(e.target.value as LibraryReencodeTarget)}
+                    className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200">
+              {summary.target_codecs.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-[9px] uppercase tracking-wide text-zinc-500">
+              CRF <span className="text-zinc-600">(lower = higher quality)</span>
+            </label>
+            <input type="number" min={0} max={51}
+                   value={crf}
+                   onChange={(e) => setCrf(parseInt(e.target.value, 10) || 20)}
+                   className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 font-mono" />
+          </div>
+          <label className="flex items-center gap-2 text-xs text-zinc-300 col-span-2">
+            <input type="checkbox" checked={replaceOriginal}
+                   onChange={(e) => setReplaceOriginal(e.target.checked)}
+                   className="accent-red-500" />
+            <span>
+              Replace original in place
+              <span className="block text-[10px] text-zinc-500">
+                Keeps the original at a <code>.legacy</code> sidecar. If unchecked,
+                the converted file lands in <code>.mp/library/reencoded/</code>.
+              </span>
+            </span>
+          </label>
+        </div>
+
+        <div className="overflow-y-auto flex-1 p-4">
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-2">
+            Files that will be converted
+          </div>
+          <div className="space-y-1">
+            {summary.videos.slice(0, 100).map((v) => (
+              <div key={v.id} className="flex items-center gap-2 text-[11px]">
+                <span className="font-mono text-zinc-500 uppercase w-14 text-right">{v.codec ?? "?"}</span>
+                <span className="font-mono text-zinc-600 w-16 text-right">{fmtBytes(v.size_bytes)}</span>
+                <span className="text-zinc-200 truncate flex-1" title={v.abs_path}>
+                  {v.abs_path}
+                </span>
+              </div>
+            ))}
+            {summary.videos.length > 100 && (
+              <p className="text-[10px] text-zinc-500 mt-2">
+                …and {summary.videos.length - 100} more.
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="p-3 border-t border-zinc-800 flex items-center gap-2 bg-zinc-950/60">
+          <p className="text-[10px] text-zinc-500">
+            Every file is converted sequentially. Cancel from the Jobs panel at any point.
+          </p>
+          <div className="flex-1" />
+          <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
+          <Button size="md" onClick={start} disabled={starting}>
+            {starting
+              ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Starting…</>
+              : <><ArrowRightLeft className="w-3.5 h-3.5 mr-1.5" /> Convert {summary.total} files</>}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ScanProgressCard({ job }: { job: Job | null }) {
   const counts = (job?.result as { counts?: Record<string, number> } | undefined)?.counts;

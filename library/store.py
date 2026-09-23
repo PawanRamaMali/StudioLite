@@ -585,6 +585,28 @@ class LibraryStore:
             logger.warning("search_transcripts failed: %s", e)
             return []
 
+    def list_legacy_videos(self, limit: int = 1000) -> List[Video]:
+        """Videos whose codec is in the legacy set defined by reencode.py.
+        Only returns rows the probe pass has actually filled in — a null
+        codec doesn't count as legacy, it counts as un-probed."""
+        if not self._ok: return []
+        from .reencode import LEGACY_CODECS
+        try:
+            with self._connect() as c:
+                # Case-insensitive match; ffprobe returns lowercase but the
+                # store isn't strict about what other tools put in there.
+                placeholders = ",".join("?" for _ in LEGACY_CODECS)
+                rows = c.execute(
+                    f"SELECT * FROM videos WHERE missing=0 AND media_kind='video' "
+                    f"AND codec IS NOT NULL AND LOWER(codec) IN ({placeholders}) "
+                    f"ORDER BY size_bytes DESC LIMIT ?",
+                    (*[c.lower() for c in LEGACY_CODECS], limit),
+                ).fetchall()
+                return [_video_from_row(r) for r in rows]
+        except Exception as e:
+            logger.warning("list_legacy_videos failed: %s", e)
+            return []
+
     def videos_in_cluster(self, cluster_id: int) -> List[Video]:
         if not self._ok: return []
         try:

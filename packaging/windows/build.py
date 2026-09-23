@@ -3,6 +3,7 @@ from pathlib import Path
 import hashlib
 import subprocess
 import zipfile
+import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / 'dist'
@@ -29,6 +30,7 @@ with zipfile.ZipFile(OUT / 'StudioLite-Setup.zip', 'w', zipfile.ZIP_DEFLATED) as
     for name in ('setup.cmd', 'install.ps1', 'payload.zip'):
         archive.write(STAGE / name, name)
 exe = OUT / 'StudioLite-Setup.exe'
+build_exe = OUT / f'StudioLite-Setup-{uuid.uuid4().hex}.exe'
 sed = f'''[Version]
 Class=IEXPRESS
 SEDVersion=3
@@ -44,7 +46,7 @@ RebootMode=N
 InstallPrompt=Install StudioLite? Internet, Python 3.11, Node.js 22+ and FFmpeg are required. CPU dependencies will be installed.
 DisplayLicense=
 FinishMessage=
-TargetName={exe}
+TargetName={build_exe}
 FriendlyName=StudioLite Setup
 AppLaunched=cmd.exe /c setup.cmd
 PostInstallCmd=<None>
@@ -65,8 +67,14 @@ FILE2="payload.zip"
 sed_path = STAGE / 'setup.sed'
 sed_path.write_text(sed, encoding='ascii')
 subprocess.run(['iexpress.exe', '/N', '/Q', str(sed_path)], check=True)
-if not exe.exists() or exe.stat().st_size == 0:
+if not build_exe.exists() or build_exe.stat().st_size == 0:
     raise RuntimeError('IExpress did not produce the installer')
+try:
+    build_exe.replace(exe)
+except PermissionError:
+    # Windows prevents replacing an installer while it is open or locked.
+    print('Existing installer is locked; keeping the new build under a unique name.')
+    exe = build_exe
 for path in (exe, OUT / 'StudioLite-Setup.zip'):
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     path.with_suffix(path.suffix + '.sha256').write_text(f'{digest}  {path.name}\n')

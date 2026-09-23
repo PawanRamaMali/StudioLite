@@ -78,9 +78,10 @@ $apiProc = Start-Process -FilePath $venvPython `
     -WindowStyle Hidden `
     -PassThru
 
-Write-Host 'Starting Next.js dev server  on http://localhost:3000 ...'
+$webMode = if (Test-Path (Join-Path $root '.production')) { 'start' } else { 'dev' }
+Write-Host "Starting Next.js ($webMode) on http://localhost:3000 ..."
 $webProc = Start-Process -FilePath 'cmd.exe' `
-    -ArgumentList @('/c', 'npm', 'run', 'dev') `
+    -ArgumentList @('/c', 'npm', 'run', $webMode, '--', '--hostname', '127.0.0.1') `
     -WorkingDirectory $webDir `
     -RedirectStandardOutput $webOut `
     -RedirectStandardError $webErr `

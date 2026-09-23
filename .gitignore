@@ -26,3 +26,20 @@ piper_models/
 Songs/
 .mp/
 CLAUDE.md
+
+# Secrets and local config
+.env
+.auth
+.claude/
+
+# Local model weights (downloaded, not versioned)
+.models/
+piper_models/
+
+# Vendored third-party source (cloned at setup time)
+third_party/
+
+# Windows setup build artifacts
+dist/
+.production
+.setup-incomplete

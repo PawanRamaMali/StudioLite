@@ -37,5 +37,29 @@ the issue and rerun setup to resume an incomplete installation. Completed
 installations are never overwritten; choose a separate directory for updates.
 Close the launcher with Ctrl+C to stop the servers. To uninstall, close the app,
 remove its desktop shortcut, and remove its installation folder after backing
-up projects and models. This installer is unsigned and does not bundle runtimes
-or provide an offline install or an automatic uninstaller.
+up projects and models. This installer does not bundle runtimes or provide
+an offline install or an automatic uninstaller.
+
+## Signed release builds
+
+`build.py` signs the installer with Authenticode when a code-signing
+certificate is available. Absent one, it emits an unsigned build and
+records the reason in `dist/release-manifest.json` — the CI pipeline
+can decide whether to promote or block it.
+
+Environment variables the build reads:
+
+- `STUDIOLITE_SIGN_THUMBPRINT` — SHA-1 thumbprint of the code-signing cert
+  in the current user's certificate store. Required to trigger signing.
+- `STUDIOLITE_SIGN_TSA` — RFC 3161 timestamp authority URL. Defaults to
+  `http://timestamp.digicert.com`.
+- `STUDIOLITE_SIGNTOOL` — full path to `signtool.exe`. Optional; when
+  unset, `signtool` is looked up on PATH (Windows SDK installs it).
+
+## Release manifest
+
+Every successful build writes `dist/release-manifest.json` alongside the
+installer. It carries the product name, `git describe` version string,
+commit sha, build timestamp, per-artifact size + SHA-256, and a signing
+summary. This is the file a future auto-updater checks to decide whether
+a running install needs to pull a new release.

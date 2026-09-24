@@ -6075,6 +6075,115 @@ async def film_edit_artifact(project_id: str, stage_key: str, req: FilmEditArtif
     return {"state": _film_state_dict(proj), "artifact": req.data}
 
 
+# --- Packaging: delivery zip + portable export/import -------------------
+
+class FilmPackageRequest(BaseModel):
+    include_characters: bool = True     # append cast list to CREDITS.md
+
+
+@app.post("/api/v1/films/{project_id}/package")
+async def film_package_delivery(project_id: str, req: FilmPackageRequest):
+    """Bundle a project's ship-ready outputs into a downloadable zip:
+    the final mixed cut (or silent, if no music), CREDITS.md, and a
+    manifest with the render metadata. Returns a download URL under
+    ``/static/films/<pid>/`` so the client can just navigate to it."""
+    from filmmaker import projects as _fp, packaging as _pkg, licensing
+    try:
+        proj = _fp.load(OUTPUT_DIR, project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+
+    # Fold the character list into credits if the caller wants it.
+    characters = None
+    if req.include_characters:
+        cast_art = proj.read_artifact("characters")  # type: ignore[arg-type]
+        if cast_art and isinstance(cast_art.get("characters"), list):
+            characters = cast_art["characters"]
+
+    entitlement = licensing.check_entitlement()
+    watermarked = not (
+        entitlement.valid and
+        (entitlement.tier in {"pro", "studio"}
+         or entitlement.has("watermark_removal"))
+    )
+
+    out_dir = os.path.join(FILMS_DIR, project_id)
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"delivery-{project_id}.zip")
+    result = _pkg.build_delivery_bundle(
+        proj, FILMS_DIR, out_path,
+        characters=characters,
+        entitlement_tier=entitlement.tier,
+        watermarked=watermarked,
+    )
+    return {
+        "download_url": f"/static/films/{project_id}/{os.path.basename(out_path)}",
+        "size_bytes": result.size_bytes,
+        "included_files": result.included_files,
+        "warning": result.warning,
+        "watermarked": watermarked,
+    }
+
+
+@app.get("/api/v1/films/{project_id}/export")
+async def film_export(project_id: str):
+    """Zip the whole project directory (artifacts, logs, meta) into a
+    portable ``.studioproj`` bundle streamed back to the caller. This
+    is the file to hand to a collaborator so they can import it on
+    another machine."""
+    from fastapi.responses import FileResponse
+    from filmmaker import projects as _fp, packaging as _pkg
+    try:
+        proj = _fp.load(OUTPUT_DIR, project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    out_dir = os.path.join(FILMS_DIR, project_id)
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir,
+                            f"{project_id}{_pkg.EXPORT_SUFFIX}")
+    _pkg.build_project_export(proj, out_path)
+    return FileResponse(
+        out_path,
+        media_type="application/zip",
+        filename=os.path.basename(out_path),
+    )
+
+
+@app.post("/api/v1/films/import")
+async def film_import(file: UploadFile = File(...),
+                      title_override: Optional[str] = None):
+    """Materialize a project from an uploaded ``.studioproj`` bundle.
+    A fresh project id is minted so importing the same file twice
+    produces two independent copies — no clobbering."""
+    from filmmaker import projects as _fp, packaging as _pkg
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(suffix=_pkg.EXPORT_SUFFIX,
+                               dir=os.path.join(FILMS_DIR))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        try:
+            result = _pkg.import_project(
+                tmp, _fp.films_root(OUTPUT_DIR),
+                title_override=title_override,
+            )
+        except (ValueError, FileNotFoundError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    proj = _fp.load(OUTPUT_DIR, result.project_id)
+    return {
+        "project": _film_meta_dict(proj),
+        "state": _film_state_dict(proj),
+        "source_project_id": result.source_project_id,
+    }
+
+
 @app.post("/api/v1/films/{project_id}/gates")
 async def film_set_gates(project_id: str, req: FilmSetGatesRequest):
     from filmmaker import projects as _fp

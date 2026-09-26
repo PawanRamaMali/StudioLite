@@ -666,7 +666,7 @@ function ProjectView({
             <Sparkles className="w-5 h-5 text-indigo-400" />
             <div className="flex-1">
               <div className="text-sm font-semibold text-zinc-100">Ready when you are</div>
-              <div className="text-xs text-zinc-400 mt-0.5">Start the pipeline to produce your film. All 12 stages will run end to end.</div>
+              <div className="text-xs text-zinc-400 mt-0.5">Start the pipeline to produce your film. All {stages.length} stages will run end to end.</div>
             </div>
             {state.last_error && (
               <Badge className="bg-red-500/15 text-red-300 border-red-500/30">error on last run</Badge>

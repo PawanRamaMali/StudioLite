@@ -3023,10 +3023,15 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
 
 def _chat(project: Project, stage_key: str, system: str, user: str, *,
           want_json: bool, temperature: float, max_tokens: int = 4096) -> str:
-    """Single blocking chat call. Retries ONCE on LLMError with a bigger
-    max_tokens budget and slightly cooler temperature so the same truncation
-    or parse issue doesn't recur - Ollama occasionally cuts a JSON response
-    mid-array when the model runs long, and a modest retry usually clears it.
+    """Blocking chat call with two layers of retry for JSON stages.
+
+    Layer 1 on LLMError: larger max_tokens + lower temperature. Handles
+    Ollama's occasional mid-array truncation on long responses.
+
+    Layer 2 when want_json=True and the response is not parseable: retry
+    with a stricter system prompt that forbids prose entirely. Handles
+    the case where the model (e.g. a coder or task-tuned checkpoint) just
+    writes free-form text ignoring the JSON instruction.
     """
     cfg = project.meta.config
     per = cfg.per_stage.get(stage_key, {}) if cfg.per_stage else {}
@@ -3034,22 +3039,43 @@ def _chat(project: Project, stage_key: str, system: str, user: str, *,
     model = per.get("llm_model") or cfg.llm_model
     host = per.get("llm_host") or cfg.llm_host
 
-    try:
+    def _call(sys_msg: str, temp: float, budget: int) -> str:
         return llm.chat(
-            system=system, user=user,
+            system=sys_msg, user=user,
             backend=backend, model=model, host=host,
-            temperature=temperature, max_tokens=max_tokens,
+            temperature=temp, max_tokens=budget,
             want_json=want_json,
         )
+
+    def _parses(text: str) -> bool:
+        if not want_json:
+            return True
+        try:
+            llm.parse_json(text)
+            return True
+        except llm.LLMError:
+            return False
+
+    try:
+        raw = _call(system, temperature, max_tokens)
     except llm.LLMError as e:
         logger.warning("LLM call for %s failed (%s); retrying with larger budget", stage_key, e)
-        return llm.chat(
-            system=system, user=user,
-            backend=backend, model=model, host=host,
-            temperature=max(0.1, temperature - 0.2),
-            max_tokens=int(max_tokens * 1.5),
-            want_json=want_json,
-        )
+        raw = _call(system, max(0.1, temperature - 0.2), int(max_tokens * 1.5))
+
+    if _parses(raw):
+        return raw
+
+    # Model produced prose when we asked for JSON. Retry with a stricter
+    # system prompt that forbids prose entirely; this rescues coder / task-
+    # tuned models that ignore soft JSON instructions.
+    logger.warning("LLM %s produced no JSON; retrying with strict prompt", stage_key)
+    strict = (
+        system.rstrip()
+        + "\n\nCRITICAL: respond with a single valid JSON object and nothing else. "
+        "No prose, no explanation, no code fences. The very first character of "
+        "your response must be `{`. If you cannot comply, respond with `{}`."
+    )
+    return _call(strict, max(0.1, temperature - 0.2), int(max_tokens * 1.2))
 
 
 # ---------------------------------------------------------------------------

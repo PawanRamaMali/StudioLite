@@ -179,3 +179,48 @@ def test_parse_json_survives_fenced_output():
 
 def test_parse_json_repairs_truncated_output():
     assert llm.parse_json('{"a": 1, "b": [1, 2') == {"a": 1, "b": [1, 2]}
+
+
+def test_parse_json_rejects_pure_prose():
+    """A coder or task-tuned model that ignores the JSON instruction and
+    writes free-form prose should raise, not silently return {}."""
+    with pytest.raises(llm.LLMError):
+        llm.parse_json("The provided text is a repetitive pattern of colors.")
+
+
+# ---------- agents._chat strict-JSON retry ---------------------------------
+
+def test_agents_chat_retries_with_strict_prompt_when_prose_returned():
+    """When want_json=True and the model returns prose, _chat should
+    retry with a stricter system prompt rather than propagate the error."""
+    from filmmaker import agents
+    from filmmaker.project import Project, ProjectConfig, ProjectMeta
+
+    class _StubProject:
+        def __init__(self):
+            self.meta = ProjectMeta(id="p", title="t", brief="b",
+                                     config=ProjectConfig(llm_backend="ollama",
+                                                          llm_model="stub"),
+                                     created_at=0.0, updated_at=0.0)
+
+    calls = []
+
+    def fake_chat(*, system, user, backend, model, host,
+                   temperature, max_tokens, want_json):
+        calls.append({"system": system, "temperature": temperature,
+                       "max_tokens": max_tokens})
+        # First call: prose. Retry call (has strict marker): JSON.
+        if "CRITICAL" in system:
+            return '{"ok": true}'
+        return "here is some prose, no json at all"
+
+    with patch("filmmaker.agents.llm.chat", side_effect=fake_chat):
+        out = agents._chat(_StubProject(), "producer",
+                            system="you are the producer",
+                            user="do the thing",
+                            want_json=True, temperature=0.7)
+
+    assert out == '{"ok": true}'
+    assert len(calls) == 2
+    assert "CRITICAL" in calls[1]["system"]
+    assert calls[1]["temperature"] < calls[0]["temperature"]

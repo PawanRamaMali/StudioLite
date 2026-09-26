@@ -112,38 +112,7 @@ def backend_status() -> Dict[str, Dict[str, Any]]:
     return status
 
 
-# ---------------------------------------------------------------------------
-# JSON parsing (shared)
-# ---------------------------------------------------------------------------
-
-def parse_json(text: str) -> Dict[str, Any]:
-    """Robust-ish JSON extractor for messy LLM output. Raises LLMError on failure.
-
-    Attempts, in order: direct parse, first {..} block by brace matching,
-    a truncation repair (close hanging strings + brackets). Ollama occasionally
-    stops mid-object when the model runs long; the repair lets us salvage the
-    complete portion instead of nuking the whole stage."""
-    stripped = _strip_fence(text).strip()
-    # 1. Direct parse.
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        pass
-    # 2. Grab the first {...} block by brace matching.
-    obj = _extract_first_json_object(stripped)
-    if obj is not None:
-        try:
-            return json.loads(obj)
-        except json.JSONDecodeError:
-            pass
-    # 3. Try to repair a truncated response.
-    repaired = _repair_truncated_json(stripped)
-    if repaired:
-        try:
-            return json.loads(repaired)
-        except json.JSONDecodeError:
-            pass
-    raise LLMError(f"No JSON object found in LLM output. Snippet:\n{stripped[:400]}")
+# parse_json is defined below with the rest of the JSON helpers.
 
 
 # ---------------------------------------------------------------------------

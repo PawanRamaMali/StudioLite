@@ -1,20 +1,32 @@
 # StudioLite
 
+[![CI](https://github.com/PawanRamaMali/StudioLite/actions/workflows/ci.yml/badge.svg)](https://github.com/PawanRamaMali/StudioLite/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Next.js 16](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
 [![Runs locally](https://img.shields.io/badge/models-local%20%2F%20offline-brightgreen.svg)](#getting-started)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
 
-**StudioLite** is a local-first, open-source AI media studio. Generate and edit
-video, create multi-scene AI movies, produce short-form reels, generate and
-retouch images, transcribe audio / video / screen, and publish — all running on
-**your own machine** with local models. No cloud account required.
+## About
 
-It ships with **two front-ends** that share the same Python engines:
+**StudioLite** is a local-first, open-source AI film studio. Write a one-
+paragraph brief and it runs an 18-stage pipeline — script → beats →
+storyboard → keyframes → motion → voice → music → cut — into a finished
+short film on your own hardware. When you'd rather work directly, it
+also ships an NLE-style timeline editor, a Media Library with semantic
+search and duplicate detection, an image studio, a real-time
+transcription suite, and every stage's output as a versioned artifact
+you can edit and re-render.
 
-- **Next.js** (modern) — a fast, focused UI for creative/GPU workflows: video
-  generation, Story Mode, Images Studio, Characters, and the transcription suite.
+Everything runs offline against local models — Ollama / Gemini / Groq /
+Hugging Face for text, SDXL family for stills, Wan 2.2 / HunyuanVideo /
+LTX-Video / AnimateDiff for motion, IndexTTS-2 / XTTS / Piper for voice.
+Cloud accounts are never required.
+
+Two front-ends share the same Python engines:
+
+- **Next.js** (modern) — Film Studio, Timeline, Library, Images, video
+  generation, Story Mode, Characters, transcription, licensing.
 - **Streamlit** (legacy) — the complete ~20-tool toolbox.
 
 ## Screenshots
@@ -33,22 +45,27 @@ It ships with **two front-ends** that share the same Python engines:
 
 | Tool | Description |
 |------|-------------|
-| **Remove Watermark** | AI-powered inpainting to remove watermarks from videos, PDFs, and images |
-| **Trim / Cut** | Cut portions of video with preview |
-| **Add Image Overlay** | Add logos, watermarks, or images at custom positions |
-| **Change Speed** | Speed up or slow down videos (0.25x - 4x) with audio sync |
-| **Merge Videos** | Combine multiple videos into one |
-| **Extract Frame** | Export single frames as PNG images |
-| **Export Video** | Convert format (MP4, WebM, AVI, MOV, MKV), quality, and resolution |
-| **Transcribe** | Extract text from audio/video or microphone recording using WhisperX / faster-whisper (SRT, VTT, JSON, TSV) |
-| **Live Transcribe** | Real-time speech-to-text from your microphone or desktop audio in the browser |
-| **Screen Transcribe** | Continuous on-screen OCR (RapidOCR) with optional LLM clean-up into Markdown / DOCX / PDF |
-| **Video Transcribe** | Offline audio transcription plus screen-OCR for uploaded video files |
-| **Images Studio** | Local SDXL image generation, editing, variation, upscaling, and background removal |
-| **View & Publish** | Preview video and upload directly to YouTube via OAuth 2.0 |
-| **ReelForge** | AI-powered short video generation (LLM script + image gen + TTS + subtitles + background music) |
-| **Video Generator** | Real AI video generation using diffusion models (Wan 2.1/2.2, HunyuanVideo, LTX-Video, CogVideoX) |
-| **Story Mode** | Multi-scene AI movie creator with storyboard editor, per-scene video generation, narration, and music |
+| **Film Studio** | 18-stage multi-agent pipeline that turns a one-paragraph brief into a finished short film. Producer → Screenwriter → Cinematographer → Shot Generator → Motion → Voice → Composer → Editor, each stage a versioned artifact you can edit and re-render. Five starter templates (short story, explainer, teaser trailer, product demo, draft scene). |
+| **Timeline Editor** | NLE-style multi-clip timeline. Trim in/out per clip, reorder, export with H.264/H.265/ProRes codec presets at high / medium / low quality. Free-tier watermark; removed under a Pro/Studio license. |
+| **Batch Render** | Queue N timeline exports as one batch; individual jobs still cancellable and retryable, one rollup to watch. |
+| **Media Library** | Scan folders for videos + images. Perceptual-hash dedupe, semantic search (CLIP embeddings + clusters), speech-to-text index with FTS5 full-text search, batch re-encode of legacy codecs (mpeg2/wmv/rmvb/dv → h264), per-video enhance recommendations. |
+| **Video Generator** | Real AI video generation using diffusion models (Wan 2.1/2.2, HunyuanVideo, LTX-Video, CogVideoX). |
+| **Story Mode** | Multi-scene AI movie creator with storyboard editor, per-scene video generation, narration, and music. |
+| **Images Studio** | Local SDXL image generation, editing, variation, upscaling, and background removal. Adaptive OOM-halving batch sizing so a mid-render VRAM spike halves the batch instead of crashing. |
+| **Characters** | Portrait generation (front / three-quarter / side / back) with IP-Adapter reference for consistency across shots. |
+| **Video Editor** | Trim, merge, compress, rotate, stabilize, color-correct, region-effect, picture-in-picture, background music, speed, GIF, thumbnail. |
+| **Keyframes** | Alpha-blend keyframe animation with easing curves (linear, ease-in / out / in-out, bounce). |
+| **Upscale** | Real-ESRGAN 2x / 4x neural upscale for finished output. |
+| **Transcribe** | WhisperX / faster-whisper on files, live mic, live desktop audio, and live screen OCR (RapidOCR). Optional LLM clean-up into Markdown / DOCX / PDF. |
+| **Audio Studio** | Text-to-speech (Piper, KittenTTS, XTTS-v2, IndexTTS-2), SFX generation, voice isolation, normalize. |
+| **Delivery Packaging** | One-click zip of a finished project: final mixed cut, credits, and a manifest with render metadata. |
+| **Project Export / Import** | Portable `.studioproj` bundle for moving a project between machines. Zip-slip guarded on import; a fresh id is minted so importing twice never clobbers. |
+| **Jobs Panel** | Live progress monitor. Universal cancel and retry for every background runner. SQLite-persisted so a restart never loses in-flight state. |
+| **Licensing** | Offline Ed25519 signed license verification with tier (free / pro / studio), feature gating, and grace-period support. |
+| **ReelForge** | AI-powered short-video generator (LLM script + image gen + TTS + subtitles + background music). |
+| **YouTube Publish** | Preview video and upload directly via OAuth 2.0. |
+| **Opt-in Telemetry** | Local-only diagnostic bundle you export by hand; nothing ships without consent. |
+| **Windows Installer** | Source-based IExpress setup with optional Authenticode signing and a JSON release manifest. |
 
 ---
 
@@ -76,24 +93,29 @@ cd web && npm install && npm run dev   # Next.js dev server on :3000
 
 | Feature | Streamlit | Next.js |
 |---------|:---------:|:-------:|
+| Film Studio (18-stage multi-agent pipeline) | — | ✓ |
+| Timeline Editor (multi-clip, codec presets) | — | ✓ |
+| Batch Render | — | ✓ (API) |
+| Media Library (scan, dedupe, semantic search, STT index, re-encode) | — | ✓ |
 | Video Generator (T2V / I2V) | ✓ | ✓ |
 | Story Mode (multi-scene movies) | ✓ | ✓ |
 | Characters (portrait + IP-Adapter) | ✓ | ✓ |
-| Audio Studio (TTS) | ✓ | ✓ (TTS only) |
-| Audio Studio (SFX, voice isolation) | ✓ | stub — falls back to Streamlit |
 | Images Studio (T2I / edit / inpaint / upscale / bg-remove) | — | ✓ |
-| Jobs panel (live progress monitor) | — | ✓ |
-| Video Editor (region edits, filters) | ✓ | stub — punts to Streamlit |
-| Upscale Video | ✓ | stub (UI only, no handler) |
-| Keyframes | ✓ | stub (UI only, no handler) |
-| Trim / Cut | ✓ | API exists, no UI |
-| Merge Videos | ✓ | API exists, no UI |
+| Audio Studio (TTS) | ✓ | ✓ |
+| Audio Studio (SFX, voice isolation) | ✓ | stub — falls back to Streamlit |
+| Video Editor (utilities: trim, merge, compress, rotate, stabilize, color, PiP, music, speed, GIF, thumbnail) | ✓ | ✓ |
+| Keyframes (alpha-blend + easing) | ✓ | ✓ |
+| Upscale Video (Real-ESRGAN) | ✓ | ✓ |
+| Delivery Packaging + Project Export / Import | — | ✓ (API) |
+| Jobs Panel (live progress, cancel, retry) | — | ✓ |
+| Licensing (offline Ed25519, tier + feature gating) | — | ✓ |
+| Live / Screen / Video Transcribe | ✓ | ✓ |
 | Remove Watermark | ✓ | — |
 | Add Image Overlay | ✓ | — |
-| Change Speed | ✓ | — |
-| Extract Frame | ✓ | — |
-| Export Video (codec / resolution) | ✓ | — |
-| Transcribe (WhisperX) | ✓ | — |
+| Change Speed | ✓ | ✓ (as utility) |
+| Extract Frame | ✓ | ✓ (as thumbnail) |
+| Export Video (codec / resolution) | ✓ | ✓ (via Timeline) |
+| Transcribe (WhisperX) | ✓ | ✓ |
 | View & Publish (YouTube OAuth) | ✓ | — |
 | Motion Brush | ✓ | — |
 | ReelForge (LLM-driven short videos) | ✓ | — |
@@ -392,24 +414,42 @@ StudioLite/
 ├── youtube_uploader.py         # YouTube OAuth 2.0 upload
 ├── config.example.json         # Config template (copy to config.json)
 ├── requirements.txt            # Python dependencies
-├── check_models.py             # Model download status checker
 │
-├── mpv2/                       # Core modules
-│   ├── config.py               # Configuration getters
-│   ├── utils.py                # Utility functions
-│   ├── audio_mixer.py          # Background music mixer with auto-ducking
-│   ├── llm_provider.py         # LLM abstraction (llama.cpp/Ollama)
-│   └── classes/                # TTS wrappers (Piper, KittenTTS) + factory
+├── filmmaker/                  # Film Studio pipeline
+│   ├── project.py              # On-disk project model (versioned artifacts)
+│   ├── project_store.py        # SQLite index + artifact version history
+│   ├── job_store.py            # Persistent job engine
+│   ├── stages.py               # 18-stage graph definition
+│   ├── agents.py               # Per-stage agent implementations
+│   ├── orchestrator.py         # Runs the pipeline, honors gates + pause
+│   ├── llm.py                  # LLM backends (Ollama, Gemini, Groq, HF)
+│   ├── film_templates.py       # Starter templates
+│   ├── licensing.py            # Offline Ed25519 license verification
+│   ├── packaging.py            # Delivery zip + portable .studioproj export/import
+│   └── telemetry.py            # Opt-in local diagnostic events
 │
+├── library/                    # Media Library subsystem
+│   ├── store.py                # SQLite + FTS5 index
+│   ├── scanner.py              # Folder walker
+│   ├── embeddings.py           # CLIP embeddings for semantic search
+│   ├── dedupe.py + phash.py    # Perceptual-hash duplicate finder
+│   ├── clustering.py           # Semantic clusters
+│   ├── transcribe.py           # Whisper STT index
+│   ├── reencode.py             # Legacy-codec batch re-encode
+│   └── enhance.py              # Per-video enhance recommendations
+│
+├── api/routers/                # Extracted FastAPI routers
+│   ├── health.py, licensing.py, telemetry.py
+│   └── env_vars.py, models_inventory.py
+│
+├── mpv2/                       # Core modules (TTS wrappers, LLM abstraction)
 ├── web/                        # Next.js front-end (App Router + Tailwind)
-│   ├── app/                    # Pages & layout
-│   ├── components/panels/      # One component per tool panel
-│   └── lib/                    # API client + Zustand store
-│
+├── packaging/windows/          # IExpress setup + optional Authenticode signing
+├── tests/                      # pytest suite (~160 tests)
 ├── docs/screenshots/           # README screenshots
 ├── fonts/                      # Subtitle fonts (Anton, OFL 1.1)
 ├── models/                     # GGUF & SDXL models (git-ignored)
-└── music/                      # Background music files (git-ignored)
+└── .mp/                        # Runtime output — films, uploads, logs (git-ignored)
 ```
 
 > **Configuration:** copy `config.example.json` to `config.json` (git-ignored)

@@ -58,7 +58,7 @@ export default function ImagesPanel() {
   const [strength, setStrength] = useState(0.75);
   const [upscaleFactor, setUpscaleFactor] = useState(2);
   const [upscaleMethod, setUpscaleMethod] = useState<"lanczos" | "realesrgan">("lanczos");
-  // Edit technique: auto/qwen_edit/instruct/redraw — see imagegen.image_to_image docstring.
+  // Edit technique: auto/qwen_edit/instruct/redraw - see imagegen.image_to_image docstring.
   const [editTechnique, setEditTechnique] = useState<"auto" | "qwen_edit" | "instruct" | "redraw">("auto");
   const [imageGuidance, setImageGuidance] = useState(1.5);
 
@@ -88,7 +88,7 @@ export default function ImagesPanel() {
     getImagesCatalog().then(c => {
       setCatalog(c);
       // Pre-fill negative prompt with the style-aware default the FIRST time
-      // we see the catalog — only if user hasn't typed anything yet.
+      // we see the catalog - only if user hasn't typed anything yet.
       if (c?.default_negatives && !negativePrompt) {
         setNegativePrompt(c.default_negatives[style] || c.default_negatives._base || "");
       }
@@ -98,7 +98,7 @@ export default function ImagesPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // When style changes, swap the negative — but only if it currently matches
+  // When style changes, swap the negative - but only if it currently matches
   // one of our defaults. If the user has customized it, leave it alone.
   useEffect(() => {
     if (!catalog?.default_negatives) return;
@@ -118,7 +118,7 @@ export default function ImagesPanel() {
 
   // SDXL Turbo settings (8 steps / guidance 0) only apply to plain Generate.
   // Edit / variation / inpaint REQUIRE full 30-step + 7.5-guidance regardless
-  // of the chosen base model — InstructPix2Pix and SDXL Img2Img produce
+  // of the chosen base model - InstructPix2Pix and SDXL Img2Img produce
   // unchanged output with Turbo's settings.
   useEffect(() => {
     if (provider !== "sdxl") return;
@@ -165,7 +165,7 @@ export default function ImagesPanel() {
         setNegativePrompt(out.negative);
       }
     } catch (e: unknown) {
-      setError((e as Error)?.message || "Enhance failed — is the LLM backend running?");
+      setError((e as Error)?.message || "Enhance failed - is the LLM backend running?");
     } finally {
       setEnhancing(false);
     }
@@ -185,7 +185,7 @@ export default function ImagesPanel() {
       // mode=negative leaves the positive untouched; only negative is rewritten.
       if (out.negative) setNegativePrompt(out.negative);
     } catch (e: unknown) {
-      setError((e as Error)?.message || "Enhance failed — is the LLM backend running?");
+      setError((e as Error)?.message || "Enhance failed - is the LLM backend running?");
     } finally {
       setEnhancing(false);
     }
@@ -299,7 +299,7 @@ export default function ImagesPanel() {
       <div className="mb-8">
         <h1 className="text-3xl font-bold gradient-text">Images Studio</h1>
         <p className="text-zinc-400 mt-1">
-          Generate, edit, vary, upscale and clean up images — local SDXL{catalog?.providers?.find(p => p.id === "fooocus") ? ", Fooocus" : ""}{catalog?.providers?.find(p => p.id === "nanobanana2") ? ", Gemini" : ""}.
+          Generate, edit, vary, upscale and clean up images - local SDXL{catalog?.providers?.find(p => p.id === "fooocus") ? ", Fooocus" : ""}{catalog?.providers?.find(p => p.id === "nanobanana2") ? ", Gemini" : ""}.
         </p>
       </div>
 
@@ -307,7 +307,7 @@ export default function ImagesPanel() {
         <div className="mb-6 flex items-start gap-3 rounded-lg border border-yellow-500/30 bg-yellow-500/5 p-4 text-sm">
           <Cpu className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
           <div>
-            <p className="font-medium text-yellow-300">Local SDXL runs on CPU — expect 5-15 min per image.</p>
+            <p className="font-medium text-yellow-300">Local SDXL runs on CPU - expect 5-15 min per image.</p>
             <p className="text-yellow-200/80 mt-1">
               No NVIDIA GPU detected, so SDXL falls back to fp32 CPU inference. Basic T2I, Img2Img, Inpaint and Variation all still work; the Qwen edit technique is unavailable. Upscaling with Lanczos and background removal are fast either way. Configure Fooocus or Gemini in Settings for cloud-hosted generation.
             </p>
@@ -589,7 +589,7 @@ export default function ImagesPanel() {
           <Button size="lg" className="w-full" onClick={handleGenerate}
             disabled={busy || (needsPrompt && !prompt.trim()) || (needsUpload && !uploadedPath)}>
             {busy ? <Loader2 className="w-5 h-5 mr-2 animate-spin" /> : <Sparkles className="w-5 h-5 mr-2" />}
-            {busy ? `${progress}% — ${statusMsg.slice(0, 40) || "Working"}` : `Run ${MODES.find(m => m.id === mode)?.label}`}
+            {busy ? `${progress}% - ${statusMsg.slice(0, 40) || "Working"}` : `Run ${MODES.find(m => m.id === mode)?.label}`}
           </Button>
 
           {error ? <div className="text-xs text-red-400 bg-red-900/20 border border-red-800 rounded p-2">{error}</div> : null}

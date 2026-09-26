@@ -53,7 +53,7 @@ class RunManager:
         """Kick off (or resume) the pipeline for the given project.
 
         Returns False if a run is already active. When `only_stale` is True,
-        already-`done` stages are left alone — used after an artifact edit
+        already-`done` stages are left alone - used after an artifact edit
         to re-run just the affected downstream chain.
         """
         async with self._lock:
@@ -150,7 +150,7 @@ class RunManager:
             self._emit(project, {"type": "run_failed", "error": str(e), "traceback": tb[-2000:]})
 
     async def _run_one(self, project: Project, spec: StageSpec) -> None:
-        # Snapshot the prior artifact BEFORE we mark the stage running — a
+        # Snapshot the prior artifact BEFORE we mark the stage running - a
         # re-run that then errors shouldn't retroactively "break" a stage
         # whose good output is still sitting on disk from the previous pass.
         had_prior_artifact = project.has_artifact(spec.key)
@@ -208,7 +208,7 @@ class RunManager:
             })
         except Exception as e:
             # If a prior successful artifact still exists, don't destroy the
-            # state that reflects it — mark the stage `needs_review` so the
+            # state that reflects it - mark the stage `needs_review` so the
             # user can either accept the old artifact or manually retry. This
             # keeps a flaky re-run from turning a completed film into a broken
             # one, but still surfaces the failure prominently in the panel.
@@ -238,5 +238,5 @@ class RunManager:
         self._broadcast(project.project_id, event)
 
 
-# Global singleton — one manager per FastAPI process.
+# Global singleton - one manager per FastAPI process.
 manager = RunManager()

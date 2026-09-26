@@ -91,7 +91,7 @@ def main() -> int:
                 negative_prompt="low quality, distorted, deformed, watermark",
             )
         except torch.cuda.OutOfMemoryError:
-            # Free everything and retry with the sequential offload — much
+            # Free everything and retry with the sequential offload - much
             # slower per step but survives at the memory boundary.
             del pipe
             torch.cuda.empty_cache()

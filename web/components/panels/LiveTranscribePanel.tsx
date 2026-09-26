@@ -185,7 +185,7 @@ export default function LiveTranscribePanel() {
     try {
       // For the meter we deliberately turn OFF Chrome's default voice
       // processing (echo cancellation, noise suppression, auto gain). A
-      // "test mic" should show the raw signal — with NS on, a quiet room
+      // "test mic" should show the raw signal - with NS on, a quiet room
       // can be driven to true silence, and with AEC on the mic can be
       // canceled when Chrome thinks it hears its own output.
       const audioConstraints: MediaTrackConstraints = {
@@ -207,7 +207,7 @@ export default function LiveTranscribePanel() {
       // Browsers set MediaStreamTrack.muted = true when the OS stops delivering
       // audio (e.g. Windows Privacy denies microphone access to the app, or
       // the physical mic mute switch is engaged). That's a real, actionable
-      // signal — surface it up front rather than waiting the 1.5s silence probe.
+      // signal - surface it up front rather than waiting the 1.5s silence probe.
       if (track && track.muted) {
         setErrorMsg(
           `The mic track "${track.label || "(unknown)"}" is muted at the OS level. ` +
@@ -230,7 +230,7 @@ export default function LiveTranscribePanel() {
       // "Barely any signal" hint no matter how loud the mic actually is.
       console.log("[mic-meter] AudioContext state before resume:", ctx.state);
       if (ctx.state === "suspended") {
-        try { await ctx.resume(); } catch { /* ignore — analyser will report 0 */ }
+        try { await ctx.resume(); } catch { /* ignore - analyser will report 0 */ }
       }
       console.log("[mic-meter] AudioContext state after resume:", ctx.state,
                     "sampleRate:", ctx.sampleRate);
@@ -255,12 +255,12 @@ export default function LiveTranscribePanel() {
         if (!allBaseline) sawNonSilence = true;
         // After ~90 frames (~1.5s @ 60fps), if EVERY sample is still the
         // 128 baseline, the mic isn't handing audio to the audio graph.
-        // That's a very different failure from "quiet room" — surface it.
+        // That's a very different failure from "quiet room" - surface it.
         frameCount++;
         if (frameCount === 90 && !sawNonSilence) {
           setErrorMsg(
             "The audio graph is receiving only silence frames from this mic. " +
-            "Windows may not be routing the input to Chrome — check Windows " +
+            "Windows may not be routing the input to Chrome - check Windows " +
             "Settings › System › Sound › Input, and Chrome's Site Settings › " +
             "Microphone for this site. Console (F12) has more details."
           );
@@ -388,7 +388,7 @@ export default function LiveTranscribePanel() {
       // while the second (with permissions already granted) works. Explicit
       // resume here is the fix.
       if (ctx.state === "suspended") {
-        try { await ctx.resume(); } catch { /* ignore — worklet still connects */ }
+        try { await ctx.resume(); } catch { /* ignore - worklet still connects */ }
       }
 
       const workletNode = new AudioWorkletNode(ctx, "pcm-processor", {
@@ -400,7 +400,7 @@ export default function LiveTranscribePanel() {
       });
       workletNodeRef.current = workletNode;
 
-      // 3. Open WebSocket, with one retry — the very first connect after
+      // 3. Open WebSocket, with one retry - the very first connect after
       // cold-start sometimes fires `onerror` before the server finishes
       // registering the route, and the second attempt then works instantly.
       const session = `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -586,7 +586,7 @@ export default function LiveTranscribePanel() {
 
   // Reset the panel back to a fresh start: drop every previous block, the
   // current live transcript, cached download links, and any lingering error
-  // — leaves the audio-source and model selections intact.
+  // - leaves the audio-source and model selections intact.
   const clearAll = useCallback(() => {
     setFinals([]);
     setPartial(null);
@@ -695,7 +695,7 @@ export default function LiveTranscribePanel() {
                     size="sm"
                     onClick={toggleMeter}
                     disabled={recording || busy}
-                    title="Open the mic and watch the level — confirm it picks up your voice before recording"
+                    title="Open the mic and watch the level - confirm it picks up your voice before recording"
                   >
                     <Mic className="w-3.5 h-3.5 mr-1.5" />
                     {metering ? "Stop test" : "Test mic"}
@@ -716,10 +716,10 @@ export default function LiveTranscribePanel() {
                 {metering && (
                   <p className="text-[10px] text-zinc-500 leading-relaxed">
                     {micPeak * 300 < 8
-                      ? "Barely any signal — speak up, pick another device above, or raise the level in Windows Sound settings."
+                      ? "Barely any signal - speak up, pick another device above, or raise the level in Windows Sound settings."
                       : micPeak * 300 > 85
-                      ? "Loud — the mic is working (watch for clipping)."
-                      : "Good — the mic is picking up your voice. You can Start now."}
+                      ? "Loud - the mic is working (watch for clipping)."
+                      : "Good - the mic is picking up your voice. You can Start now."}
                   </p>
                 )}
               </div>

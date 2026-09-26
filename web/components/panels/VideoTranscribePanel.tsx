@@ -188,7 +188,7 @@ export default function VideoTranscribePanel() {
             setErrorMsg(data.error || data.message || "Transcription failed.");
           }
         } catch {
-          // Transient poll error — keep retrying.
+          // Transient poll error - keep retrying.
         }
       }, 1500);
     } catch (e) {

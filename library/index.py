@@ -1,6 +1,6 @@
 """Search + cluster orchestration on top of the T2 index.
 
-Kept small — the API router calls these functions instead of touching the
+Kept small - the API router calls these functions instead of touching the
 CLIP runtime or the store directly, so future backend swaps (e.g. SigLIP)
 happen in one place."""
 from __future__ import annotations
@@ -28,7 +28,7 @@ def semantic_search(store: LibraryStore, query: str, *,
                     min_score: float = 0.15) -> List[SearchHit]:
     """Rank all indexed videos against a text query using CLIP cosine similarity.
 
-    Raises `EmbeddingUnavailable` when CLIP can't load — the API layer
+    Raises `EmbeddingUnavailable` when CLIP can't load - the API layer
     turns that into a user-facing "run the embed job first" message."""
     if not query.strip():
         return []
@@ -87,7 +87,7 @@ def build_clusters(store: LibraryStore, *,
 
 
 def stats(store: LibraryStore) -> Dict[str, Any]:
-    """Extended stats — how much of the library is content-indexed."""
+    """Extended stats - how much of the library is content-indexed."""
     base = store.stats()
     ids, matrix = store.load_all_embeddings(dim=_emb.EMBED_DIM)
     base["embedded"] = 0 if matrix is None else int(matrix.shape[0])

@@ -66,7 +66,7 @@ export default function FilmStudioPanel() {
 
   useEffect(() => {
     // loadProjects is an async callback that reduces its setState via await,
-    // but the lint rule can't see through the returned promise — mark it.
+    // but the lint rule can't see through the returned promise - mark it.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadProjects();
     filmListStages().then((r) => setStages(r.stages)).catch(() => { /* soft */ });
@@ -78,7 +78,7 @@ export default function FilmStudioPanel() {
         <div>
           <h1 className="text-3xl font-bold gradient-text">Film Studio</h1>
           <p className="text-zinc-400 mt-1">
-            An orchestrated crew of AI agents — producer to editor — turning your brief into a short film.
+            An orchestrated crew of AI agents - producer to editor - turning your brief into a short film.
           </p>
         </div>
         {activeId && (
@@ -117,7 +117,7 @@ export default function FilmStudioPanel() {
 }
 
 // ---------------------------------------------------------------------------
-// LLM backend catalog — used by the create form's advanced section
+// LLM backend catalog - used by the create form's advanced section
 // ---------------------------------------------------------------------------
 
 const _DEFAULT_MODELS: Record<"ollama" | "gemini" | "groq" | "hf", string> = {
@@ -325,7 +325,7 @@ function ProjectListView({
                       key={b}
                       onClick={() => changeBackend(b)}
                       title={_BACKEND_HELP[b] + (info && !ready
-                        ? ` — not ${b === "ollama" ? "reachable" : "configured"}`
+                        ? ` - not ${b === "ollama" ? "reachable" : "configured"}`
                         : "")}
                       className={`px-2 py-1.5 text-xs rounded border transition-colors ${
                         llmBackend === b
@@ -375,20 +375,20 @@ function ProjectListView({
                   <label className="text-[10px] uppercase tracking-wide text-zinc-500">Image quality preset</label>
                   <select value={quality} onChange={(e) => setQuality(e.target.value as typeof quality)}
                           className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
-                    <option value="draft">draft — fast iteration</option>
-                    <option value="standard">standard — default</option>
-                    <option value="high">high — finishing look</option>
-                    <option value="ultra">ultra — final render</option>
+                    <option value="draft">draft - fast iteration</option>
+                    <option value="standard">standard - default</option>
+                    <option value="high">high - finishing look</option>
+                    <option value="ultra">ultra - final render</option>
                   </select>
                 </div>
                 <div>
                   <label className="text-[10px] uppercase tracking-wide text-zinc-500">SDXL variant</label>
                   <select value={sdxlVariant} onChange={(e) => setSdxlVariant(e.target.value)}
                           className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
-                    <option value="turbo">SDXL Turbo — 1–4 steps (default)</option>
-                    <option value="base">SDXL 1.0 — sharper, 30–50 steps</option>
-                    <option value="z-image-turbo">Z-Image Turbo — Flux-tier at Turbo cost (if cached)</option>
-                    <option value="flux-schnell">Flux Schnell — 4 steps (if cached)</option>
+                    <option value="turbo">SDXL Turbo - 1–4 steps (default)</option>
+                    <option value="base">SDXL 1.0 - sharper, 30–50 steps</option>
+                    <option value="z-image-turbo">Z-Image Turbo - Flux-tier at Turbo cost (if cached)</option>
+                    <option value="flux-schnell">Flux Schnell - 4 steps (if cached)</option>
                   </select>
                 </div>
                 <div>
@@ -434,7 +434,7 @@ function ProjectListView({
                   </select>
                 </div>
                 <p className="text-[10px] text-zinc-500">
-                  Unavailable backends fall through to defaults automatically — nothing you pick here breaks the run.
+                  Unavailable backends fall through to defaults automatically - nothing you pick here breaks the run.
                 </p>
               </div>
             )}
@@ -455,7 +455,7 @@ function ProjectListView({
                   <span className="text-zinc-600 font-mono w-5">{i + 1}.</span>
                   <span>
                     <span className="text-zinc-200 font-medium">{s.label}</span>
-                    <span className="text-zinc-500"> — {s.description}</span>
+                    <span className="text-zinc-500"> - {s.description}</span>
                     {s.gated_by_default && (
                       <Badge className="ml-1.5 text-[9px]">gate</Badge>
                     )}
@@ -526,7 +526,7 @@ function ProjectView({
   // rewrite of /api/*, which does NOT proxy WS upgrades, so live events
   // silently never arrive and the panel stays frozen on whatever the initial
   // fetch showed. Polling every 3 seconds whenever a stage is active keeps
-  // the UI honest even when WS is dead — the refresh is a cheap ~200ms
+  // the UI honest even when WS is dead - the refresh is a cheap ~200ms
   // fetch. When nothing is in flight we don't poll, so idle films are quiet.
   const anyActive = useMemo(() => {
     if (!detail) return false;
@@ -598,7 +598,7 @@ function ProjectView({
         </Card>
       )}
 
-      {/* HERO — the star of the page. Video when there is one; live status when running; call to
+      {/* HERO - the star of the page. Video when there is one; live status when running; call to
           action when idle. Only one of these renders at a time. */}
       {playbackUrl ? (
         <Card className="border-green-500/20 bg-green-500/5 p-0 overflow-hidden">
@@ -675,7 +675,7 @@ function ProjectView({
         </Card>
       )}
 
-      {/* CONTROLS — compact row, primary action prominent, secondary actions as icons. */}
+      {/* CONTROLS - compact row, primary action prominent, secondary actions as icons. */}
       <div className="flex items-center flex-wrap gap-2">
         {!isRunning && !allDone && (
           <Button
@@ -726,7 +726,7 @@ function ProjectView({
         </Card>
       )}
 
-      {/* TIMELINE — horizontal 12-stage grid. Each stage is clickable to open its artifact. */}
+      {/* TIMELINE - horizontal 12-stage grid. Each stage is clickable to open its artifact. */}
       <Card>
         <div className="flex items-center justify-between mb-3">
           <CardTitle className="text-sm">Pipeline</CardTitle>
@@ -790,7 +790,7 @@ function ProjectView({
         </div>
       </Card>
 
-      {/* ARTIFACT DRAWER — modal overlay so it doesn't push the hero out of the way. */}
+      {/* ARTIFACT DRAWER - modal overlay so it doesn't push the hero out of the way. */}
       {selectedStage && (
         <div className="fixed inset-0 z-40 flex" onClick={() => setSelectedStage(null)}>
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
@@ -981,7 +981,7 @@ function ArtifactView({
 
       {!artifact && (
         <div className="text-xs text-zinc-500">
-          {"No artifact yet — this stage hasn't run."}
+          {"No artifact yet - this stage hasn't run."}
         </div>
       )}
     </Card>
@@ -1101,7 +1101,7 @@ function VoiceCastView({ artifact }: { artifact: Record<string, unknown> }) {
           <div className="flex items-center gap-1.5 flex-shrink-0">
             {v.gender && <Badge className="text-[9px] uppercase">{v.gender}</Badge>}
             <code className="text-[10px] font-mono text-indigo-300 bg-indigo-500/10 border border-indigo-500/25 rounded px-1.5 py-0.5">
-              {v.voice || "—"}
+              {v.voice || " - "}
             </code>
           </div>
         </div>
@@ -1188,7 +1188,7 @@ function VoiceActorView({ projectId, artifact }: {
             {l.error && <p className="text-[10px] text-red-300 mt-1">{l.error}</p>}
             {!l.synthesized && !l.error && (
               <p className="text-[10px] text-amber-400 mt-1">
-                silent placeholder — TTS backend unavailable
+                silent placeholder - TTS backend unavailable
               </p>
             )}
           </div>
@@ -1284,7 +1284,7 @@ function SingleTrackView({ projectId, artifact, kind }: {
       )}
       {a.rendered === false && (
         <p className="text-[10px] text-amber-400">
-          Silent placeholder — backend model unavailable.
+          Silent placeholder - backend model unavailable.
         </p>
       )}
       {a.error && <p className="text-[10px] text-red-300">{a.error}</p>}
@@ -1339,7 +1339,7 @@ function SingleVideoView({ projectId, artifact, stageKey }: {
         )}
         {stageKey === "editor" && (
           <>
-            <Meta label="Duration" value={a.duration_sec ? fmtClock(a.duration_sec) : "—"} />
+            <Meta label="Duration" value={a.duration_sec ? fmtClock(a.duration_sec) : " - "} />
             <Meta label="Shots" value={a.shot_count ?? 0} />
           </>
         )}

@@ -8,7 +8,7 @@ Schema is small and boring on purpose. Three tables:
 
   library_roots   watched folders the user added
   videos          one row per discovered file, keyed by abs_path
-  scans           one row per scan job — for progress + history
+  scans           one row per scan job - for progress + history
 
 `videos` carries both the identity fields (sha256, phash_hex) and the
 technical metadata (duration/w/h/codec) so a duplicate lookup or a
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS videos (
     embedded_at  REAL,
     tags_json    TEXT,       -- JSON array of {tag, score}
     cluster_id   INTEGER,    -- populated by the "clusters" job; null until then
-    -- Media kind — "video" (default, back-compat) or "image".
+    -- Media kind - "video" (default, back-compat) or "image".
     media_kind   TEXT DEFAULT 'video',
     -- Speech-to-text index. `transcript_json` holds the raw segment list;
     -- the full-text-search index below joins on video_id for search.
@@ -116,13 +116,13 @@ class Video:
     added_at: float
     scanned_at: Optional[float]
     missing: bool
-    # T2 content-index fields — small, JSON-safe, no raw embedding bytes.
+    # T2 content-index fields - small, JSON-safe, no raw embedding bytes.
     tags: List[Dict[str, Any]] = None  # type: ignore[assignment]
     cluster_id: Optional[int] = None
     embedded: bool = False             # true when an embedding is stored
-    # "video" or "image" — set by the scanner at discovery.
+    # "video" or "image" - set by the scanner at discovery.
     kind: str = "video"
-    # Speech index — True when a transcript is stored. Actual segments
+    # Speech index - True when a transcript is stored. Actual segments
     # live in a dedicated read via `get_transcript()` to keep list rows small.
     transcribed: bool = False
     transcript_language: Optional[str] = None
@@ -130,7 +130,7 @@ class Video:
 
 class LibraryStore:
     """Wraps the library SQLite DB. Thread-safe via a single write lock and
-    connection-per-call for reads. Cheap to construct — one per process is fine."""
+    connection-per-call for reads. Cheap to construct - one per process is fine."""
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -196,7 +196,7 @@ class LibraryStore:
                     )
                     if cur.lastrowid:
                         return int(cur.lastrowid)
-                    # Already existed — fetch id
+                    # Already existed - fetch id
                     row = c.execute("SELECT id FROM library_roots WHERE path=?", (abs_path,)).fetchone()
                     return int(row["id"]) if row else None
             except Exception as e:
@@ -252,7 +252,7 @@ class LibraryStore:
                                 rel_path: str, size_bytes: int, mtime: float,
                                 kind: str = "video") -> Optional[int]:
         """Called by the scanner when it FIRST sees a file. Only touches
-        identity/inode-shape fields — sha256/phash/probe come later.
+        identity/inode-shape fields - sha256/phash/probe come later.
         `kind` is either "video" or "image"; on re-scan we lock it in so
         two different scanners agree."""
         if not self._ok: return None
@@ -269,7 +269,7 @@ class LibraryStore:
                             (root_id, abs_path, rel_path, size_bytes, mtime, now, kind),
                         )
                         return int(cur.lastrowid)
-                    # Existing row — refresh mtime/size/missing but keep hashes if
+                    # Existing row - refresh mtime/size/missing but keep hashes if
                     # the file wasn't rewritten (mtime + size both unchanged).
                     unchanged = row["mtime"] == mtime and row["size_bytes"] == size_bytes
                     if not unchanged:
@@ -475,7 +475,7 @@ class LibraryStore:
     def iter_videos_needing_transcript(self, limit: int = 500,
                                         model_id: Optional[str] = None) -> List[Video]:
         """Videos without a transcript (or transcribed by a different model
-        than `model_id`). Images always skip — no audio to transcribe."""
+        than `model_id`). Images always skip - no audio to transcribe."""
         if not self._ok: return []
         try:
             with self._connect() as c:
@@ -587,7 +587,7 @@ class LibraryStore:
 
     def list_legacy_videos(self, limit: int = 1000) -> List[Video]:
         """Videos whose codec is in the legacy set defined by reencode.py.
-        Only returns rows the probe pass has actually filled in — a null
+        Only returns rows the probe pass has actually filled in - a null
         codec doesn't count as legacy, it counts as un-probed."""
         if not self._ok: return []
         from .reencode import LEGACY_CODECS
@@ -670,7 +670,7 @@ class LibraryStore:
                 ).fetchall():
                     v = _video_from_row(r)
                     if not v.phash_hex: continue
-                    prefix = v.phash_hex[:4]  # 16 bits — plenty of pre-filter
+                    prefix = v.phash_hex[:4]  # 16 bits - plenty of pre-filter
                     buckets.setdefault(prefix, []).append(v)
         except Exception:
             return []

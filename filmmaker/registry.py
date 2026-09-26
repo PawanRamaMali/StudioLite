@@ -1,6 +1,6 @@
 """
 Stage → runnable-function registry. Keeps the orchestrator ignorant of
-agent module structure — adding a stage means one line here.
+agent module structure - adding a stage means one line here.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ RUNNERS: Dict[StageKey, StageRunner] = {
 
 
 # Optional per-stage quality verifiers. A stage without an entry here
-# behaves exactly as before — one shot, no retry loop. Stages that opt
+# behaves exactly as before - one shot, no retry loop. Stages that opt
 # in get up to two extra attempts if the first output fails verification,
 # with the report's hints fed back to the runner as reviewer notes.
 VERIFIERS: Dict[StageKey, Verifier] = {

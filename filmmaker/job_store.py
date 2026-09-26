@@ -108,7 +108,7 @@ class PersistentJobStore:
     subset of dict methods the API surface uses.
 
     The store is **not** meant to be a thread-safe general-purpose dict
-    — it's meant to be a drop-in replacement for the specific access
+- it's meant to be a drop-in replacement for the specific access
     patterns already in api_server.py. Callers protect their own
     read-modify-write cycles with the module-level ``_jobs_lock``
     they had before this class existed."""
@@ -204,7 +204,7 @@ class PersistentJobStore:
         self[job_id] = job
 
     def clear(self) -> None:
-        """Test-only reset. Not part of the API surface — the app never
+        """Test-only reset. Not part of the API surface - the app never
         wipes its own job table at runtime."""
         self._mem.clear()
         if self._conn is not None:

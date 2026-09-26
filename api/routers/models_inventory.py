@@ -5,7 +5,7 @@ job that's targeting each one. Split off from ``api_server.py`` because
 this is the piece a fresh UI hits first (Home / Settings) and it needs
 to be fast and dependency-light.
 
-Job state lives in ``api_server.jobs`` — imported lazily inside the
+Job state lives in ``api_server.jobs`` - imported lazily inside the
 handler so this module can be imported before ``api_server`` finishes
 initializing (fixes the router-mount order problem the extraction
 otherwise creates)."""

@@ -30,7 +30,7 @@ DEFAULT_MODEL_SIZE = os.environ.get("STUDIOLITE_LIBRARY_WHISPER_MODEL", "tiny")
 
 class TranscribeJob(threading.Thread):
     """Transcribe every un-indexed library video sequentially. Cheap models
-    (`tiny`, `base`) are the sweet spot for library indexing — the goal is
+    (`tiny`, `base`) are the sweet spot for library indexing - the goal is
     "did anyone say X" rather than a broadcast-quality transcript."""
 
     def __init__(self, store: LibraryStore,
@@ -86,7 +86,7 @@ class TranscribeJob(threading.Thread):
         )
         self.counts["total"] = len(remaining)
         if not remaining:
-            self._push("Nothing to transcribe — everything is already indexed.",
+            self._push("Nothing to transcribe - everything is already indexed.",
                        1.0, "completed")
             return
 
@@ -134,7 +134,7 @@ class TranscribeJob(threading.Thread):
             segments = result.get("segments") or []
             text = str(result.get("text") or "").strip()
             if not text and not segments:
-                # No speech at all — record an empty transcript so we don't
+                # No speech at all - record an empty transcript so we don't
                 # keep re-processing this file forever.
                 payload = {"language": result.get("language"), "text": "",
                            "segments": [], "empty": True}

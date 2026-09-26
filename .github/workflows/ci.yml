@@ -93,13 +93,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # The unit tests only need a slim pure-Python surface — but "slim"
+      # The unit tests only need a slim pure-Python surface, but "slim"
       # grew as more modules landed at the filmmaker package root. Every
       # dep below is imported at module-load time by something the tests
       # ``from filmmaker import ...`` touches (llm.py -> requests,
       # licensing -> cryptography, library subsystem -> Pillow/numpy/
       # imagehash). We deliberately do NOT install the heavy inference
-      # stack (torch, diffusers, transformers, whisperx) — that would
+      # stack (torch, diffusers, transformers, whisperx). That would
       # push CI wall-clock past the free-tier budget for no test-surface
       # coverage over what the unit tests already prove.
       - name: Install test-only deps

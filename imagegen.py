@@ -44,14 +44,14 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 _img2img_pipe = None
 _inpaint_pipe = None
-_pix2pix_pipe = None  # timbrooks/instruct-pix2pix — instruction edits ("raise her hand", "make it night")
-_qwen_edit_pipe = None  # Qwen-Image-Edit-2509 — current SOTA local instruction editor (Apr 2026)
+_pix2pix_pipe = None  # timbrooks/instruct-pix2pix - instruction edits ("raise her hand", "make it night")
+_qwen_edit_pipe = None  # Qwen-Image-Edit-2509 - current SOTA local instruction editor (Apr 2026)
 _blip_processor = None
 _blip_model = None
 
 INSTRUCT_PIX2PIX_REPO = "timbrooks/instruct-pix2pix"
 
-# Qwen-Image-Edit-2509 — Apache-2.0, GGUF Q4_K_S transformer + base components.
+# Qwen-Image-Edit-2509 - Apache-2.0, GGUF Q4_K_S transformer + base components.
 # 5-10x better than InstructPix2Pix on instruction edits per GEdit-Bench.
 QWEN_EDIT_GGUF_DIR = os.path.join(ROOT_DIR, ".models", "qwen-image-edit-2509-gguf")
 QWEN_EDIT_GGUF = os.path.join(QWEN_EDIT_GGUF_DIR, "Qwen-Image-Edit-2509-Q4_K_S.gguf")
@@ -321,7 +321,7 @@ def _load_img2img():
 def qwen_edit_available() -> bool:
     """True only when the FULL GGUF transformer + ALL 4 text_encoder shards
     + VAE are present at expected sizes. Strict thresholds so an in-flight
-    download isn't reported as ready — would crash GGUF loading.
+    download isn't reported as ready - would crash GGUF loading.
 
     Also requires CUDA: the loader uses ``enable_sequential_cpu_offload`` which
     needs a GPU device to swap layers onto.
@@ -352,9 +352,9 @@ def _load_qwen_edit(progress_callback: Optional[Callable] = None):
     tokenizer, VAE, scheduler, processor) load from the cached base repo.
 
     Memory math on 12GB VRAM with model_cpu_offload:
-      - Q4_K_S transformer: 11.4 GB on disk -> ~7-8 GB active
-      - Qwen2-VL text_encoder: 15.4 GB FP16 -> CPU-offloaded between calls
-      - VAE: 254 MB
+- Q4_K_S transformer: 11.4 GB on disk -> ~7-8 GB active
+- Qwen2-VL text_encoder: 15.4 GB FP16 -> CPU-offloaded between calls
+- VAE: 254 MB
     Total VRAM at any one time stays under ~10 GB during generation.
     """
     if not torch.cuda.is_available():
@@ -420,7 +420,7 @@ def _pix2pix_cached() -> bool:
     load won't trigger a multi-GB download)."""
     try:
         from huggingface_hub import try_to_load_from_cache
-        # The unet weights file — if this resolves, the rest is also cached.
+        # The unet weights file - if this resolves, the rest is also cached.
         path = try_to_load_from_cache(
             INSTRUCT_PIX2PIX_REPO,
             "unet/diffusion_pytorch_model.safetensors",
@@ -460,7 +460,7 @@ def _watch_cache_size(repo_id: str, target_gb: float, progress_callback: Callabl
 
 
 def _load_pix2pix(progress_callback: Optional[Callable] = None):
-    """Load InstructPix2Pix — the right tool for instruction-based edits.
+    """Load InstructPix2Pix - the right tool for instruction-based edits.
 
     SDXL Img2Img is poor at structural edits like "raise her hand" because it
     treats the input as a noised starting point and re-denoises toward the
@@ -663,14 +663,14 @@ def image_to_image(
 
     Backends, picked by ``technique``:
 
-    - ``"qwen_edit"`` — Qwen-Image-Edit-2509 (GGUF Q4_K_S). Current SOTA local
+- ``"qwen_edit"`` - Qwen-Image-Edit-2509 (GGUF Q4_K_S). Current SOTA local
       instruction editor (Apr 2026). Best at structural edits like "raise her
       hand", "make her sit". Native ControlNet. Defaults: true_cfg=4, steps=40.
-    - ``"instruct"`` — InstructPix2Pix (legacy 2023). Cheap fallback; good for
+- ``"instruct"`` - InstructPix2Pix (legacy 2023). Cheap fallback; good for
       global style edits but very poor at pose/structure changes (~5% success).
-    - ``"redraw"`` — SDXL Img2Img. Style/composition shifts where the prompt
+- ``"redraw"`` - SDXL Img2Img. Style/composition shifts where the prompt
       describes the target. Tunable: ``strength``.
-    - ``"auto"`` — picks qwen_edit if available, else instruct for imperative
+- ``"auto"`` - picks qwen_edit if available, else instruct for imperative
       prompts, else redraw.
     """
     if not os.path.isfile(image_path):
@@ -693,7 +693,7 @@ def image_to_image(
 
     pp, nn = _apply_style(prompt, negative_prompt, style)
 
-    # Qwen-Image-Edit-2509 path — current best local editor for instruction edits
+    # Qwen-Image-Edit-2509 path - current best local editor for instruction edits
     if chosen == "qwen_edit":
         if not qwen_edit_available():
             raise RuntimeError(
@@ -762,7 +762,7 @@ def image_to_image(
     if chosen == "instruct":
         pipe = _load_pix2pix(progress_callback=progress_callback)
         init = PIL.Image.open(image_path).convert("RGB")
-        # InstructPix2Pix is SD-1.5 — keep dims modest. 512 short-side is sweet spot.
+        # InstructPix2Pix is SD-1.5 - keep dims modest. 512 short-side is sweet spot.
         w, h = init.size
         if max(w, h) > 768:
             scale = 768 / max(w, h)
@@ -869,7 +869,7 @@ def variation(
     seed: Optional[int] = None,
     progress_callback: Optional[Callable] = None,
 ) -> str:
-    """"More like this" — reuse the source image with low denoising strength.
+    """"More like this" - reuse the source image with low denoising strength.
     Without a prompt, derives a generic structure-preserving prompt."""
     p = prompt or "high quality, detailed, sharp focus"
     return image_to_image(
@@ -989,14 +989,14 @@ def enhance_prompt(
       mode: "expand" (add detail) or "shorten" (compress to essentials).
       image_path: Optional source image path (Edit / Variation / Inpaint).
         When provided, BLIP captions the image and the LLM is told to keep
-        scene-grounded — i.e. enhance the EDIT instruction in context, not
+        scene-grounded - i.e. enhance the EDIT instruction in context, not
         invent a brand-new scene.
       negative_prompt: Optional existing negative the user has typed, so the
         LLM can refine rather than overwrite it.
 
     Returns: ``{"enhanced": str, "negative": str, "image_caption": str}``.
 
-    Raises RuntimeError if the LLM call fails — surfaced verbatim by the API
+    Raises RuntimeError if the LLM call fails - surfaced verbatim by the API
     so the UI shows the real error rather than silently echoing the input.
     """
     raw = (prompt or "").strip()
@@ -1016,7 +1016,7 @@ def enhance_prompt(
             "image generation. List 15-25 comma-separated artifact and quality terms "
             "tailored to this prompt: things that commonly go wrong (anatomy, hands, "
             "faces, lighting, composition) plus mood/style anti-patterns. Do NOT "
-            "rewrite the positive prompt — keep it unchanged."
+            "rewrite the positive prompt - keep it unchanged."
         )
         if style_neg:
             instruction += f"\nInclude these style-aware terms: {style_neg}"
@@ -1095,7 +1095,7 @@ def enhance_prompt(
         enhanced = str(parsed.get("prompt", "")).strip().strip('"\'')
         negative = str(parsed.get("negative") or parsed.get("negative_prompt") or "").strip().strip('"\'')
     else:
-        # LLM didn't produce JSON — treat the whole reply as the relevant field.
+        # LLM didn't produce JSON - treat the whole reply as the relevant field.
         cleaned_text = cleaned
         for prefix in ("Enhanced prompt:", "Rewritten prompt:", "Prompt:",
                        "Negative prompt:", "Negative:", "Output:"):
@@ -1128,7 +1128,7 @@ def enhance_prompt(
 
 
 # ---------------------------------------------------------------------------
-# History — last N images on disk
+# History - last N images on disk
 # ---------------------------------------------------------------------------
 
 def list_history(limit: int = 50) -> list:
@@ -1152,7 +1152,7 @@ def list_history(limit: int = 50) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Catalog — what the UI should show
+# Catalog - what the UI should show
 # ---------------------------------------------------------------------------
 
 def default_negative_for(style: Optional[str]) -> str:
@@ -1192,18 +1192,18 @@ def catalog() -> dict:
     if qwen_ready:
         edit_techniques.append({
             "id": "qwen_edit", "name": "Qwen-Image-Edit",
-            "description": "SOTA local editor (Apr 2026) — best for structural edits like 'raise her hand'",
+            "description": "SOTA local editor (Apr 2026) - best for structural edits like 'raise her hand'",
         })
     else:
         edit_techniques.append({
             "id": "qwen_edit", "name": "Qwen-Image-Edit (downloading)",
-            "description": "Weights not yet available — defaults to instruct/redraw",
+            "description": "Weights not yet available - defaults to instruct/redraw",
         })
     edit_techniques.extend([
         {"id": "instruct", "name": "Instruction (legacy)",
-         "description": "InstructPix2Pix 2023 — fast, good at global style edits, weak at structure"},
+         "description": "InstructPix2Pix 2023 - fast, good at global style edits, weak at structure"},
         {"id": "redraw", "name": "Redraw",
-         "description": "SDXL Img2Img — describe the target image; source is a starting point"},
+         "description": "SDXL Img2Img - describe the target image; source is a starting point"},
     ])
 
     return {

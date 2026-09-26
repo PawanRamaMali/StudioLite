@@ -115,7 +115,7 @@ export default function UpscalePanel() {
                   <>
                     <p className="text-sm text-zinc-300 truncate">{upload.filename}</p>
                     <p className="text-[11px] text-zinc-500 mt-1">
-                      {(upload.size_bytes / (1024 * 1024)).toFixed(1)} MB — click to replace
+                      {(upload.size_bytes / (1024 * 1024)).toFixed(1)} MB - click to replace
                     </p>
                   </>
                 ) : (
@@ -169,7 +169,7 @@ export default function UpscalePanel() {
           >
             <Zap className="w-5 h-5 mr-2" />
             {job && (job.status === "running" || job.status === "queued")
-              ? `Upscaling — ${Math.round((job.progress || 0) * 100)}%`
+              ? `Upscaling - ${Math.round((job.progress || 0) * 100)}%`
               : "Upscale Video"}
           </Button>
 

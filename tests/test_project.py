@@ -1,4 +1,4 @@
-"""Unit tests for filmmaker/project.py — persistence, staleness
+"""Unit tests for filmmaker/project.py - persistence, staleness
 propagation, and config parsing."""
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def test_create_writes_meta_and_state(tmp_path):
     meta = json.loads(open(p.meta_path, encoding="utf-8").read())
     assert meta["brief"] == "A test brief."
     state = json.loads(open(p.state_path, encoding="utf-8").read())
-    # Every stage should start pending — the orchestrator flips these.
+    # Every stage should start pending - the orchestrator flips these.
     assert set(state["stage_status"].values()) == {"pending"}
 
 
@@ -59,7 +59,7 @@ def test_mark_downstream_stale_only_nudges_done_stages(tmp_path):
     p.mark_downstream_stale("producer")
     st = p.state
     assert st.stage_status["screenwriter"] == "stale"
-    # failed stays failed — mark_downstream_stale must not clobber it
+    # failed stays failed - mark_downstream_stale must not clobber it
     assert st.stage_status["story_editor"] == "failed"
 
 

@@ -41,7 +41,7 @@ function fmtBytes(n: number): string {
 }
 
 function fmtDuration(sec: number | null | undefined): string {
-  if (!sec || sec < 0) return "—";
+  if (!sec || sec < 0) return " - ";
   const s = Math.floor(sec);
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
@@ -77,7 +77,7 @@ export default function LibraryPanel() {
 
   useEffect(() => {
     // refreshStatsAndRoots resolves setState via an await; the lint rule
-    // can't see through the returned promise — mark it explicitly.
+    // can't see through the returned promise - mark it explicitly.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refreshStatsAndRoots();
   }, [refreshStatsAndRoots]);
@@ -96,7 +96,7 @@ export default function LibraryPanel() {
           window.setTimeout(() => setScanJobId(null), 1500);
           return;
         }
-      } catch { /* soft — try again */ }
+      } catch { /* soft - try again */ }
       if (!cancelled) window.setTimeout(tick, 1200);
     };
     tick();
@@ -120,7 +120,7 @@ export default function LibraryPanel() {
         <div>
           <h1 className="text-3xl font-bold gradient-text">Library</h1>
           <p className="text-zinc-400 mt-1">
-            Organize your video files locally — scan folders, find duplicates, browse everything in one place.
+            Organize your video files locally - scan folders, find duplicates, browse everything in one place.
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -317,7 +317,7 @@ function RootsPanel({
                       }
                     }}
                     disabled={!roots || roots.length === 0 || disabled}
-                    title="Bottom-up sweep of every watched folder — removes any subfolder whose only contents are junk (Thumbs.db, .DS_Store, desktop.ini)">
+                    title="Bottom-up sweep of every watched folder - removes any subfolder whose only contents are junk (Thumbs.db, .DS_Store, desktop.ini)">
               <FolderX className="w-3.5 h-3.5 mr-1.5" /> Clean empty
             </Button>
             <Button variant="secondary" size="sm" onClick={onScanAll}
@@ -376,7 +376,7 @@ function RootsPanel({
               spellCheck={false}
             />
             <p className="text-[10px] text-zinc-500 mt-1">
-              Subfolders are searched automatically — no need to add each one.
+              Subfolders are searched automatically - no need to add each one.
             </p>
           </div>
           <div className="grid grid-cols-2 gap-2">
@@ -427,7 +427,7 @@ function ReencodeCard({
   const load = useCallback(async () => {
     try {
       setSummary(await libraryLegacyVideos(1000));
-    } catch { /* soft — probably nothing scanned yet */ }
+    } catch { /* soft - probably nothing scanned yet */ }
   }, []);
   useEffect(() => {
     // load resolves setState via await; ESLint can't see through the returned promise.
@@ -470,7 +470,7 @@ function ReencodeCard({
         {legacyCount === 0 ? (
           <p className="text-[11px] text-zinc-500">
             No legacy-codec videos indexed yet. Once a scan finishes, this card
-            reports anything encoded as mpeg2, wmv, rmvb, dv, and so on — with a
+            reports anything encoded as mpeg2, wmv, rmvb, dv, and so on - with a
             one-click convert to h264 / h265.
           </p>
         ) : (
@@ -955,7 +955,7 @@ function DuplicatesView({
           <CheckCircle2 className="w-8 h-8 text-green-400 mx-auto mb-2" />
           <p className="text-sm text-zinc-200">No duplicates found.</p>
           <p className="text-[11px] text-zinc-500 mt-1">
-            Try lowering the near-threshold to catch fuzzier matches — or run a scan first to populate hashes.
+            Try lowering the near-threshold to catch fuzzier matches - or run a scan first to populate hashes.
           </p>
         </Card>
       )}
@@ -1101,8 +1101,8 @@ function VideoDetailModal({
           {isImage
             ? <DetailField label="Kind" value="Image" />
             : <DetailField label="Duration" value={fmtDuration(video.duration_sec)} />}
-          <DetailField label="Resolution" value={video.width && video.height ? `${video.width}×${video.height}` : "—"} />
-          <DetailField label={isImage ? "Format" : "Codec"} value={video.codec ?? "—"} />
+          <DetailField label="Resolution" value={video.width && video.height ? `${video.width}×${video.height}` : " - "} />
+          <DetailField label={isImage ? "Format" : "Codec"} value={video.codec ?? " - "} />
           <DetailField label="Size" value={fmtBytes(video.size_bytes)} />
         </div>
 
@@ -1425,7 +1425,7 @@ function DeleteAllButOneReview({
         <div className="p-4 border-b border-zinc-800 flex items-start justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold text-zinc-100 flex items-center gap-2">
-              <Layers className="w-4 h-4 text-orange-400" /> Delete all but one — review
+              <Layers className="w-4 h-4 text-orange-400" /> Delete all but one - review
             </h2>
             <p className="text-[11px] text-zinc-500 mt-0.5">
               Nothing is deleted until you click Execute. Click a file within a cluster to make it the keeper instead.
@@ -1446,7 +1446,7 @@ function DeleteAllButOneReview({
         {!loading && plan && plan.clusters.length === 0 && (
           <div className="p-10 text-center">
             <CheckCircle2 className="w-8 h-8 text-green-400 mx-auto mb-2" />
-            <p className="text-sm text-zinc-200">Nothing to delete — no duplicates matched.</p>
+            <p className="text-sm text-zinc-200">Nothing to delete - no duplicates matched.</p>
           </div>
         )}
 
@@ -1506,7 +1506,7 @@ function DeleteAllButOneReview({
                   ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Deleting…</>
                   : <>
                       <Trash2 className="w-3.5 h-3.5 mr-1.5" />
-                      Execute — {plan.total_delete_files} file{plan.total_delete_files === 1 ? "" : "s"}
+                      Execute - {plan.total_delete_files} file{plan.total_delete_files === 1 ? "" : "s"}
                     </>}
               </Button>
             </div>
@@ -1589,7 +1589,7 @@ function ResultOverlay({ result, onClose }: {
           Freed {humanBytes(result.bytes_freed)} of disk space
           {failures.length > 0 && `, ${failures.length} skipped`}
           {result.folders_removed && result.folders_removed.length > 0 &&
-            ` — plus ${result.folders_removed.length} emptied folder${result.folders_removed.length === 1 ? "" : "s"}`}.
+            ` - plus ${result.folders_removed.length} emptied folder${result.folders_removed.length === 1 ? "" : "s"}`}.
         </p>
         {failures.length > 0 && (
           <div className="text-left mt-3 max-h-40 overflow-y-auto border border-zinc-800 rounded-lg p-2 text-[10px] font-mono text-red-300">
@@ -1746,7 +1746,7 @@ function SearchView({ onError }: { onError: (s: string) => void }) {
           {mode === "content" ? (
             <Button variant="secondary" size="sm" onClick={startEmbed}
                     disabled={!!embedJobId && embedProgress?.status === "running"}
-                    title={embedJobId ? "Indexing in progress" : "Encode CLIP embeddings for every video (uses the ~600 MB openai/clip-vit-base-patch32 model — downloaded on first run)"}>
+                    title={embedJobId ? "Indexing in progress" : "Encode CLIP embeddings for every video (uses the ~600 MB openai/clip-vit-base-patch32 model - downloaded on first run)"}>
               <Sparkles className="w-3.5 h-3.5 mr-1.5" /> Index content
             </Button>
           ) : (
@@ -1820,12 +1820,12 @@ function SearchView({ onError }: { onError: (s: string) => void }) {
 
       {mode === "content" && hits && hits.length === 0 && canSearch && (
         <p className="text-xs text-zinc-500 text-center py-10">
-          No videos matched. Try a broader description (drop specifics like names/dates — CLIP is best at general scenes).
+          No videos matched. Try a broader description (drop specifics like names/dates - CLIP is best at general scenes).
         </p>
       )}
       {mode === "speech" && speechHits && speechHits.length === 0 && canSearch && (
         <p className="text-xs text-zinc-500 text-center py-10">
-          Nothing said. FTS matches whole words — try shorter phrases, or an
+          Nothing said. FTS matches whole words - try shorter phrases, or an
           alternate spelling. Very quiet or music-heavy clips may transcribe as empty.
         </p>
       )}

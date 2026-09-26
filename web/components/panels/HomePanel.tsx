@@ -99,7 +99,7 @@ export default function HomePanel({ onNavigate }: HomePanelProps) {
         detail: !hasGpu
           ? "Multi-scene rendering requires a CUDA GPU."
           : features.video_generation
-            ? "Ready — script writer, storyboard, and per-scene rendering all work."
+            ? "Ready - script writer, storyboard, and per-scene rendering all work."
             : "Downloads a video engine first (see Model Hub in Settings).",
       },
       {
@@ -109,8 +109,8 @@ export default function HomePanel({ onNavigate }: HomePanelProps) {
         tab: "images",
         status: hasGpu ? "ready" : "slow",
         detail: hasGpu
-          ? "SDXL runs on the GPU — a few seconds per image."
-          : `SDXL runs on the CPU here — expect 5-15 min per image. First-run downloads happen automatically.${anySdxlModel ? "" : " No SDXL models cached yet."}`,
+          ? "SDXL runs on the GPU - a few seconds per image."
+          : `SDXL runs on the CPU here - expect 5-15 min per image. First-run downloads happen automatically.${anySdxlModel ? "" : " No SDXL models cached yet."}`,
       },
       {
         id: "characters",
@@ -128,7 +128,7 @@ export default function HomePanel({ onNavigate }: HomePanelProps) {
         icon: Music,
         tab: "audio",
         status: "ready",
-        detail: "TTS, SFX, voice isolation, normalization — all CPU-friendly.",
+        detail: "TTS, SFX, voice isolation, normalization - all CPU-friendly.",
       },
       {
         id: "transcribe",
@@ -144,7 +144,7 @@ export default function HomePanel({ onNavigate }: HomePanelProps) {
         icon: Scissors,
         tab: "edit",
         status: "ready",
-        detail: "FFmpeg-based — trim, cut, merge, overlay, speed, filter. No GPU required.",
+        detail: "FFmpeg-based - trim, cut, merge, overlay, speed, filter. No GPU required.",
       },
     ];
   }, [features, hasGpu, anySdxlModel]);
@@ -181,7 +181,7 @@ export default function HomePanel({ onNavigate }: HomePanelProps) {
             <div>
               <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Free VRAM</p>
               <p className="text-sm font-semibold text-zinc-200">
-                {hasGpu && freeVram !== undefined ? `${freeVram.toFixed(1)} GB` : "—"}
+                {hasGpu && freeVram !== undefined ? `${freeVram.toFixed(1)} GB` : " - "}
               </p>
               <p className="text-[10px] text-zinc-500">Platform: {platform}</p>
             </div>

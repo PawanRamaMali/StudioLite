@@ -2,7 +2,7 @@
 
 Two responsibilities: iterate videos under a root, and reconcile the store
 with what's on disk (mark rows missing when a file disappears). Everything
-IO — no hashing or probing here."""
+IO - no hashing or probing here."""
 from __future__ import annotations
 
 import fnmatch
@@ -29,7 +29,7 @@ IMAGE_EXTS = frozenset({
     ".ico", ".cur",
     ".ppm", ".pgm", ".pbm", ".pnm",
     ".tga", ".icns",
-    # Raw camera formats — Pillow reads header at minimum
+    # Raw camera formats - Pillow reads header at minimum
     ".arw", ".cr2", ".cr3", ".nef", ".nrw", ".orf", ".pef",
     ".raf", ".rw2", ".dng", ".srw",
     # Legacy / niche
@@ -38,7 +38,7 @@ IMAGE_EXTS = frozenset({
 })
 
 
-# Every video container ffmpeg understands. Comprehensive on purpose —
+# Every video container ffmpeg understands. Comprehensive on purpose - 
 # a library "organize my videos" tool shouldn't silently skip a format.
 # If the user has a .rm or .mxf lying around, they want it visible so
 # they can act on it (dedupe, delete, re-encode).
@@ -141,7 +141,7 @@ def walk_root(root_path: str, include_glob: str = "", exclude_glob: str = "",
 def is_directory_effectively_empty(dirpath: str) -> bool:
     """True when the directory has no files and no non-empty subdirectories.
     A folder full of Thumbs.db, .DS_Store, and desktop.ini is considered
-    empty — those junk files shouldn't stop cleanup."""
+    empty - those junk files shouldn't stop cleanup."""
     JUNK = {"thumbs.db", ".ds_store", "desktop.ini", ".directory"}
     try:
         for entry in os.scandir(dirpath):
@@ -161,10 +161,10 @@ def cleanup_empty_folders(root_paths: List[str], *, dry_run: bool = False,
                           protect_root: bool = True) -> Dict[str, Any]:
     """Walk each root bottom-up and remove effectively-empty directories.
 
-    - `protect_root` (default True) never deletes the root path itself,
+- `protect_root` (default True) never deletes the root path itself,
       even if it becomes empty. The user asked to organize inside those
       folders, not to delete the containers they specified.
-    - Junk sentinels (Thumbs.db, .DS_Store, desktop.ini, .directory)
+- Junk sentinels (Thumbs.db, .DS_Store, desktop.ini, .directory)
       count as "empty" for the purpose of cleanup, and get removed
       alongside the folder.
     """
@@ -206,7 +206,7 @@ def cleanup_empty_folders(root_paths: List[str], *, dry_run: bool = False,
 def cleanup_empty_parents(paths_deleted: List[str], root_paths: List[str],
                           *, dry_run: bool = False) -> Dict[str, Any]:
     """Given a list of files just deleted, walk each unique parent folder
-    upward — removing it if empty — and stop at the first non-empty
+    upward - removing it if empty - and stop at the first non-empty
     ancestor or when we cross a library root boundary.
     """
     if not paths_deleted:

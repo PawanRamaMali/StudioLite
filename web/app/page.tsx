@@ -31,18 +31,18 @@ export default function Home() {
   // Post-mount one-shot init: read localStorage (client-only), decide the
   // initial tab, then unblock render. This is exactly the case the strict
   // react-hooks/set-state-in-effect rule doesn't handle: reading a browser-only
-  // API to seed initial UI state. Both setStates are safe here — they run once
+  // API to seed initial UI state. Both setStates are safe here - they run once
   // and drive no dependent effect.
   useEffect(() => {
     let initialTab: string | null = null;
-    // `?tab=film-studio` (or any panel key) wins — lets external tools deep-link
+    // `?tab=film-studio` (or any panel key) wins - lets external tools deep-link
     // straight into a panel without a manual sidebar click.
     try {
       const params = new URLSearchParams(window.location.search);
       const tabParam = params.get("tab");
       if (tabParam) initialTab = tabParam;
     } catch {
-      // URL parsing failed — ignore
+      // URL parsing failed - ignore
     }
     if (!initialTab) {
       try {
@@ -52,7 +52,7 @@ export default function Home() {
           window.localStorage.setItem(FIRST_VISIT_KEY, "1");
         }
       } catch {
-        // localStorage disabled — stay on generate
+        // localStorage disabled - stay on generate
       }
     }
     // eslint-disable-next-line react-hooks/set-state-in-effect

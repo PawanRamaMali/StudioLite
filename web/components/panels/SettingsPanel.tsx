@@ -112,7 +112,7 @@ export default function SettingsPanel() {
             refreshModels();
           }
         } catch {
-          // network blip — try next tick
+          // network blip - try next tick
         }
       }
     }, 2000);
@@ -321,10 +321,10 @@ export default function SettingsPanel() {
                             )}
                           </td>
                           <td className="py-2.5 text-zinc-400 text-xs">{m.vram_min}GB+</td>
-                          <td className="py-2.5"><Badge className="text-[10px]">{m.quality || "—"}</Badge></td>
+                          <td className="py-2.5"><Badge className="text-[10px]">{m.quality || " - "}</Badge></td>
                           <td className="py-2.5">
                             <Badge variant={m.speed === "fast" ? "success" : "default"} className="text-[10px]">
-                              {m.speed || "—"}
+                              {m.speed || " - "}
                             </Badge>
                           </td>
                           <td className="py-2.5">
@@ -337,7 +337,7 @@ export default function SettingsPanel() {
                               <span className="flex items-center gap-1 text-green-400 text-xs"><Check className="w-3 h-3" /> Ready</span>
                             ) : wasCancelled ? (
                               <span className="flex items-center gap-1 text-amber-400 text-xs" title={job.message}>
-                                <XCircle className="w-3 h-3" /> Cancelled — click Download to resume
+                                <XCircle className="w-3 h-3" /> Cancelled - click Download to resume
                               </span>
                             ) : (
                               <span className="flex items-center gap-1 text-zinc-600 text-xs"><X className="w-3 h-3" /> Not downloaded</span>

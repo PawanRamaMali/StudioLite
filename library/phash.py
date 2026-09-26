@@ -2,8 +2,8 @@
 
 `imagehash.phash` on a single downscaled frame is the workhorse. For
 video we sample several evenly-spaced frames via ffmpeg, phash each,
-and XOR-merge them into a signature. XOR-merge is deliberately lossy —
-it collapses ordering — but that's what we want: two rescales of the
+and XOR-merge them into a signature. XOR-merge is deliberately lossy - 
+it collapses ordering - but that's what we want: two rescales of the
 same clip come out equal, and two similar-looking clips with different
 edits stay close in Hamming distance.
 
@@ -28,7 +28,7 @@ FRAME_WIDTH = 256   # decode target; big enough for phash to be stable
 
 def _extract_frames(path: str, duration_sec: Optional[float]) -> List[Image.Image]:
     """Grab N frames spread evenly across the clip via ffmpeg's fps filter.
-    Returns a list of PIL Images. Never raises — returns [] on any failure."""
+    Returns a list of PIL Images. Never raises - returns [] on any failure."""
     if not path or not os.path.isfile(path):
         return []
     # If we don't know the duration, ask ffmpeg for a fixed sampling.
@@ -38,7 +38,7 @@ def _extract_frames(path: str, duration_sec: Optional[float]) -> List[Image.Imag
         rate = max(0.01, FRAME_COUNT / max(duration_sec, 1.0))
         vf = f"fps={rate},scale={FRAME_WIDTH}:-2"
     else:
-        # Short clip — just grab up to FRAME_COUNT frames at 1 fps.
+        # Short clip - just grab up to FRAME_COUNT frames at 1 fps.
         vf = f"fps=1,scale={FRAME_WIDTH}:-2"
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
@@ -108,7 +108,7 @@ def phash_image(path: str) -> Optional[str]:
     try:
         img = Image.open(path)
         img.load()
-        # Convert to RGB — phash won't handle palettized modes cleanly.
+        # Convert to RGB - phash won't handle palettized modes cleanly.
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
         return str(imagehash.phash(img))

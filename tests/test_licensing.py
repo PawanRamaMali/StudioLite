@@ -1,7 +1,7 @@
 """Coverage for the offline license verifier.
 
 Signs a payload with the DEV private key baked in ``filmmaker.licensing``
-so the round-trip is real end-to-end — same signature format the release
+so the round-trip is real end-to-end - same signature format the release
 publisher would produce."""
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ class TestVerify:
     def test_tampered_payload_rejected(self):
         p = LicensePayload(tier="free", features=[])
         bundle = _sign(p)
-        # Rewrite tier after signing — should not verify.
+        # Rewrite tier after signing - should not verify.
         bundle["payload"]["tier"] = "studio"
         check = verify_license(bundle)
         assert check.valid is False
@@ -72,7 +72,7 @@ class TestVerify:
         p = LicensePayload(tier="pro", features=["batch"],
                             issued_at=1000.0, expires_at=2000.0,
                             grace_days=7)
-        # Now is 4000 — past expiry (2000) but within grace (2000 + 7*86400).
+        # Now is 4000 - past expiry (2000) but within grace (2000 + 7*86400).
         check = verify_license(_sign(p), now=4000.0)
         assert check.valid is True
         assert check.warning

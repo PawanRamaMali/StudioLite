@@ -1,12 +1,12 @@
 """Starter templates for the Film Studio pipeline.
 
 A template packages up a brief skeleton and the config knobs that
-usually go with a particular kind of film — a 1-minute short doesn't
+usually go with a particular kind of film - a 1-minute short doesn't
 render at the same quality settings as a 30-second product demo. The
 UI can show the catalog on the "new project" screen so a user picks a
 starting point instead of staring at a blank config form.
 
-Templates are code, not data — the catalog rarely changes and shipping
+Templates are code, not data - the catalog rarely changes and shipping
 it as a Python module keeps everything type-checked. Adding one is a
 matter of appending a ``FilmTemplate`` below.
 """
@@ -18,7 +18,7 @@ from typing import Any, Dict, List
 
 @dataclass(frozen=True)
 class FilmTemplate:
-    id: str                     # kebab-case slug — stable public identifier
+    id: str                     # kebab-case slug - stable public identifier
     name: str                   # display name
     description: str            # one-liner shown on the tile
     category: str               # "narrative" | "explainer" | "promo" | "experimental"
@@ -54,7 +54,7 @@ _TEMPLATES: List[FilmTemplate] = [
             "why the light has been flickering. They talk for one long "
             "night, and by dawn one of them is gone."
         ),
-        brief_placeholder="A one-paragraph pitch — who, where, what changes.",
+        brief_placeholder="A one-paragraph pitch - who, where, what changes.",
         tags=["narrative", "short"],
     ),
     FilmTemplate(
@@ -112,7 +112,7 @@ _TEMPLATES: List[FilmTemplate] = [
     FilmTemplate(
         id="draft-scene",
         name="Draft Scene",
-        description="Fast 90-second scene at draft quality — rough cut only.",
+        description="Fast 90-second scene at draft quality - rough cut only.",
         category="experimental",
         target_minutes=1.5,
         style="stylized",
@@ -120,10 +120,10 @@ _TEMPLATES: List[FilmTemplate] = [
         sdxl_variant="turbo",
         motion_backend="animatediff",
         sample_brief=(
-            "A quick sketch of a scene — draft output for review before "
+            "A quick sketch of a scene - draft output for review before "
             "committing to full-quality render."
         ),
-        brief_placeholder="Rough idea — this is a fast draft, refine later.",
+        brief_placeholder="Rough idea - this is a fast draft, refine later.",
         tags=["draft", "iteration"],
     ),
 ]

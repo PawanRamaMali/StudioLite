@@ -1,4 +1,4 @@
-"""Unit tests for filmmaker/stages.py — the pipeline stage registry,
+"""Unit tests for filmmaker/stages.py - the pipeline stage registry,
 its dependency helpers, and the QualityReport dataclass."""
 from __future__ import annotations
 

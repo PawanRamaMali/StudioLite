@@ -21,7 +21,7 @@ CHUNK = 1 << 20  # 1 MiB
 def sha256_file(path: str, *, cancel: Optional[Callable[[], bool]] = None) -> Optional[str]:
     """Full-file SHA-256 as hex, or None if the file can't be read.
 
-    `cancel` is a cheap poll called every chunk — the scanner uses it so a
+    `cancel` is a cheap poll called every chunk - the scanner uses it so a
     long hash on a massive file yields to a cancel request."""
     h = hashlib.sha256()
     try:
@@ -41,7 +41,7 @@ def sha256_file(path: str, *, cancel: Optional[Callable[[], bool]] = None) -> Op
 def head_tail_fingerprint(path: str, edge_bytes: int = 4 * 1024 * 1024) -> Optional[str]:
     """A SHA-256 over (first edge_bytes) + (last edge_bytes) + size.
     Cheap way to disqualify almost-identical files without paying for a
-    full-file hash. Not used for exact-duplicate clustering — that always
+    full-file hash. Not used for exact-duplicate clustering - that always
     uses the full sha256."""
     try:
         size = os.path.getsize(path)

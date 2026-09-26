@@ -43,7 +43,7 @@ def _try_link_checkpoints() -> None:
 
     On Linux/macOS uses a real symlink (no privileges required). On Windows
     tries a directory junction via ``mklink /J`` (no dev-mode needed for
-    junctions to shared paths, unlike symbolic links). Silent on failure —
+    junctions to shared paths, unlike symbolic links). Silent on failure - 
     ``available()`` will still return False and ``install_hint()`` surfaces
     the manual step.
     """
@@ -108,10 +108,10 @@ def install_hint() -> str:
     if not steps:
         return "LatentSync is set up correctly."
     # NOTE: don't pip-install third_party/LatentSync/requirements.txt into the
-    # main venv — it pins torch==2.5.1+cu121 which conflicts with our own torch
+    # main venv - it pins torch==2.5.1+cu121 which conflicts with our own torch
     # and hard-fails on CPU-only machines. LatentSync runs fine against the
     # torch already in the main venv.
-    return "LatentSync setup incomplete:\n  - " + "\n  - ".join(steps)
+    return "LatentSync setup incomplete:\n - " + "\n - ".join(steps)
 
 
 def lip_sync_video(

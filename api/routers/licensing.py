@@ -1,6 +1,6 @@
 """License status / install / deactivate endpoints.
 
-Backed by ``filmmaker.licensing`` — this router is only the HTTP shell.
+Backed by ``filmmaker.licensing`` - this router is only the HTTP shell.
 Extracted from ``api_server.py`` so the monolith shrinks and the
 licensing surface is easy to find (and swap for a real activation
 server later without touching unrelated code)."""
@@ -22,7 +22,7 @@ class LicenseInstallRequest(BaseModel):
 
 @router.get("/license")
 async def license_status() -> dict:
-    """Report the current entitlement — tier, feature list, expiry,
+    """Report the current entitlement - tier, feature list, expiry,
     grace warning if any. Absence of a license reports tier=free and
     valid=False; the UI treats that as 'community edition' rather than
     an error."""

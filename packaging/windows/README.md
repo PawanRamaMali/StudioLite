@@ -44,16 +44,16 @@ an offline install or an automatic uninstaller.
 
 `build.py` signs the installer with Authenticode when a code-signing
 certificate is available. Absent one, it emits an unsigned build and
-records the reason in `dist/release-manifest.json` — the CI pipeline
+records the reason in `dist/release-manifest.json` - the CI pipeline
 can decide whether to promote or block it.
 
 Environment variables the build reads:
 
-- `STUDIOLITE_SIGN_THUMBPRINT` — SHA-1 thumbprint of the code-signing cert
+- `STUDIOLITE_SIGN_THUMBPRINT` - SHA-1 thumbprint of the code-signing cert
   in the current user's certificate store. Required to trigger signing.
-- `STUDIOLITE_SIGN_TSA` — RFC 3161 timestamp authority URL. Defaults to
+- `STUDIOLITE_SIGN_TSA` - RFC 3161 timestamp authority URL. Defaults to
   `http://timestamp.digicert.com`.
-- `STUDIOLITE_SIGNTOOL` — full path to `signtool.exe`. Optional; when
+- `STUDIOLITE_SIGNTOOL` - full path to `signtool.exe`. Optional; when
   unset, `signtool` is looked up on PATH (Windows SDK installs it).
 
 ## Release manifest

@@ -1,7 +1,7 @@
 """Build a source-based Windows setup; never package local data or credentials.
 
 Optional Authenticode signing kicks in when ``STUDIOLITE_SIGNTOOL`` is set
-in the environment. Absent the variable this build stays unsigned — which
+in the environment. Absent the variable this build stays unsigned - which
 is fine for dogfooding but means end users get a SmartScreen warning.
 See ``packaging/windows/README.md`` for the release setup.
 """
@@ -99,7 +99,7 @@ def _resolve_signtool() -> Path | None:
 
 def _sign_installer(installer: Path) -> dict:
     """Sign the installer if a cert is configured. Returns a summary
-    dict for the release manifest — always non-None so downstream code
+    dict for the release manifest - always non-None so downstream code
     can just consult ``signed``."""
     thumb = os.environ.get('STUDIOLITE_SIGN_THUMBPRINT', '').strip()
     if not thumb:
@@ -127,7 +127,7 @@ def _sign_installer(installer: Path) -> dict:
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        # Don't fail the whole build on a signing miss — emit the reason
+        # Don't fail the whole build on a signing miss - emit the reason
         # so CI can decide what to do. Keeps local dev builds unbroken.
         return {'signed': False,
                 'reason': f'signtool exited {e.returncode}: '
@@ -168,7 +168,7 @@ for path in (exe, OUT / 'StudioLite-Setup.zip'):
     print(f'{path} ({path.stat().st_size:,} bytes)')
 
 sign_result = _sign_installer(exe)
-# Re-hash after signing — the exe bytes changed if signtool ran.
+# Re-hash after signing - the exe bytes changed if signtool ran.
 if sign_result.get('signed'):
     digest = hashlib.sha256(exe.read_bytes()).hexdigest()
     exe.with_suffix(exe.suffix + '.sha256').write_text(
@@ -178,7 +178,7 @@ if sign_result.get('signed'):
             a['sha256'] = digest
             a['size_bytes'] = exe.stat().st_size
 
-# Release manifest — the file an auto-updater will fetch to compare
+# Release manifest - the file an auto-updater will fetch to compare
 # the local install against what's on the release channel. Sits next to
 # the installer so a downstream pipeline can publish the whole dist/
 # directory as one unit.

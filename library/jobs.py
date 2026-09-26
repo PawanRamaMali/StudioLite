@@ -267,7 +267,7 @@ class EmbedJob(threading.Thread):
         remaining = self.store.iter_videos_needing_embedding(limit=200_000, model_id=model_id)
         self.counts["total"] = len(remaining)
         if not remaining:
-            self._push("Nothing to embed — all videos already indexed.", 1.0, "completed")
+            self._push("Nothing to embed - all videos already indexed.", 1.0, "completed")
             return
 
         self._push(f"Encoding {len(remaining)} videos on {rt.device}…", 0.02)

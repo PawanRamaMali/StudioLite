@@ -137,7 +137,7 @@ class TestIntegrationWithProject:
             ok = p.restore_version("producer", 1)
             assert ok is True
             assert p.read_artifact("producer") == {"loglines": ["a"]}
-            # Pre-restore snapshot means we now have three versions —
+            # Pre-restore snapshot means we now have three versions - 
             # v1, v2, v3 (pre-restore of v1).
             versions = p.list_versions("producer")
             assert len(versions) >= 3

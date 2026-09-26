@@ -1,5 +1,5 @@
 """
-ReelForge — AI-powered short video generation engine.
+ReelForge - AI-powered short video generation engine.
 Integrated into StudioLite as a tool.
 
 Scene-based pipeline:
@@ -225,8 +225,8 @@ def rf_generate_explainer_script(subject, language, num_scenes):
     """
     Generate an explainer script about the topic.
     Each scene has:
-    - narration: Educational/explainer text that will be spoken (TTS)
-    - visual: Description of what should be shown in the image
+- narration: Educational/explainer text that will be spoken (TTS)
+- visual: Description of what should be shown in the image
 
     Returns: list of {"narration": str, "visual": str}
     """
@@ -460,7 +460,7 @@ def rf_load_sdxl_pipeline(model_name=None):
             )
         else:
             # variant="fp16" downloads the fp16 shards, which are useless on CPU
-            # and half the size — but the pipeline would still convert them to
+            # and half the size - but the pipeline would still convert them to
             # fp32 at load time. Skip variant so we pull the fp32 shards directly.
             _sdxl_pipe = AutoPipelineForText2Image.from_pretrained(
                 "stabilityai/sdxl-turbo", torch_dtype=dtype,
@@ -626,7 +626,7 @@ def rf_clean_text_for_tts(text):
         '<': ' less than ',
         '...': '... ',
         '--': ', ',
-        '—': ', ',
+        ' - ': ', ',
         '–': ', ',
     }
 
@@ -1001,10 +1001,10 @@ def rf_generate_full(
     6. Combine into video (with optional background music)
 
     Returns dict with:
-    - scenes: list of {narration, visual, image_prompt, image_path, audio_path, duration}
-    - script: full narration text
-    - video_path: output video
-    - title, description: metadata
+- scenes: list of {narration, visual, image_prompt, image_path, audio_path, duration}
+- script: full narration text
+- video_path: output video
+- title, description: metadata
     """
     def progress(step, total, msg):
         if progress_callback:

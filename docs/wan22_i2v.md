@@ -2,11 +2,11 @@
 
 The Wan 2.2 motion backend has two modes:
 
-- **T2V (default)** — text-only generation. Fast enough for a full film on 12GB
+- **T2V (default)** - text-only generation. Fast enough for a full film on 12GB
   VRAM (~10 min per shot). Character identity comes from the prompt alone;
   Wan reinvents the subject each shot, so shot-to-shot character consistency
   is weak.
-- **I2V (opt-in)** — the SDXL keyframe conditions the generation, so the
+- **I2V (opt-in)** - the SDXL keyframe conditions the generation, so the
   character in the still is the character in the clip. Consistency is
   preserved. Requires main-branch `diffusers` + `transformers` 5.x, which
   conflict with the `transformers` 4.x pinned by IndexTTS-2. To keep both
@@ -62,13 +62,13 @@ in-process T2V per shot on any failure so the run never crashes.
 
 ## Environment variables
 
-- `WAN22_MODEL_DIR` (default `~/models/wan22-ti2v-5b`) — weights location.
-- `WAN22_VENV_PYTHON` (default `~/venvs/wan22/Scripts/python.exe`) — path to
+- `WAN22_MODEL_DIR` (default `~/models/wan22-ti2v-5b`) - weights location.
+- `WAN22_VENV_PYTHON` (default `~/venvs/wan22/Scripts/python.exe`) - path to
   the venv's Python. Empty string forces T2V mode.
-- `WAN22_MODE` — `auto` (default: try I2V, fall back to T2V), `t2v` (skip
-  I2V entirely), `i2v` (fail the shot rather than fall back to T2V —
+- `WAN22_MODE` - `auto` (default: try I2V, fall back to T2V), `t2v` (skip
+  I2V entirely), `i2v` (fail the shot rather than fall back to T2V - 
   useful when you're debugging the venv setup).
-- `WAN22_I2V_TIMEOUT_SEC` (default `3600`) — per-shot ceiling in seconds.
+- `WAN22_I2V_TIMEOUT_SEC` (default `3600`) - per-shot ceiling in seconds.
   Bump on slower cards; drop on faster ones to fail fast.
 
 ## Wall-clock expectations

@@ -30,7 +30,7 @@ logger = logging.getLogger("studiolite.api")
 # random token on each start (written to `.auth` so the local UI can
 # read it). Set STUDIOLITE_AUTH=off to disable auth entirely (local dev
 # only), STUDIOLITE_HOST to override the bind address (e.g. 0.0.0.0 for
-# LAN access — you also need to accept the security implications), and
+# LAN access - you also need to accept the security implications), and
 # STUDIOLITE_ALLOWED_ORIGINS to a comma list for CORS.
 # ---------------------------------------------------------------------------
 
@@ -119,7 +119,7 @@ async def _auth_middleware(request: Request, call_next):
     """Global auth gate. Skipped when STUDIOLITE_AUTH=off, when the request
     method is OPTIONS (CORS preflight), and for the exempt-path allowlist.
     Websockets carry the token as a `?token=` query param since browsers
-    can't set custom headers on WS handshakes — checked below where WS
+    can't set custom headers on WS handshakes - checked below where WS
     handlers accept the connection."""
     if not _AUTH_ENABLED:
         return await call_next(request)
@@ -141,7 +141,7 @@ async def _auth_middleware(request: Request, call_next):
 @app.get("/api/v1/system/auth-status")
 async def auth_status():
     """Unauthenticated probe so a fresh UI knows whether it needs to ask
-    for a token. Does NOT return the token itself — the token lives in
+    for a token. Does NOT return the token itself - the token lives in
     the `.auth` file next to api_server.py and the local user has read
     access to it."""
     return {
@@ -178,7 +178,7 @@ os.makedirs(SCREEN_TRANSCRIPTS_DIR, exist_ok=True)
 app.mount("/static/screen_transcripts", StaticFiles(directory=SCREEN_TRANSCRIPTS_DIR), name="screen_transcripts")
 
 # Extracted routers. Each module keeps its own imports and Pydantic
-# models — mounting here rather than in each router file so the auth
+# models - mounting here rather than in each router file so the auth
 # middleware above sees them the same way it sees inline endpoints.
 from api.routers import health as _health_router
 from api.routers import licensing as _licensing_router
@@ -214,7 +214,7 @@ _INTERRUPTED_JOBS = jobs.recover_interrupted_jobs()
 # job_id -> threading.Event. A worker calls `_should_cancel(job_id)` at
 # safe checkpoints; set() flips that check to True and the worker exits
 # cleanly with status="cancelled". Every _create_job() now registers an
-# event automatically — even runners that don't yet consult it are at
+# event automatically - even runners that don't yet consult it are at
 # least honest about the flag on the API surface.
 _cancel_events: dict[str, "threading.Event"] = {}
 
@@ -281,7 +281,7 @@ def _clear_subprocesses(job_id: str) -> None:
 
 def _terminate_job_subprocesses(job_id: str) -> int:
     """Signal every subprocess attached to this job. Returns how many
-    processes actually got a terminate call — the rest were already
+    processes actually got a terminate call - the rest were already
     done. Terminate is polite on Unix (SIGTERM) and hard on Windows
     (WM_CLOSE / TerminateProcess); the runner handles cleanup around
     the killed process."""
@@ -294,7 +294,7 @@ def _terminate_job_subprocesses(job_id: str) -> int:
                 p.terminate()
                 killed += 1
         except Exception:  # noqa: BLE001
-            # Popen already reaped / OS refused — nothing to do.
+            # Popen already reaped / OS refused - nothing to do.
             pass
     return killed
 
@@ -376,7 +376,7 @@ class StoryRequest(BaseModel):
     quality_preset: str = "standard"  # draft, standard, high
     enable_upscale: bool = False  # Post-process upscale with Real-ESRGAN
     enable_interpolation: bool = False  # RIFE frame interpolation for smoother motion
-    # Engine override — "auto" picks best available (Wan 2.2 > Hunyuan 1.5 > LTX-2.3 > VACE > T2V).
+    # Engine override - "auto" picks best available (Wan 2.2 > Hunyuan 1.5 > LTX-2.3 > VACE > T2V).
     # Map quality tiers: "draft" -> LTX-2.3, "balanced" -> Hunyuan 1.5, "quality" -> Wan 2.2.
     video_engine: str = "auto"
     # LatentSync 1.6 post-processing for talking-head scenes.
@@ -520,7 +520,7 @@ class ThumbnailRequest(BaseModel):
 # --- Timeline / NLE ------------------------------------------------------
 # The timeline is a flat list of clips in playback order. Each clip carries
 # an in/out point into its source file; renderer trims + concatenates them
-# with the selected codec/quality preset. One video track for v1 — audio
+# with the selected codec/quality preset. One video track for v1 - audio
 # rides along with the source. Multi-track lives in a future revision.
 
 class TimelineClip(BaseModel):
@@ -534,7 +534,7 @@ class TimelineRenderRequest(BaseModel):
     fps: int = Field(default=30, ge=1, le=120)
     width: int = Field(default=1920, ge=64, le=7680)
     height: int = Field(default=1080, ge=64, le=4320)
-    # Export presets — the pair (codec, quality) picks a specific
+    # Export presets - the pair (codec, quality) picks a specific
     # ffmpeg profile in _export_profile(). Presets are validated by the
     # runner so an unknown value fails fast, not at ffmpeg call time.
     codec: str = Field(default="h264")     # h264 | h265 | prores
@@ -572,10 +572,10 @@ class ImageEditRequest(BaseModel):
     steps: int = Field(default=30, ge=1, le=80)
     guidance: float = Field(default=7.5, ge=0.0, le=20.0)
     provider: str = "sdxl"
-    # Edit dispatch: "auto" (heuristic), "instruct" (InstructPix2Pix — best for
+    # Edit dispatch: "auto" (heuristic), "instruct" (InstructPix2Pix - best for
     # 'raise her hand' / 'make it night'), or "redraw" (SDXL Img2Img).
     technique: str = "auto"
-    # InstructPix2Pix only — text vs image preservation balance (1.0-2.0).
+    # InstructPix2Pix only - text vs image preservation balance (1.0-2.0).
     image_guidance: float = Field(default=1.5, ge=1.0, le=3.0)
 
 
@@ -790,10 +790,10 @@ CRITICAL: Return a JSON object with TWO keys.
 1. "visual_identity": Describe the MAIN SUBJECT in extreme detail so it looks IDENTICAL in every scene. Include: exact physical description (breed, color, size, distinguishing marks), exact clothing/accessories, exact setting details that repeat. This paragraph is appended to EVERY scene prompt.
 
 2. "scenes": JSON array where each scene has:
-   - "title": 3-5 word title
-   - "visual": MUST start with the exact same subject description from visual_identity, then add: specific camera angle (close-up/medium/wide/tracking), specific continuous motion (what the subject is doing), specific lighting, specific background. Describe ONE continuous smooth action per scene.
-   - "narration": 2-3 sentence engaging voiceover that connects to previous scene
-   - "duration": 4-6 seconds
+- "title": 3-5 word title
+- "visual": MUST start with the exact same subject description from visual_identity, then add: specific camera angle (close-up/medium/wide/tracking), specific continuous motion (what the subject is doing), specific lighting, specific background. Describe ONE continuous smooth action per scene.
+- "narration": 2-3 sentence engaging voiceover that connects to previous scene
+- "duration": 4-6 seconds
 
 Return ONLY valid JSON (close all brackets):
 {{
@@ -885,7 +885,7 @@ Return ONLY valid JSON (close all brackets):
         if not scene_list:
             _update_job(job_id, status="failed",
                 error="Script generation failed: LLM returned no usable scenes. Please provide scenes manually in the storyboard editor.",
-                message="Script generation failed — no scenes returned from LLM.")
+                message="Script generation failed - no scenes returned from LLM.")
             return
 
         scene_list = scene_list[: req.num_scenes]
@@ -976,7 +976,7 @@ Return ONLY valid JSON (close all brackets):
         # --- Character reference images (for prompt injection, not IP-Adapter) ---
         # Wan T2V does not support IP-Adapter. Character consistency comes from
         # strong prompt-based descriptions injected per scene (handled below).
-        # No silent fallback chains — if something fails, it fails visibly.
+        # No silent fallback chains - if something fails, it fails visibly.
         ip_adapter_strength = getattr(req, "ip_adapter_strength", 0.6)
         ip_adapter_enabled = getattr(req, "ip_adapter_enabled", True)
 
@@ -1134,7 +1134,7 @@ Return ONLY valid JSON (close all brackets):
             pct = 86 + int((idx + 1) / len(video_paths) * 4)
             _update_job(job_id, progress=pct, message=f"Scene {idx+1} video assembled ({target_dur:.0f}s)")
 
-        # 4a2: Optional lip sync (LatentSync 1.6) — apply per scene using its narration audio
+        # 4a2: Optional lip sync (LatentSync 1.6) - apply per scene using its narration audio
         if getattr(req, "enable_lip_sync", False) and narration_paths:
             try:
                 import lipsync as _lipsync
@@ -1163,7 +1163,7 @@ Return ONLY valid JSON (close all brackets):
             except Exception as lipsync_err:
                 _update_job(
                     job_id, progress=89,
-                    message=f"WARNING: Lip sync failed — {lipsync_err}. Continuing with original video.",
+                    message=f"WARNING: Lip sync failed - {lipsync_err}. Continuing with original video.",
                 )
 
         # 4b: Concatenate all scene videos into one silent video
@@ -1643,8 +1643,8 @@ def _export_profile(codec: str, quality: str) -> Dict[str, str]:
     """Map a (codec, quality) pair to the ffmpeg args the renderer applies.
 
     Encoders and CRFs picked to hit the intuition users have for the
-    labels — 'high' should look near-lossless to eyeballs, 'low' should
-    be small enough to email — without ballooning the option matrix."""
+    labels - 'high' should look near-lossless to eyeballs, 'low' should
+    be small enough to email - without ballooning the option matrix."""
     codec = (codec or "h264").lower()
     quality = (quality or "high").lower()
     if codec not in {"h264", "h265", "prores"}:
@@ -1681,7 +1681,7 @@ def _run_timeline_render(job_id: str, req: "TimelineRenderRequest") -> None:
     concatenate. Watermark is a bottom-right text overlay applied
     when the license requires it (free tier).
 
-    Progress is coarse — 10% per stage — because moviepy's own callbacks
+    Progress is coarse - 10% per stage - because moviepy's own callbacks
     are inconsistent across codecs; the user gets a running message
     instead."""
     try:
@@ -1694,7 +1694,7 @@ def _run_timeline_render(job_id: str, req: "TimelineRenderRequest") -> None:
                     message="Preparing timeline clips…")
 
         if not req.clips:
-            raise ValueError("Timeline is empty — add at least one clip.")
+            raise ValueError("Timeline is empty - add at least one clip.")
 
         # Server-side license gate. The client passes apply_watermark, but
         # we cross-check: only Pro/Studio (or an explicit watermark_removal
@@ -1748,7 +1748,7 @@ def _run_timeline_render(job_id: str, req: "TimelineRenderRequest") -> None:
                           .set_opacity(0.7))
                     final = CompositeVideoClip([final, wm])
                 except Exception as wm_exc:  # noqa: BLE001
-                    # TextClip needs ImageMagick — if it's missing we
+                    # TextClip needs ImageMagick - if it's missing we
                     # still deliver the render (no silent 'watermark
                     # skipped' would be worse than a warning).
                     logger.warning("Watermark skipped: %s", wm_exc)
@@ -2398,11 +2398,11 @@ def _compute_features(has_cuda: bool) -> dict:
     """Return the feature-availability map the frontend uses to gate UI tiles.
 
     Only features that can be genuinely blocked by hardware or missing weights
-    appear here — CPU-safe features (transcription, TTS, audio studio, video
+    appear here - CPU-safe features (transcription, TTS, audio studio, video
     editor, LLM, cloud image providers) are always available and not listed.
 
     ``local_sdxl`` and ``local_character_portrait`` are available on CPU too
-    (SDXL falls back to fp32 CPU inference — ~5-15 min per 1024px image) so
+    (SDXL falls back to fp32 CPU inference - ~5-15 min per 1024px image) so
     the frontend should surface a "slow on CPU" hint rather than gating them.
     """
     features = {
@@ -2487,13 +2487,13 @@ async def system_status():
 async def list_llm_backends():
     """Report which LLM backends have credentials configured.
 
-    - Ollama is always reported; `reachable` reflects whether the daemon
+- Ollama is always reported; `reachable` reflects whether the daemon
       is running right now.
-    - Cloud backends (gemini/groq/hf) are `configured` when their env var
-      is set. This is a read-only probe — we do not send a test request
+- Cloud backends (gemini/groq/hf) are `configured` when their env var
+      is set. This is a read-only probe - we do not send a test request
       against the provider, so a valid-looking key that has been rotated
       will still show `configured: true` until the first real call fails.
-    - The env-var name for each backend is included so the UI can point
+- The env-var name for each backend is included so the UI can point
       the user at the right knob when a backend isn't configured yet.
     """
     from filmmaker import llm as _llm
@@ -2515,27 +2515,27 @@ async def list_engines():
     ENGINE_META = {
         "wan22_14b_gguf": {
             "tier": "quality",
-            "description": "Wan 2.2 14B I2V (GGUF Q3) — highest quality, ~3-5 min/clip.",
+            "description": "Wan 2.2 14B I2V (GGUF Q3) - highest quality, ~3-5 min/clip.",
             "resolution": "480p",
         },
         "hunyuan15_i2v_gguf": {
             "tier": "balanced",
-            "description": "HunyuanVideo 1.5 I2V 480p (GGUF Q4) — cinematic motion, ~1-2 min/clip.",
+            "description": "HunyuanVideo 1.5 I2V 480p (GGUF Q4) - cinematic motion, ~1-2 min/clip.",
             "resolution": "480p",
         },
         "ltx23_distilled_gguf": {
             "tier": "draft",
-            "description": "LTX-2.3 distilled (GGUF Q3) — fastest, ~45s/clip, 24fps native.",
+            "description": "LTX-2.3 distilled (GGUF Q3) - fastest, ~45s/clip, 24fps native.",
             "resolution": "480p",
         },
         "vace_1.3b": {
             "tier": "fallback",
-            "description": "Wan VACE 1.3B — local fallback, lower quality.",
+            "description": "Wan VACE 1.3B - local fallback, lower quality.",
             "resolution": "480p",
         },
         "t2v_1.3b": {
             "tier": "last_resort",
-            "description": "Wan T2V 1.3B — text-only, no image conditioning.",
+            "description": "Wan T2V 1.3B - text-only, no image conditioning.",
             "resolution": "480p",
         },
     }
@@ -2607,7 +2607,7 @@ def _run_model_download(job_id: str, model_key: str):
             cancel_event=cancel_event,
         )
     except _mh.DownloadCancelled:
-        # Not a failure — user asked for it. Partial cache is left on disk so
+        # Not a failure - user asked for it. Partial cache is left on disk so
         # a re-download resumes rather than starting over.
         try:
             partial = _mh._cache_size_bytes(_mh.MODEL_REGISTRY[model_key]["hf_id"])
@@ -2667,7 +2667,7 @@ async def download_model_endpoint(model_key: str, background_tasks: BackgroundTa
                 return _job_response(jid)
 
     # Disk precheck. estimate_download_size returns 0 on any failure
-    # (network / gated / rate-limit) — treat 0 as "unknown" and skip the
+    # (network / gated / rate-limit) - treat 0 as "unknown" and skip the
     # check rather than blocking a legitimate download on a metadata error.
     needed = _mh.estimate_download_size(model_key)
     if needed > 0:
@@ -2724,8 +2724,8 @@ async def cancel_job(job_id: str):
         job_id,
         status="cancelling" if job["status"] != "queued" else "cancelled",
         message=(
-            f"Cancelling — {killed} subprocess(es) signalled."
-            if killed else "Cancelling — waiting for next runner checkpoint…"
+            f"Cancelling - {killed} subprocess(es) signalled."
+            if killed else "Cancelling - waiting for next runner checkpoint…"
         ),
     )
     return _job_response(job_id)
@@ -2742,7 +2742,7 @@ async def retry_job(job_id: str):
     """Re-fire a completed / failed / cancelled job with the same params.
 
     The runner-dispatch table lives in JOB_KIND_RUNNERS below. Kinds
-    that aren't registered can't be retried yet — the API returns 400
+    that aren't registered can't be retried yet - the API returns 400
     rather than silently dropping the request.
 
     The retry runs in a fresh thread and gets its own job_id, so both
@@ -2762,7 +2762,7 @@ async def retry_job(job_id: str):
     if runner is None:
         raise HTTPException(
             status_code=400,
-            detail=f"Job kind {kind!r} does not support retry — no runner registered.",
+            detail=f"Job kind {kind!r} does not support retry - no runner registered.",
         )
     new_id = _create_job(kind, job.get("params") or {})
     threading.Thread(target=runner, args=(new_id, job.get("params") or {}), daemon=True).start()
@@ -2771,7 +2771,7 @@ async def retry_job(job_id: str):
 
 # Populated as runners register themselves. Keeping this as an explicit
 # dict (rather than importing from a decorator) means the retry endpoint
-# can't accidentally start something dangerous — kinds have to be added
+# can't accidentally start something dangerous - kinds have to be added
 # on purpose. See _run_model_download at the bottom of the download
 # endpoint for an example wiring pattern.
 JOB_KIND_RUNNERS: dict[str, "callable"] = {}
@@ -3081,7 +3081,7 @@ app.mount("/static/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 
 
 # Per-file upload ceiling. Overridable at runtime with the env var
-# STUDIOLITE_MAX_UPLOAD_MB — set to 0 to disable the cap (not recommended
+# STUDIOLITE_MAX_UPLOAD_MB - set to 0 to disable the cap (not recommended
 # on any host with a public network face). 2 GiB fits every reasonable
 # short-film source clip and keeps a single malicious upload from filling
 # the disk.
@@ -3090,8 +3090,8 @@ _MAX_UPLOAD_BYTES = int(os.environ.get(
 
 # Whitelist of allowed extension → (leading magic bytes) mappings. The
 # magic-byte check catches the common trick of renaming an arbitrary
-# payload to .mp4. It is not a full media validator — the downstream
-# ffprobe/ffmpeg call is the real gate — but it rejects the obvious
+# payload to .mp4. It is not a full media validator - the downstream
+# ffprobe/ffmpeg call is the real gate - but it rejects the obvious
 # junk before we spend disk on it. Video uses a broad "starts with any
 # of these prefixes" check because container flavors (ISOM, MP42, QT...)
 # differ by 4 bytes; audio uses stricter fixed prefixes.
@@ -3143,9 +3143,9 @@ def _save_upload(file: UploadFile, prefix: str,
                   max_bytes: Optional[int] = None) -> str:
     """Stream an UploadFile to disk with hard size and content checks.
 
-    - `allowed_exts`: e.g. {".mp4", ".mkv"}. Enforced against the sanitized
+- `allowed_exts`: e.g. {".mp4", ".mkv"}. Enforced against the sanitized
       filename's extension. Also drives the magic-byte lookup.
-    - `max_bytes`: per-file cap. Defaults to _MAX_UPLOAD_BYTES.
+- `max_bytes`: per-file cap. Defaults to _MAX_UPLOAD_BYTES.
 
     Reads in 1 MiB chunks so the request never lives in RAM in full,
     kills the write if the cap is breached, and deletes the partial
@@ -3427,7 +3427,7 @@ class KeyframeAnimateRequest(BaseModel):
     fps: int = Field(default=24, ge=6, le=60)
     easing: str = Field(default="ease_in_out")
     # `blend` is the only method the plain ffmpeg backend can do. `i2v`
-    # would route to a diffusion pipeline (not wired here — the UI shows
+    # would route to a diffusion pipeline (not wired here - the UI shows
     # it as "requires GPU", and the panel disables it when it's absent).
     method: str = Field(default="blend")
 
@@ -3477,7 +3477,7 @@ def _run_keyframe_animate(job_id: str, req: KeyframeAnimateRequest):
         # Ffmpeg's expression can't index arrays cleanly, but a
         # ``lerp(A,B,N/(n-1))`` shape produces the linear case and
         # covers 99% of user intent. For the actual easing we render
-        # to individual frames via a small python loop then concat —
+        # to individual frames via a small python loop then concat - 
         # much simpler and lets us report progress accurately.
         import tempfile
         from PIL import Image
@@ -3487,7 +3487,7 @@ def _run_keyframe_animate(job_id: str, req: KeyframeAnimateRequest):
         # consistent surface.
         w = min(start_img.size[0], end_img.size[0])
         h = min(start_img.size[1], end_img.size[1])
-        # Fold to even dims — libx264 refuses odd width/height.
+        # Fold to even dims - libx264 refuses odd width/height.
         w -= w % 2
         h -= h % 2
         start_img = start_img.resize((w, h))
@@ -3629,7 +3629,7 @@ def _batch_status(batch_id: str) -> Optional[Dict]:
 @app.post("/api/v1/edit/batch-render")
 async def edit_batch_render(req: BatchRenderRequest):
     """Queue a batch of timeline renders. Every clip in every item is
-    validated up front — a batch that fails half-through with the other
+    validated up front - a batch that fails half-through with the other
     half already rendered is worse than one that fails at submit."""
     if not req.items:
         raise HTTPException(status_code=422, detail="Batch has no items.")
@@ -3691,7 +3691,7 @@ async def edit_batch_render_cancel(batch_id: str):
 async def edit_keyframe_animate(req: KeyframeAnimateRequest):
     """Alpha-blend two keyframe images into an mp4 of N frames at ``fps``
     using the specified easing curve. Only the ``blend`` method is wired
-    server-side today — GPU-backed I2V / frame-interpolation modes live
+    server-side today - GPU-backed I2V / frame-interpolation modes live
     in the video-gen stack and will be routed here when they land."""
     for path in (req.start_image_path, req.end_image_path):
         if not os.path.isfile(path):
@@ -3891,7 +3891,7 @@ async def images_inpaint(req: ImageInpaintRequest):
 
 @app.post("/api/v1/images/variation", response_model=JobResponse)
 async def images_variation(req: ImageVariationRequest):
-    """\"More like this\" — low-strength img2img on the same prompt."""
+    """\"More like this\" - low-strength img2img on the same prompt."""
     if not os.path.isfile(req.image_path):
         raise HTTPException(status_code=422, detail=f"Image not found: {req.image_path}")
     job_id = _create_job("image_variation", req.model_dump())
@@ -4212,7 +4212,7 @@ def _run_character_portrait(job_id: str, req: CharacterPortraitRequest):
                 "url": f"/static/portraits/{char_filename}",
             }
 
-        # (IP-Adapter for SDXL multi-view skipped — download too slow;
+        # (IP-Adapter for SDXL multi-view skipped - download too slow;
         #  shared seed provides adequate cross-view consistency)
 
         # Register with IP-Adapter if requested
@@ -4389,7 +4389,7 @@ async def get_logs(lines: int = 100):
 
 
 # ---------------------------------------------------------------------------
-# Telemetry / diagnostics (opt-in, local-only — see filmmaker/telemetry.py)
+# Telemetry / diagnostics (opt-in, local-only - see filmmaker/telemetry.py)
 # ---------------------------------------------------------------------------
 
 # Telemetry endpoints live in api/routers/telemetry.py; license endpoints
@@ -4406,7 +4406,7 @@ async def test_hf_token(token: str):
         from huggingface_hub import HfApi
         api = HfApi(token=token)
         info = api.whoami()
-        # Token works — save it
+        # Token works - save it
         os.environ["HF_TOKEN"] = token
         # Persist to .env
         env_file = os.path.join(ROOT_DIR, ".env")
@@ -4524,7 +4524,7 @@ async def live_transcribe_ws(websocket: WebSocket):
                 for ps in result["partial"]:
                     await websocket.send_json({"type": "partial", **ps})
         # Once stop was signaled, feed any leftover audio into the buffer WITHOUT
-        # running another rolling decode — flush() will handle the tail. Skipping
+        # running another rolling decode - flush() will handle the tail. Skipping
         # the extra decode pass keeps stop→complete under the client watchdog.
         while True:
             try:
@@ -4712,13 +4712,13 @@ async def live_screen_ws(websocket: WebSocket):
     Streaming screen OCR over WebSocket.
 
     Query params:
-        session     - client session id (also used for output filenames)
-        source      - "browser" (default) or "local"
-        confidence  - float, OCR confidence floor (default 0.5)
-        diff        - int, perceptual-hash distance below which a frame is
+        session - client session id (also used for output filenames)
+        source - "browser" (default) or "local"
+        confidence - float, OCR confidence floor (default 0.5)
+        diff - int, perceptual-hash distance below which a frame is
                       treated as unchanged (default 4)
-        monitor     - int, mss monitor index when source=local (default 1)
-        fps         - float, capture rate when source=local (default 1.0)
+        monitor - int, mss monitor index when source=local (default 1)
+        fps - float, capture rate when source=local (default 1.0)
 
     Wire protocol:
         Client (browser source):
@@ -5185,7 +5185,7 @@ _ensure_ffmpeg_on_path()
 
 
 # ---------------------------------------------------------------------------
-# Library — local video organizer (T1: scan + dedupe + browse)
+# Library - local video organizer (T1: scan + dedupe + browse)
 # ---------------------------------------------------------------------------
 LIBRARY_DIR = os.path.join(OUTPUT_DIR, "library")
 os.makedirs(LIBRARY_DIR, exist_ok=True)
@@ -5350,7 +5350,7 @@ _IMAGE_MIME_MAP = {
 @app.get("/api/v1/library/videos/{video_id}/stream")
 async def library_stream(video_id: int):
     """Direct-serve the video file. HTTP Range support comes from FileResponse.
-    Browsers only natively play a subset (mp4/webm/ogv) — the rest still stream
+    Browsers only natively play a subset (mp4/webm/ogv) - the rest still stream
     but may only render when opened in a native player. The mime type at least
     won't be a lie."""
     v = _library_store.get_video(video_id)
@@ -5372,7 +5372,7 @@ async def library_duplicates(near_threshold: int = 8):
 
 @app.post("/api/v1/library/duplicates/plan")
 async def library_deletion_plan(req: LibraryDeletionPlanRequest):
-    """Preview 'delete all but one' — what the user will see in the review
+    """Preview 'delete all but one' - what the user will see in the review
     modal before the batch delete actually runs. Pure read: nothing on disk
     or in the index changes."""
     return _lib_dedupe.build_deletion_plan(
@@ -5486,7 +5486,7 @@ async def library_scan(req: LibraryStartScanRequest):
     if not root_ids:
         root_ids = [r["id"] for r in _library_store.list_roots()]
     if not root_ids:
-        raise HTTPException(400, "No library roots to scan — add one first.")
+        raise HTTPException(400, "No library roots to scan - add one first.")
 
     job_id = _create_job("library_scan", {"root_ids": root_ids})
     # Bridge library-job payload → shared jobs dict so /api/v1/jobs and the
@@ -5533,7 +5533,7 @@ class LibraryClusterRequest(BaseModel):
 
 @app.get("/api/v1/library/index-stats")
 async def library_index_stats():
-    """T2-aware stats — how many videos are embedded, which model, dim."""
+    """T2-aware stats - how many videos are embedded, which model, dim."""
     try:
         from library import index as _lib_index  # lazy
         return _lib_index.stats(_library_store)
@@ -5681,7 +5681,7 @@ app.mount("/static/library/reencoded", StaticFiles(directory=_REENCODE_DIR),
 @app.get("/api/v1/library/legacy-videos")
 async def library_legacy_videos(limit: int = 1000):
     """List videos whose codec is legacy (mpeg2 / wmv / rmvb / dv / etc.).
-    Anything a probe hasn't touched is excluded — a null codec is un-probed,
+    Anything a probe hasn't touched is excluded - a null codec is un-probed,
     not legacy."""
     videos = _library_store.list_legacy_videos(limit=max(1, min(5000, limit)))
     return {
@@ -5811,7 +5811,7 @@ async def library_enhance(video_id: int, req: LibraryEnhanceRequest):
 
 
 # ---------------------------------------------------------------------------
-# Film Studio — multi-agent short-film pipeline (T1)
+# Film Studio - multi-agent short-film pipeline (T1)
 # ---------------------------------------------------------------------------
 
 FILMS_DIR = os.path.join(OUTPUT_DIR, "films")
@@ -5887,13 +5887,13 @@ def _film_stages_dict() -> list:
 
 @app.get("/api/v1/films/stages")
 async def film_list_stages():
-    """The pipeline shape — static; used by the frontend to render the timeline."""
+    """The pipeline shape - static; used by the frontend to render the timeline."""
     return {"stages": _film_stages_dict()}
 
 
 @app.get("/api/v1/films/templates")
 async def film_list_templates():
-    """Starter templates for the "new project" screen. Static — the
+    """Starter templates for the "new project" screen. Static - the
     catalog lives in filmmaker/film_templates.py so contributions are
     a regular code review, not a database migration."""
     from filmmaker import film_templates
@@ -5922,7 +5922,7 @@ async def film_create_from_template(req: FilmFromTemplateRequest):
     if len(brief) < 8:
         raise HTTPException(
             status_code=422,
-            detail="Brief must be at least 8 characters — override the "
+            detail="Brief must be at least 8 characters - override the "
                    "template's sample brief with something meaningful.",
         )
     config = film_templates.template_config(template.id)
@@ -6067,7 +6067,7 @@ async def film_edit_artifact(project_id: str, stage_key: str, req: FilmEditArtif
     if _fo.manager.is_running(project_id):
         raise HTTPException(409, "Pause the run before editing artifacts.")
     proj.write_artifact(stage_key, req.data)  # type: ignore[arg-type]
-    # If the edited stage was pending/failed, promote it to done — the user
+    # If the edited stage was pending/failed, promote it to done - the user
     # just supplied the artifact by hand.
     if proj.state.stage_status.get(stage_key) not in ("done", "needs_review"):
         proj.set_stage_status(stage_key, "done")  # type: ignore[arg-type]
@@ -6154,7 +6154,7 @@ async def film_import(file: UploadFile = File(...),
                       title_override: Optional[str] = None):
     """Materialize a project from an uploaded ``.studioproj`` bundle.
     A fresh project id is minted so importing the same file twice
-    produces two independent copies — no clobbering."""
+    produces two independent copies - no clobbering."""
     from filmmaker import projects as _fp, packaging as _pkg
     import tempfile
 
@@ -6246,7 +6246,7 @@ async def film_stream(websocket: WebSocket, project_id: str):
                 ev = await asyncio.wait_for(queue.get(), timeout=30.0)
                 await websocket.send_json({"type": "event", "event": ev})
             except asyncio.TimeoutError:
-                # heartbeat — also gives us a chance to notice a client disconnect
+                # heartbeat - also gives us a chance to notice a client disconnect
                 try:
                     await websocket.send_json({"type": "ping"})
                 except Exception:
@@ -6271,7 +6271,7 @@ if __name__ == "__main__":
     import uvicorn
 
     # Loopback by default. To expose on the LAN, set STUDIOLITE_HOST=0.0.0.0
-    # (or a specific NIC address) — and understand that anyone on that
+    # (or a specific NIC address) - and understand that anyone on that
     # network can then use whatever the API can do. Auth still applies.
     host = os.environ.get("STUDIOLITE_HOST", "127.0.0.1")
     port = int(os.environ.get("STUDIOLITE_PORT", "8000"))
@@ -6282,7 +6282,7 @@ if __name__ == "__main__":
         )
     else:
         logger.warning(
-            "StudioLite API auth OFF (STUDIOLITE_AUTH=off) — anyone who "
+            "StudioLite API auth OFF (STUDIOLITE_AUTH=off) - anyone who "
             "reaches %s can call every endpoint.", host,
         )
     uvicorn.run(app, host=host, port=port)

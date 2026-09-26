@@ -2,7 +2,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 // The API token is either baked in at build time (NEXT_PUBLIC_API_TOKEN)
 // or read from browser storage. When both are absent, requests still go
-// out headerless — the server will 401 if auth is enabled, and the UI
+// out headerless - the server will 401 if auth is enabled, and the UI
 // can then surface the auth-status probe to ask the user for it.
 const _buildToken =
   typeof process !== "undefined" && process.env
@@ -26,7 +26,7 @@ export function setApiToken(token: string): void {
     if (token) window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
     else window.localStorage.removeItem(TOKEN_STORAGE_KEY);
   } catch {
-    // Storage failed (private mode, quota) — the caller can retry.
+    // Storage failed (private mode, quota) - the caller can retry.
   }
 }
 
@@ -417,7 +417,7 @@ export const getDownloadUrl = (jobId: string) => `${API_BASE}/api/v1/jobs/${jobI
 // Trigger a real file download in the browser, preserving panel state.
 // The native `download` attribute on <a> is ignored cross-origin unless the
 // server sends Content-Disposition: attachment, so we fetch as blob and
-// click a synthetic anchor with an object URL — works for any URL the
+// click a synthetic anchor with an object URL - works for any URL the
 // browser can fetch (CORS permitting).
 export async function downloadBlob(url: string, suggestedName?: string): Promise<void> {
   const res = await fetch(url);
@@ -486,7 +486,7 @@ export const getImagesHistory = (limit = 50) =>
     `/api/v1/images/history?limit=${limit}`,
   );
 
-// uploadImage lives up in the edit section — same helper handles both.
+// uploadImage lives up in the edit section - same helper handles both.
 
 // ---------------------------------------------------------------------------
 // Film Studio
@@ -520,7 +520,7 @@ export interface FilmConfig {
   style: "stylized" | "photoreal";
   target_minutes: number;
   quality: "draft" | "standard" | "high" | "ultra";
-  // Backend picks — every one is optional; the server keeps its own defaults.
+  // Backend picks - every one is optional; the server keeps its own defaults.
   sdxl_variant?: "turbo" | "base" | "z-image-turbo" | "flux-schnell" | string;
   motion_backend?: "auto" | "svd" | "animatediff" | "wan" | "wan22" | "framepack" | "ltx" | "kenburns" | string;
   voice_backend?: "piper" | "xtts" | "indextts2" | "qwen3tts" | "chatterbox" | string;
@@ -664,7 +664,7 @@ export interface LibraryVideo {
   embedded?: boolean;
   // "video" or "image"; legacy rows without the column read back as "video".
   kind?: "video" | "image";
-  // Speech-to-text index — true when a whisper transcript is stored.
+  // Speech-to-text index - true when a whisper transcript is stored.
   transcribed?: boolean;
   transcript_language?: string | null;
 }

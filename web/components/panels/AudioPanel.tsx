@@ -176,7 +176,7 @@ export default function AudioPanel() {
         text: ttsText.trim(),
         engine: "piper",
         voice: voiceOverride || activePersona?.voice || "Amy",
-        persona: selectedPersona,           // label only — server doesn't override
+        persona: selectedPersona,           // label only - server doesn't override
         speed, pitch, volume,                // exactly what's on the sliders
         output_format: outputFormat,
       });
@@ -742,7 +742,7 @@ function IsolateResultCard({ result, sourceName }: { result: IsolateResult; sour
       {result.method === "ffmpeg_filter" && (
         <Card className="border-amber-500/20 bg-amber-500/5">
           <p className="text-[11px] text-amber-300 leading-relaxed">
-            Using ffmpeg bandpass filter (200–3000 Hz) — fast but rough.
+            Using ffmpeg bandpass filter (200–3000 Hz) - fast but rough.
             For ML-quality separation install demucs: <code className="text-amber-200 bg-zinc-900/60 px-1 py-0.5 rounded">pip install demucs</code>
           </p>
         </Card>

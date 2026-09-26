@@ -52,7 +52,7 @@ class TestLookup:
 
     def test_template_config_matches_project_config_fields(self):
         cfg = film_templates.template_config("short-story")
-        # Every key we emit must be a real field on ProjectConfig — else
+        # Every key we emit must be a real field on ProjectConfig - else
         # ProjectConfig(**cfg) will explode at project-create time.
         allowed = set(ProjectConfig.__dataclass_fields__.keys())
         for k in cfg:

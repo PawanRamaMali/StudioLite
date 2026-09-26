@@ -5,12 +5,12 @@ by default; if CUDA is available and env var STUDIOLITE_EMBED_DEVICE
 is not forced to "cpu", we use it.
 
 Offline story: the CLIP model is loaded with `local_files_only=True` on
-the first pass — if it isn't cached the user gets a clear "model not
+the first pass - if it isn't cached the user gets a clear "model not
 downloaded" error, and the pipeline stays functional (search + clusters
 just report empty). The launcher UI can offer a one-click download.
 
-Frame sampling: reuse library.phash._extract_frames — same MJPEG-pipe
-trick — so we don't shell out to ffmpeg twice per video.
+Frame sampling: reuse library.phash._extract_frames - same MJPEG-pipe
+trick - so we don't shell out to ffmpeg twice per video.
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ EMBED_DIM = 512  # base-patch32 is 512-d
 
 
 class EmbeddingUnavailable(RuntimeError):
-    """Raised when the CLIP model can't load — usually because the weights
+    """Raised when the CLIP model can't load - usually because the weights
     aren't in the local HuggingFace cache and we're running offline."""
 
 
@@ -75,7 +75,7 @@ def get_runtime() -> ClipRuntime:
             processor = CLIPProcessor.from_pretrained(_MODEL_ID, local_files_only=True)
             model = CLIPModel.from_pretrained(_MODEL_ID, local_files_only=True)
         except Exception:
-            # Retry allowing network — user may not have cached the model.
+            # Retry allowing network - user may not have cached the model.
             try:
                 processor = CLIPProcessor.from_pretrained(_MODEL_ID)
                 model = CLIPModel.from_pretrained(_MODEL_ID)
@@ -164,7 +164,7 @@ def encode_video(path: str, duration_sec: Optional[float]) -> Optional[np.ndarra
 
 
 def encode_image(path: str) -> Optional[np.ndarray]:
-    """Same embedding shape as encode_video but skips ffmpeg — a still
+    """Same embedding shape as encode_video but skips ffmpeg - a still
     image is one frame straight into CLIP."""
     if not os.path.isfile(path):
         return None
@@ -207,7 +207,7 @@ def encode_texts_batch(texts: List[str]) -> np.ndarray:
 def _encode_images_pooled(frames: List[Image.Image], rt: ClipRuntime) -> np.ndarray:
     import torch
     with torch.no_grad():
-        # Batched forward — a handful of frames fits easily even on CPU.
+        # Batched forward - a handful of frames fits easily even on CPU.
         inputs = rt.processor(images=frames, return_tensors="pt")
         inputs = {k: v.to(rt.device) for k, v in inputs.items()}
         feats = rt.model.get_image_features(**inputs)

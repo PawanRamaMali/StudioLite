@@ -1,6 +1,6 @@
 """LLM backend request/response shape tests.
 
-Never hits the network — patches `requests.post` to a MagicMock and asserts
+Never hits the network - patches `requests.post` to a MagicMock and asserts
 the request URL, headers, and body match what each provider expects, plus
 that the response-shape parser pulls the right text back."""
 from __future__ import annotations

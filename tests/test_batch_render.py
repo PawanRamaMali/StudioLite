@@ -2,7 +2,7 @@
 
 We can't actually invoke the moviepy runner without a real video, so
 the runner threads created here will fail almost immediately with
-"clip not found" — that's fine, we're testing the batch aggregation
+"clip not found" - that's fine, we're testing the batch aggregation
 layer, not the render itself. We do that by pointing the batch at
 real (empty) files on disk so submit-time validation passes, then
 observe the batch record and its status endpoint."""
@@ -58,7 +58,7 @@ class TestBatchSubmit:
             ],
         })
         assert r.status_code == 422
-        # And no batch was created — the response is an error, not a status.
+        # And no batch was created - the response is an error, not a status.
         assert "detail" in r.json()
 
     def test_submit_creates_one_job_per_item(self, monkeypatch, tmp_path):
@@ -106,7 +106,7 @@ class TestBatchStatus:
         assert r.status_code == 404
 
     def test_status_reflects_job_updates(self, monkeypatch, tmp_path):
-        """The status endpoint reads the shared jobs dict — poking a job
+        """The status endpoint reads the shared jobs dict - poking a job
         via the store should be visible through the rollup. This proves
         the aggregation layer isn't caching stale state."""
         api, client = _client(monkeypatch, tmp_path)
@@ -145,6 +145,6 @@ class TestBatchCancel:
         r = client.delete(f"/api/v1/edit/batch-render/{batch_id}")
         assert r.status_code == 200
         # requested_cancel counts only jobs whose cancel event was set
-        # here — a job that already finished won't be re-cancelled.
+        # here - a job that already finished won't be re-cancelled.
         assert r.json()["batch_id"] == batch_id
         assert isinstance(r.json()["requested_cancel"], int)

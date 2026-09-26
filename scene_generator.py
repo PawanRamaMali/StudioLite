@@ -2,11 +2,11 @@
 Scene Generator - Enterprise-quality local video generation.
 
 Engines (priority high -> low for "quality"; "draft" prefers LTX, "balanced" prefers Hunyuan):
-  - Wan 2.2 14B I2V GGUF Q3  (quality tier, 85-90% of Runway/Kling)
-  - HunyuanVideo 1.5 I2V 480p GGUF Q4  (balanced tier, 8.3B, lighter)
-  - LTX-2.3 distilled GGUF Q3  (draft tier, fastest)
-  - Wan VACE 1.3B  (fallback, local)
-  - Wan T2V 1.3B  (last-resort, text-only)
+- Wan 2.2 14B I2V GGUF Q3  (quality tier, 85-90% of Runway/Kling)
+- HunyuanVideo 1.5 I2V 480p GGUF Q4  (balanced tier, 8.3B, lighter)
+- LTX-2.3 distilled GGUF Q3  (draft tier, fastest)
+- Wan VACE 1.3B  (fallback, local)
+- Wan T2V 1.3B  (last-resort, text-only)
 
 All pipelines use SDXL (scene image) -> I2V (animate). GGUF quantization +
 model CPU offload lets them fit in 12GB VRAM.
@@ -164,7 +164,7 @@ ENGINES = {
 def list_available_engines() -> list:
     """Return list of {id, name, available} for UI.
 
-    All engines require CUDA — GGUF quantization and enable_model_cpu_offload
+    All engines require CUDA - GGUF quantization and enable_model_cpu_offload
     both need a GPU device to offload to. On CPU-only systems every engine
     is reported unavailable.
     """
@@ -183,7 +183,7 @@ def get_available_engine(preferred: Optional[str] = None) -> str:
     """Return the engine to use. If ``preferred`` is given and available, use it.
     Otherwise fall back to best available: Wan 2.2 > Hunyuan 1.5 > LTX-2.3 > VACE > T2V.
 
-    Raises RuntimeError on CPU-only systems — none of these engines are viable
+    Raises RuntimeError on CPU-only systems - none of these engines are viable
     without a CUDA GPU (weeks-long jobs at best, immediate crashes at worst).
     """
     if not torch.cuda.is_available():
@@ -203,7 +203,7 @@ def get_available_engine(preferred: Optional[str] = None) -> str:
             return preferred
         if preferred == "t2v_1.3b":
             return preferred
-        # Requested engine not available — fall through to auto-selection
+        # Requested engine not available - fall through to auto-selection
 
     # Quality-preset shortcut
     if preferred == "quality" and gguf_available():
@@ -303,7 +303,7 @@ def _load_wan22_gguf(progress_callback: Optional[Callable] = None):
         )
         image_processor = CLIPImageProcessor.from_pretrained(WAN22_CONFIG, subfolder="image_processor")
     except Exception:
-        # Image encoder may not be separate — pipeline will handle it
+        # Image encoder may not be separate - pipeline will handle it
         image_encoder = None
         image_processor = None
 
@@ -353,7 +353,7 @@ def _load_hunyuan15_gguf(progress_callback: Optional[Callable] = None):
         PipeCls = HunyuanVideo15ImageToVideoPipeline
         TfmCls = HunyuanVideo15Transformer3DModel
     except ImportError:
-        # Older diffusers exposed HunyuanVideo (original) but not 1.5 — escalate clearly.
+        # Older diffusers exposed HunyuanVideo (original) but not 1.5 - escalate clearly.
         raise RuntimeError(
             "HunyuanVideo 1.5 requires diffusers with HunyuanVideo15ImageToVideoPipeline. "
             "Update diffusers: pip install -U git+https://github.com/huggingface/diffusers.git"
@@ -413,7 +413,7 @@ def _load_ltx23_gguf(progress_callback: Optional[Callable] = None):
     if progress_callback:
         progress_callback(10, 100, "Loading LTX-2.3 distilled (GGUF Q3)...")
 
-    # LTX pipeline classes — names differ across diffusers versions.
+    # LTX pipeline classes - names differ across diffusers versions.
     # Try newest first, fall back to older names.
     PipeCls = None
     TfmCls = None
@@ -505,7 +505,7 @@ def generate_scene_image(prompt, negative_prompt="", width=832, height=480, seed
 def animate_wan22_gguf(image_path, prompt, negative_prompt="", height=480, width=832,
                        num_frames=49, num_inference_steps=30, guidance_scale=3.5,
                        fps=16, seed=None, progress_callback=None):
-    """Animate using Wan 2.2 14B I2V GGUF — best quality."""
+    """Animate using Wan 2.2 14B I2V GGUF - best quality."""
     pipe = _load_wan22_gguf(progress_callback)
 
     image = PIL.Image.open(image_path).convert("RGB").resize((width, height), PIL.Image.LANCZOS)
@@ -595,7 +595,7 @@ def animate_vace(image_path, prompt, negative_prompt="", height=480, width=832,
 def animate_hunyuan15(image_path, prompt, negative_prompt="", height=480, width=832,
                       num_frames=49, num_inference_steps=30, guidance_scale=6.0,
                       fps=16, seed=None, progress_callback=None):
-    """Animate using HunyuanVideo 1.5 I2V GGUF — balanced quality/speed."""
+    """Animate using HunyuanVideo 1.5 I2V GGUF - balanced quality/speed."""
     pipe = _load_hunyuan15_gguf(progress_callback)
 
     image = PIL.Image.open(image_path).convert("RGB").resize((width, height), PIL.Image.LANCZOS)
@@ -642,7 +642,7 @@ def animate_hunyuan15(image_path, prompt, negative_prompt="", height=480, width=
 def animate_ltx23(image_path, prompt, negative_prompt="", height=480, width=832,
                   num_frames=49, num_inference_steps=8, guidance_scale=1.0,
                   fps=24, seed=None, progress_callback=None):
-    """Animate using LTX-2.3 distilled GGUF — fastest draft tier.
+    """Animate using LTX-2.3 distilled GGUF - fastest draft tier.
 
     LTX-2.3 distilled uses few steps (~8) and guidance_scale=1 (no CFG).
     """
@@ -709,7 +709,7 @@ def _extract_last_frame(video_path: str, output_image_path: str) -> str:
     """Extract the last frame of ``video_path`` as a PNG for I2V continuation.
 
     Uses ffmpeg `-sseof -0.5` (seek to 0.5s before EOF) which is robust across
-    container/codec combinations — `-sseof -0.04` can return an empty stream
+    container/codec combinations - `-sseof -0.04` can return an empty stream
     when the keyframe interval is large.
     """
     cmd = [
@@ -730,7 +730,7 @@ def _extract_last_frame(video_path: str, output_image_path: str) -> str:
 def _concat_clips(clip_paths: list, output_path: str) -> str:
     """Concatenate clips with ffmpeg's concat demuxer (no re-encode).
 
-    Requires all clips to share codec/container — true here because every
+    Requires all clips to share codec/container - true here because every
     clip in a chain comes from the same engine + diffusers ``export_to_video``.
     """
     if len(clip_paths) == 1:
@@ -869,11 +869,11 @@ def generate_scene_video(prompt, negative_prompt="", target_duration=5.0, fps=16
     """Full pipeline: pick best engine (respects ``preferred_engine`` override).
 
     preferred_engine: one of
-      - "auto" / None  -> best available
-      - "quality" / "wan22_14b_gguf"    -> Wan 2.2 14B
-      - "balanced" / "hunyuan15_i2v_gguf" -> HunyuanVideo 1.5
-      - "draft" / "ltx23_distilled_gguf" -> LTX-2.3 distilled
-      - "vace_1.3b", "t2v_1.3b" -> older local fallbacks
+- "auto" / None  -> best available
+- "quality" / "wan22_14b_gguf"    -> Wan 2.2 14B
+- "balanced" / "hunyuan15_i2v_gguf" -> HunyuanVideo 1.5
+- "draft" / "ltx23_distilled_gguf" -> LTX-2.3 distilled
+- "vace_1.3b", "t2v_1.3b" -> older local fallbacks
     """
     # Env var can force the engine when preferred_engine unset
     if preferred_engine is None:

@@ -193,7 +193,7 @@ export default function CharactersPanel() {
         <div className="mb-4 flex items-start gap-3 rounded-lg border border-yellow-500/30 bg-yellow-500/5 p-4 text-sm">
           <Cpu className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
           <div>
-            <p className="font-medium text-yellow-300">Slow on CPU — portrait generation will take 5-15 minutes per view.</p>
+            <p className="font-medium text-yellow-300">Slow on CPU - portrait generation will take 5-15 minutes per view.</p>
             <p className="text-yellow-200/80 mt-1">
               No NVIDIA GPU detected, so SDXL runs in fp32 on your CPU. For a character with 2 views expect ~15-30 minutes total.
               A GPU would bring this under a minute.

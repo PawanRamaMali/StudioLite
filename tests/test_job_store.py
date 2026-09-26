@@ -94,7 +94,7 @@ class TestRecovery:
         assert store2["j1"]["status"] == "interrupted"
         assert store2["j2"]["status"] == "interrupted"
         assert store2["j4"]["status"] == "interrupted"
-        # Completed jobs stay completed — recovery must not touch them.
+        # Completed jobs stay completed - recovery must not touch them.
         assert store2["j3"]["status"] == "completed"
 
     def test_recovery_is_idempotent(self, tmp_path):
@@ -112,13 +112,13 @@ class TestRecovery:
 
 class TestFallbackMode:
     def test_bad_path_still_works_in_memory(self, tmp_path):
-        """A path we can't open must not crash the process — the store
+        """A path we can't open must not crash the process - the store
         falls back to in-memory-only and warns."""
         bad_path = os.path.join(str(tmp_path), "nonexistent-dir", "jobs.sqlite3")
         # We deliberately don't create the parent directory. The store
         # will try, succeed (makedirs is exist_ok=True) and open. So
         # to actually exercise the fallback we point it at something
-        # that sqlite refuses to open — a directory path.
+        # that sqlite refuses to open - a directory path.
         os.makedirs(bad_path, exist_ok=True)
         store = PersistentJobStore(bad_path)
         # Fallback path: no connection, but the dict interface still works.

@@ -7,15 +7,15 @@ recent app log into a support zip the user can attach to a bug report
 themselves. Nothing here talks to the network.
 
 Design invariants:
-  - **Opt-in.** No events are logged until the user calls `record_consent(True)`.
+- **Opt-in.** No events are logged until the user calls `record_consent(True)`.
     A fresh install starts with consent=False.
-  - **Content allowlist.** `record_event()` accepts only keys in
+- **Content allowlist.** `record_event()` accepts only keys in
     EVENT_KEY_ALLOWLIST. Freeform strings never land in the log, so a
     stray prompt or filename can't leak through by accident.
-  - **Installation-only ID.** The installation ID is a fresh UUID minted
+- **Installation-only ID.** The installation ID is a fresh UUID minted
     the first time telemetry is turned on. `reset_installation_id()`
     replaces it so the user can start over.
-  - **Redaction.** The bundle helper redacts obvious paths and tokens
+- **Redaction.** The bundle helper redacts obvious paths and tokens
     from the recent log tail before it hands them over.
 
 The API layer wraps this module with three endpoints (see api_server.py):
@@ -52,7 +52,7 @@ _LOCK = threading.Lock()
 # --- Event schema -----------------------------------------------------------
 
 # Only these keys are legal on a telemetry event. Anything else silently
-# drops. Keeps the schema honest as the codebase grows — you have to add
+# drops. Keeps the schema honest as the codebase grows - you have to add
 # a field here on purpose before you can record it.
 EVENT_KEY_ALLOWLIST = frozenset({
     "event",              # e.g. "stage_start" or "model_download_failure"
@@ -101,7 +101,7 @@ class TelemetryState:
 
 def _read_state() -> TelemetryState:
     """Read the consent record, defaulting to opt-out on any parse failure.
-    Failing closed on a corrupted file is the safe choice — a user shouldn't
+    Failing closed on a corrupted file is the safe choice - a user shouldn't
     get their events logged because a hex-editor slip broke consent.json."""
     if not os.path.exists(CONSENT_FILE):
         return TelemetryState()
@@ -128,7 +128,7 @@ def _write_state(state: TelemetryState) -> None:
 
 def get_state() -> Dict[str, Any]:
     """Return a plain-dict view of the consent state, safe to send to the UI.
-    Note the installation ID is included when consent is on — this is the
+    Note the installation ID is included when consent is on - this is the
     only stable identifier the module ever generates and it never leaves the
     box on its own."""
     with _LOCK:
@@ -137,7 +137,7 @@ def get_state() -> Dict[str, Any]:
 
 def record_consent(consent: bool) -> Dict[str, Any]:
     """Flip consent on or off. Turning on mints a fresh installation ID if
-    one isn't already recorded. Turning off leaves the ID in place — the
+    one isn't already recorded. Turning off leaves the ID in place - the
     user can wipe it explicitly with reset_installation_id()."""
     with _LOCK:
         state = _read_state()
@@ -157,7 +157,7 @@ def record_consent(consent: bool) -> Dict[str, Any]:
 
 
 def reset_installation_id() -> Dict[str, Any]:
-    """Rotate the installation ID. Doesn't touch the events log — the user
+    """Rotate the installation ID. Doesn't touch the events log - the user
     who wants a truly fresh start can also clear .telemetry/events.jsonl
     via the panel."""
     with _LOCK:
@@ -251,8 +251,8 @@ _HF_TOKEN_RE = re.compile(r"hf_[A-Za-z0-9]{20,}")
 
 def _redact_line(line: str) -> str:
     """Coarse redaction of user-specific tokens/paths for the bundle export.
-    We deliberately leave stack frames intact — file paths inside the
-    installation dir are still useful to a maintainer — but drop absolute
+    We deliberately leave stack frames intact - file paths inside the
+    installation dir are still useful to a maintainer - but drop absolute
     paths outside the repo and any recognizable HF-style token."""
     line = _HF_TOKEN_RE.sub("hf_[REDACTED]", line)
 
@@ -270,7 +270,7 @@ def _redact_line(line: str) -> str:
 def build_diagnostic_bundle(*, log_tail: int = 500,
                              event_tail: int = 500) -> bytes:
     """Assemble a zip of {consent.json, events.jsonl tail, redacted app-log
-    tail}. Nothing user-editable, nothing secret, nothing over the wire —
+    tail}. Nothing user-editable, nothing secret, nothing over the wire - 
     the user opens the zip themselves and attaches it to a bug report.
 
     Reads the app log from the same path api_server writes to (.mp/videogen.log)
@@ -298,9 +298,9 @@ def build_diagnostic_bundle(*, log_tail: int = 500,
             "README.txt",
             "StudioLite diagnostic bundle.\n\n"
             "Contents:\n"
-            "  consent.json  — the local telemetry consent record.\n"
-            "  events.jsonl  — recent events (last {} entries).\n"
-            "  app.log       — recent app log lines, paths outside the\n"
+            "  consent.json - the local telemetry consent record.\n"
+            "  events.jsonl - recent events (last {} entries).\n"
+            "  app.log - recent app log lines, paths outside the\n"
             "                  install root redacted; HF tokens redacted.\n\n"
             "Nothing in this bundle was sent anywhere. If you attach it to\n"
             "a support ticket, you are doing that yourself.\n".format(event_tail),

@@ -713,7 +713,7 @@ def _ffmpeg_run(cmd: list) -> None:
 
 
 def _atempo_chain(factor: float) -> str:
-    """ffmpeg's atempo only accepts 0.5..2.0 — chain filters for larger ranges."""
+    """ffmpeg's atempo only accepts 0.5..2.0 - chain filters for larger ranges."""
     f = max(0.25, min(4.0, factor))
     if 0.5 <= f <= 2.0:
         return f"atempo={f:.4f}"
@@ -778,7 +778,7 @@ def apply_audio_effects(
     if abs(pitch) >= 0.05:
         # Pitch shift via asetrate (changes both pitch and tempo) then compensate tempo.
         filters.append(f"asetrate={int(sr * pitch_factor)}")
-        # After asetrate, audio sample rate is non-standard — set back.
+        # After asetrate, audio sample rate is non-standard - set back.
         filters.append(f"aresample={sr}")
         # Compensating tempo so pitch shift doesn't change speed: divide by pitch_factor
         comp = 1.0 / pitch_factor

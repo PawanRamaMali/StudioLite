@@ -26,7 +26,7 @@ logger = logging.getLogger("studiolite.filmmaker")
 
 
 # ---------------------------------------------------------------------------
-# 1. Producer — brief → 3 loglines → choose one
+# 1. Producer - brief → 3 loglines → choose one
 # ---------------------------------------------------------------------------
 
 _PRODUCER_SYSTEM = """\
@@ -37,11 +37,11 @@ respond with EXACTLY THREE distinct pitches the film could pursue.
 Each pitch is:
 - title: short, evocative, concrete (a noun or noun phrase, not a sentence).
 - tone: one of drama, thriller, comedy, sci-fi, horror, romance, mystery, action, documentary, experimental.
-- premise: one or two sentences on the situation — who, where, what shifts.
-  Do NOT write "When X, a Y must Z before W" — that formula produces
+- premise: one or two sentences on the situation - who, where, what shifts.
+  Do NOT write "When X, a Y must Z before W" - that formula produces
   identical-sounding pitches. Just say what happens.
 - central_irony: one sentence naming the tension that makes the story
-  worth watching — what the character wants versus what the situation
+  worth watching - what the character wants versus what the situation
   demands, or what the audience knows versus what the character does.
 - unresolved: one sentence naming what the film deliberately does NOT
   settle. Short films earn their end by leaving something open.
@@ -51,7 +51,7 @@ Each pitch is:
 
 Prefer specific over grand: one afternoon in one room beats a saga; a
 character trying to say one hard sentence beats a character trying to
-save the world. Vary the three pitches — different tones, different
+save the world. Vary the three pitches - different tones, different
 stakes, different endings.
 
 Return JSON:
@@ -104,7 +104,7 @@ def run_producer(project: Project) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 2. Screenwriter — chosen logline → screenplay
+# 2. Screenwriter - chosen logline → screenplay
 # ---------------------------------------------------------------------------
 
 _SCREENWRITER_SYSTEM = """\
@@ -132,17 +132,17 @@ FORMAT (the downstream parser is strict; violating this drops dialogue):
 
 CHARACTERS: 2-4 named speaking parts. Introduce each in ALL CAPS on first
 appearance in an action line, followed by a short physical description in
-parens on the SAME line — age range, wardrobe, one distinctive feature.
+parens on the SAME line - age range, wardrobe, one distinctive feature.
 Downstream stages parse those to keep the character looking consistent.
 Example:
     MARGO (60s, silver bob, apron dusted with flour) wipes the counter.
 
 STRUCTURE: about one screen page per minute. Scene count scales with
-runtime — under 2 min: 1-2 scenes; 2-3 min: at least 3; 4+ min: at least
+runtime - under 2 min: 1-2 scenes; 2-3 min: at least 3; 4+ min: at least
 4 scenes with distinct headings. Prefer real location or time changes
 over one long conversation in a single room.
 
-CRAFT — the part that separates screenplay from AI slop:
+CRAFT - the part that separates screenplay from AI slop:
 
 1. Enter late, leave early. Cut the first and last line of every dialogue
    exchange. Start the scene in the middle of the argument. End on the
@@ -153,12 +153,12 @@ CRAFT — the part that separates screenplay from AI slop:
 3. Subtext > text. The characters want the audience to think they want
    one thing; they actually want another. The action reveals the second.
 4. End scenes on an image, not a line. The camera should linger on
-   something specific — a hand, an empty chair, a light — after the
+   something specific - a hand, an empty chair, a light - after the
    last word.
 5. One clear scene goal per scene. Somebody wants something concrete;
    somebody else is in the way; something shifts by the end.
 
-BANNED PHRASES — do not write these exact strings or their close
+BANNED PHRASES - do not write these exact strings or their close
 paraphrases. They are the fingerprints of AI-generated screenwriting:
 "smiles softly", "eyes widen", "takes a deep breath", "a testament to",
 "little did they know", "we see", "we hear", "the camera pans", "in that
@@ -167,7 +167,7 @@ her thoughts", "steels himself", "she can't help but", "the weight of",
 "a mix of emotions", "unable to contain", "as if", "seemingly", "yet
 somehow", "the tension is palpable", "silence hangs".
 
-HOUSE STYLE — the below is the register to imitate. Not a template to
+HOUSE STYLE - the below is the register to imitate. Not a template to
 copy verbatim; a reference for pacing, dialogue tightness, and how
 action + subtext land on the page.
 
@@ -219,7 +219,7 @@ He walks out the front door. The bell rings. Diane doesn't turn to
 watch him go. She watches the shirt.
 ===
 
-WORKFLOW — write in two passes internally, then output only the second:
+WORKFLOW - write in two passes internally, then output only the second:
 1. Sketch a 5-beat outline in your head: scene goal, obstacle, midpoint
    turn, low point, image. Do not print the outline.
 2. Write the scenes hitting those beats, applying every craft rule above.
@@ -260,7 +260,7 @@ def run_screenwriter(project: Project) -> Dict[str, Any]:
         user_msg += (f"\n\n[Reviewer notes on your previous attempt: {hint}]\n"
                      "Rewrite the screenplay addressing those notes. "
                      "Keep the format and cast.")
-    # Prose stages want higher temperature than JSON stages — 0.9 gives
+    # Prose stages want higher temperature than JSON stages - 0.9 gives
     # room to leave the median voice. The verifier + orchestrator loop
     # handles slop-phrase retries; no need for a second call in here.
     fountain = _chat(project, "screenwriter", _SCREENWRITER_SYSTEM, user_msg,
@@ -277,7 +277,7 @@ def run_screenwriter(project: Project) -> Dict[str, Any]:
     }
 
 
-# AI-slop phrase list — kept in sync with the writer's system prompt so
+# AI-slop phrase list - kept in sync with the writer's system prompt so
 # both banning and re-prompting agree on what "banned" means. Matched
 # case-insensitively as whole-word substrings.
 _SLOP_PHRASES = (
@@ -291,7 +291,7 @@ _SLOP_PHRASES = (
 
 
 # -------------------------------------------------------------------------
-# Quality verifiers — one per stage that opts into the retry loop. Each
+# Quality verifiers - one per stage that opts into the retry loop. Each
 # returns a QualityReport; the orchestrator decides whether to retry.
 # Keep these deterministic and cheap: they run after every stage attempt,
 # so a slow verifier taxes every render.
@@ -311,7 +311,7 @@ def verify_producer(project: Project, artifact: Dict[str, Any]):
     starts = [str(l.get("logline", "")).strip().lower().split()[:1] for l in loglines]
     starts = [s[0] if s else "" for s in starts]
     if starts and len(set(starts)) == 1 and starts[0] == "when":
-        hints.append("all three loglines start with 'When ' — vary sentence structure")
+        hints.append("all three loglines start with 'When ' - vary sentence structure")
     for i, l in enumerate(loglines):
         for f in ("premise", "central_irony", "unresolved"):
             if not str(l.get(f, "")).strip():
@@ -322,7 +322,7 @@ def verify_producer(project: Project, artifact: Dict[str, Any]):
 
 def verify_screenwriter(project: Project, artifact: Dict[str, Any]):
     """Check the screenplay for slop phrases, format sanity, and structural
-    minimums. Doesn't judge dramatic quality — a machine can't — but flags
+    minimums. Doesn't judge dramatic quality - a machine can't - but flags
     the mechanical failures that produce AI-shaped output."""
     from .stages import QualityReport
     fountain = artifact.get("fountain", "") or ""
@@ -334,9 +334,9 @@ def verify_screenwriter(project: Project, artifact: Dict[str, Any]):
     import re as _re
     scene_headings = len(_re.findall(r"(?m)^(?:INT\.|EXT\.)", fountain))
     if scene_headings == 0:
-        hints.append("no scene headings found — every scene needs a slugline "
+        hints.append("no scene headings found - every scene needs a slugline "
                      "like `INT. LOCATION - TIME`")
-    # ALL CAPS cue lines are 1-4 words, all upper, on their own line —
+    # ALL CAPS cue lines are 1-4 words, all upper, on their own line - 
     # leading whitespace allowed (Fountain doesn't care).
     all_caps_cues = _re.findall(r"(?m)^[ \t]*[A-Z][A-Z0-9 '.-]{1,30}$", fountain)
     if len(all_caps_cues) < 4:
@@ -394,7 +394,7 @@ def verify_storyboard(project: Project, artifact: Dict[str, Any]):
             hints.append(f"storyboard missing scenes: {missing[:5]}")
         thin = [sid for sid, shots in scenes_map.items() if len(shots or []) < 2]
         if thin:
-            hints.append(f"scenes with fewer than 2 shots: {thin[:5]} — "
+            hints.append(f"scenes with fewer than 2 shots: {thin[:5]} - "
                          "each scene needs multiple angles/beats")
     total_shots = sum(len(shots or []) for shots in scenes_map.values())
     if total_shots == 0:
@@ -405,10 +405,10 @@ def verify_storyboard(project: Project, artifact: Dict[str, Any]):
 
 def _slop_lint(text: str) -> List[str]:
     """Return the unique banned phrases actually present in `text`.
-    Simple case-insensitive substring match — fast, deterministic, and
+    Simple case-insensitive substring match - fast, deterministic, and
     good enough since the phrases are distinctive enough not to collide
     with legitimate use in short dialogue. Not perfect (a legitimate
-    'as if' in dialogue would be flagged) — we accept that as the price
+    'as if' in dialogue would be flagged) - we accept that as the price
     for cheap enforcement."""
     if not text:
         return []
@@ -418,7 +418,7 @@ def _slop_lint(text: str) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# 3. Story Editor — critique + revise
+# 3. Story Editor - critique + revise
 # ---------------------------------------------------------------------------
 
 _STORY_EDITOR_SYSTEM = """\
@@ -436,7 +436,7 @@ Return JSON:
   "revised_fountain": "the full revised screenplay in Fountain format"
 }
 
-RUBRIC — for each note, `fail` must be exactly one of:
+RUBRIC - for each note, `fail` must be exactly one of:
   on_the_nose            character states the theme or their emotion aloud
   feeling_exposition     character explains their inner state instead of showing
   symmetrical_ending     resolution too neat; every thread tied off
@@ -451,7 +451,7 @@ RUBRIC — for each note, `fail` must be exactly one of:
   banned_phrase          hits one of the AI-slop phrases in the writer prompt
 
 You must QUOTE the offending line (max ~15 words) in `quote`. Generic
-notes ("dialogue could be sharper") are forbidden — they produce
+notes ("dialogue could be sharper") are forbidden - they produce
 generic rewrites.
 
 REVISION RULES:
@@ -508,7 +508,7 @@ def run_story_editor(project: Project) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 4. Script Breakdown — screenplay → structured scene DB
+# 4. Script Breakdown - screenplay → structured scene DB
 # ---------------------------------------------------------------------------
 
 _BREAKDOWN_SYSTEM = """\
@@ -526,9 +526,9 @@ For each scene, extract:
 - mood: one short phrase ("tense stillness", "hopeful bustle", etc.)
 - estimated_seconds: your best guess of screen time, integer
 
-SCENE COUNT — the film has a stated target runtime (in `target_minutes`
+SCENE COUNT - the film has a stated target runtime (in `target_minutes`
 below). If the screenplay reads like one long single-location scene, break
-it into MULTIPLE scenes at any natural beat — location change, time jump,
+it into MULTIPLE scenes at any natural beat - location change, time jump,
 mood shift, new character arriving. Aim for one scene per 60 to 90 seconds
 of runtime. Under 2 minutes may be one or two scenes; a 5 minute film
 needs at least 4 scenes.
@@ -594,7 +594,7 @@ def _normalize_scene(i: int, s: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 5. Storyboard — scene → shots
+# 5. Storyboard - scene → shots
 # ---------------------------------------------------------------------------
 
 _STORYBOARD_SYSTEM = """\
@@ -614,7 +614,7 @@ shots. Return JSON:
   ]
 }
 
-SHOT COUNT — pace shots to the scene's `estimated_seconds`. Aim for one
+SHOT COUNT - pace shots to the scene's `estimated_seconds`. Aim for one
 shot per 6 to 10 seconds. Minimum 3 shots for any scene. The soft
 maximum scales with scene length: roughly `estimated_seconds / 6`, but
 never more than 20 for one scene. A 20 second scene should have 3 or 4
@@ -626,14 +626,14 @@ motion clip (T2). Keep descriptions concrete and visual. When you name a
 character in `subject` or `action`, use the SAME name the screenplay uses
 in its cues (so downstream stages can match dialogue to the right shot).
 
-DIALOGUE RULES — non-negotiable:
+DIALOGUE RULES - non-negotiable:
 - The `screenplay` field of the input contains the source of truth.
 - Every spoken line in that screenplay (the text on the line under a
   character cue in ALL CAPS) MUST land verbatim in the `dialogue` field
   of exactly one shot. Do not paraphrase, do not shorten, do not merge
   lines across characters.
 - If a shot has no dialogue, use an empty string. Non-speaking shots are
-  fine — but every screenplay line must appear somewhere.
+  fine - but every screenplay line must appear somewhere.
 - Never invent dialogue that isn't in the screenplay.
 """
 
@@ -682,7 +682,7 @@ def run_storyboard(project: Project) -> Dict[str, Any]:
             logger.warning("Storyboard soft-failed on scene %s (%s); synthesizing one shot.",
                            scene.get("id"), e)
         if not norm:
-            # Never leave a scene with zero shots — synthesize one so the
+            # Never leave a scene with zero shots - synthesize one so the
             # downstream pipeline has something to render.
             norm = [{
                 "id": "sh1",
@@ -694,7 +694,7 @@ def run_storyboard(project: Project) -> Dict[str, Any]:
 
         # Warn when the scene's screenplay clearly has speaking characters
         # but the storyboard emitted zero dialogue. That's the failure mode
-        # #61 was filed for — surface it instead of silently dropping the
+        # #61 was filed for - surface it instead of silently dropping the
         # dialogue on the floor.
         script = scene_scripts.get(sid) or ""
         expected_speech = _screenplay_has_dialogue(script) if script else bool(scene.get("characters"))
@@ -714,7 +714,7 @@ def run_storyboard(project: Project) -> Dict[str, Any]:
 def _split_screenplay_by_scene(full: str, scenes: List[Dict[str, Any]]) -> Dict[str, str]:
     """Split the Fountain screenplay into per-scene slices by walking scene
     headings (INT./EXT. lines) in order and matching them to breakdown scenes
-    by index. Not slug-aware — scene N of the screenplay maps to scenes[N] of
+    by index. Not slug-aware - scene N of the screenplay maps to scenes[N] of
     the breakdown, which is how the breakdown is generated in the first place.
     """
     if not full or not scenes:
@@ -738,7 +738,7 @@ def _split_screenplay_by_scene(full: str, scenes: List[Dict[str, Any]]) -> Dict[
 def _screenplay_has_dialogue(script: str) -> bool:
     """A Fountain dialogue block is an ALL-CAPS character cue on its own line
     followed by a non-blank line. Detect that pattern without importing a real
-    Fountain parser — false positives (props in caps) are cheap; a false
+    Fountain parser - false positives (props in caps) are cheap; a false
     negative just means we skip the warning, which is fine."""
     import re as _re
     return bool(_re.search(
@@ -748,7 +748,7 @@ def _screenplay_has_dialogue(script: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 6. Cinematographer — per-shot camera / lens / duration
+# 6. Cinematographer - per-shot camera / lens / duration
 # ---------------------------------------------------------------------------
 
 _CINEMATOGRAPHER_SYSTEM = """\
@@ -770,14 +770,14 @@ Return JSON:
   ]
 }
 
-DURATION — the sum of `duration_sec` across all shots in a scene should
+DURATION - the sum of `duration_sec` across all shots in a scene should
 roughly equal the scene's `estimated_seconds`. So if the scene runs 90
 seconds and has 12 shots, each shot averages about 7 to 8 seconds. Do
-NOT default every shot to 6. Vary duration to match the beat — quick
+NOT default every shot to 6. Vary duration to match the beat - quick
 reaction cutaways can be 6 seconds, dialogue and establishing shots
 should run 10 to 15 seconds so they can breathe. Match the scene mood
 and the film's visual style. Prefer fewer, longer shots over many short
-ones — held frames read as intentional; rapid cutting reads as churn.
+ones - held frames read as intentional; rapid cutting reads as churn.
 """
 
 
@@ -852,7 +852,7 @@ def _normalize_camera_move(raw: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 7. Shot Generator — SDXL keyframe per shot (T1 stub, no motion)
+# 7. Shot Generator - SDXL keyframe per shot (T1 stub, no motion)
 # ---------------------------------------------------------------------------
 
 # SDXL batch sizing.
@@ -863,8 +863,8 @@ def _normalize_camera_move(raw: Any) -> str:
 # for the next attempt; several clean batches in a row grow it back one
 # step at a time. Env override:
 #
-#   STUDIOLITE_SDXL_BATCH       — start-of-run size (defaults per-variant)
-#   STUDIOLITE_SDXL_BATCH_MAX   — hard ceiling regardless of adaptive growth
+#   STUDIOLITE_SDXL_BATCH - start-of-run size (defaults per-variant)
+#   STUDIOLITE_SDXL_BATCH_MAX - hard ceiling regardless of adaptive growth
 #
 # Setting both to 1 disables batching entirely (equivalent to running the
 # per-shot fallback path for every shot).
@@ -891,7 +891,7 @@ def _max_sdxl_batch(variant: str) -> int:
             return max(1, min(_SDXL_BATCH_MAX_ABS, int(override)))
         except ValueError:
             pass
-    # Twice the initial is a sane growth ceiling — beyond that, wall-clock
+    # Twice the initial is a sane growth ceiling - beyond that, wall-clock
     # gains flatten and OOMs bite harder on any subsequent shot with a
     # different aspect / ref image.
     return min(_SDXL_BATCH_MAX_ABS, _SDXL_BATCH_DEFAULTS.get(variant, 4) * 2)
@@ -938,7 +938,7 @@ def _quality_to_steps(q: str) -> int:
 
 def run_shots(project: Project) -> Dict[str, Any]:
     """T1: render one SDXL keyframe per shot. Never blocks the pipeline on a
-    missing SDXL — if imagegen isn't importable or CUDA is absent, the stage
+    missing SDXL - if imagegen isn't importable or CUDA is absent, the stage
     still succeeds and produces placeholder text-card PNGs so the Editor has
     something to slice together. T2 upgrades to real video."""
     breakdown = project.read_artifact("breakdown") or {}
@@ -952,7 +952,7 @@ def run_shots(project: Project) -> Dict[str, Any]:
     variant = project.meta.config.sdxl_variant
 
     render_one = _load_sdxl_renderer(variant=variant)
-    # Batching is offered for every variant now — the adaptive loop below
+    # Batching is offered for every variant now - the adaptive loop below
     # halves the batch on OOM (and eventually falls through to per-shot),
     # so a base pipeline with CPU offload can't kill the render just by
     # rejecting a group forward. Set STUDIOLITE_SDXL_BATCH=1 to force
@@ -1057,8 +1057,8 @@ def run_shots(project: Project) -> Dict[str, Any]:
     project.append_event({"type": "shots_progress", "done": 0, "total": total})
 
     # Batch through the work list. On any batch failure, fall back to per-shot
-    # for just that batch — a single OOM shouldn't discard the whole render.
-    # We split by whether the chunk has any character references — mixed
+    # for just that batch - a single OOM shouldn't discard the whole render.
+    # We split by whether the chunk has any character references - mixed
     # batches technically work (diffusers accepts per-slot None) but keep it
     # simple: character-heavy chunks tend to run smoothly grouped.
     # Idempotency: skip any shot whose PNG is already on disk. Lets us
@@ -1076,7 +1076,7 @@ def run_shots(project: Project) -> Dict[str, Any]:
     done = skipped
     i = 0
     total_pending = len(pending)
-    # Adaptive batch sizing — starts at the variant default, halves on OOM,
+    # Adaptive batch sizing - starts at the variant default, halves on OOM,
     # grows back one step after `_SDXL_GROWTH_STREAK` consecutive clean
     # batches. Never exceeds `max_batch` and never drops below 1 (at which
     # point we fall through to the per-shot loop).
@@ -1147,7 +1147,7 @@ def run_shots(project: Project) -> Dict[str, Any]:
                         _placeholder_png(j["png_path"], f"{j['scene_id']}/{j['shot_id']}")
                 except Exception as e:
                     if _is_cuda_oom(e):
-                        # Even per-shot OOMed — reclaim before the next shot;
+                        # Even per-shot OOMed - reclaim before the next shot;
                         # the placeholder still lets us finish the run.
                         _reclaim_cuda_memory()
                     logger.exception(
@@ -1184,7 +1184,7 @@ def _shot_prompt(style: str, scene: Dict[str, Any], shot: Dict[str, Any],
 
       1. Explicit mentions in subject/action/description (highest signal).
       2. Dialogue speakers for this shot from the voice_actor artifact.
-      3. Scene's declared characters from the breakdown — fallback when the
+      3. Scene's declared characters from the breakdown - fallback when the
          shot text is a wide/establishing that doesn't name anyone.
 
     All matched characters get their full bio in the prompt, positioned
@@ -1213,7 +1213,7 @@ def _shot_prompt(style: str, scene: Dict[str, Any], shot: Dict[str, Any],
 
         bios_by_upper = {n.upper(): (n, b) for n, b in character_bios.items()}
 
-        # Signal 1 — explicit mentions in the shot's own text.
+        # Signal 1 - explicit mentions in the shot's own text.
         haystack = f"{shot.get('subject','')} {shot.get('action','')} {shot.get('description','')}".upper()
         for name_up in bios_by_upper:
             for tok in name_up.split():
@@ -1221,7 +1221,7 @@ def _shot_prompt(style: str, scene: Dict[str, Any], shot: Dict[str, Any],
                     _try(name_up)
                     break
 
-        # Signal 2 — dialogue speakers for this shot.
+        # Signal 2 - dialogue speakers for this shot.
         for sp in (dialogue_speakers or []):
             _try(sp.upper().strip())
             first = sp.upper().strip().split()[:1]
@@ -1231,7 +1231,7 @@ def _shot_prompt(style: str, scene: Dict[str, Any], shot: Dict[str, Any],
                     if name_up.split()[:1] == first:
                         _try(name_up)
 
-        # Signal 3 — scene's declared characters. Fallback when the shot
+        # Signal 3 - scene's declared characters. Fallback when the shot
         # text is a wide/establishing that doesn't name anyone but we
         # know the scene features a specific character.
         for name in (scene.get("characters") or []):
@@ -1432,7 +1432,7 @@ def _disable_ip_adapter() -> None:
 
 def _hf_token() -> Optional[str]:
     """Return the user's HuggingFace token from `HF_TOKEN` or the standard
-    `HUGGING_FACE_HUB_TOKEN` env var. None means anonymous — subject to the
+    `HUGGING_FACE_HUB_TOKEN` env var. None means anonymous - subject to the
     aggressive rate limit that stalls fresh model pulls after 1-3 GB."""
     return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 
@@ -1469,8 +1469,8 @@ def _load_sdxl_base_pipeline():
 def _load_sdxl_renderer(variant: str = "turbo"):
     """Return a callable `(prompt, out_path, *, steps=None, ref_image=None) -> None`,
     or None if unavailable. `variant` selects the SDXL flavour:
-    - "turbo": reelforge SDXL Turbo (fast, distilled — faces are flat)
-    - "base":  SDXL 1.0 base at 30+ steps (slow, much higher fidelity)"""
+- "turbo": reelforge SDXL Turbo (fast, distilled - faces are flat)
+- "base":  SDXL 1.0 base at 30+ steps (slow, much higher fidelity)"""
     if variant == "base":
         pipe = _load_sdxl_base_pipeline()
         if pipe is None:
@@ -1620,7 +1620,7 @@ def _placeholder_png(path: str, label: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 8. Editor — FFmpeg slideshow of keyframes with per-shot durations
+# 8. Editor - FFmpeg slideshow of keyframes with per-shot durations
 # ---------------------------------------------------------------------------
 
 def run_editor(project: Project) -> Dict[str, Any]:
@@ -1677,7 +1677,7 @@ def run_editor(project: Project) -> Dict[str, Any]:
         try:
             _render_kenburns_clip(img_abs, clip_out, dur, camera_move)
         except FileNotFoundError as e:
-            raise RuntimeError("ffmpeg not on PATH — cannot assemble the final cut.") from e
+            raise RuntimeError("ffmpeg not on PATH - cannot assemble the final cut.") from e
         except Exception:
             logger.exception("Ken Burns render failed for %s/%s; using static clip",
                              scene_id, shot_id)
@@ -1711,7 +1711,7 @@ def run_editor(project: Project) -> Dict[str, Any]:
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except FileNotFoundError as e:
-        raise RuntimeError("ffmpeg not on PATH — cannot assemble the final cut.") from e
+        raise RuntimeError("ffmpeg not on PATH - cannot assemble the final cut.") from e
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"ffmpeg failed:\n{e.stderr[-800:] if e.stderr else e}") from e
 
@@ -1731,9 +1731,9 @@ def _standardize_motion_clip(src: str, dst: str, duration_sec: int) -> None:
     padded or trimmed to `duration_sec`.
 
     Filter chain:
-      - lanczos upscale (sharper than default bilinear on Wan's 832x480 out)
-      - hqdn3d denoise (cleans model dithering + upscale artifacts, light)
-      - unsharp mask (5x5 kernel, small gain — recovers edge crispness
+- lanczos upscale (sharper than default bilinear on Wan's 832x480 out)
+- hqdn3d denoise (cleans model dithering + upscale artifacts, light)
+- unsharp mask (5x5 kernel, small gain - recovers edge crispness
         that upscale + denoise soften)
     The three run cheap on ffmpeg's CPU pipeline (<1s per shot) and
     together take a 480p AI-video output from 'obviously upscaled' to
@@ -1764,7 +1764,7 @@ def _render_kenburns_clip(img: str, out_path: str, duration_sec: int, camera_mov
     motion matched to the DP's `camera_move` intent."""
     fps = 30
     frames = duration_sec * fps
-    # Feed zoompan a large source so the crop stays sharp — otherwise ffmpeg
+    # Feed zoompan a large source so the crop stays sharp - otherwise ffmpeg
     # scales the still to output size first and the zoom shows pixel edges.
     src = ("scale=3840:2160:force_original_aspect_ratio=increase,"
            "crop=3840:2160,setsar=1")
@@ -1810,7 +1810,7 @@ def _kenburns_expr(camera_move: str, frames: int, fps: int) -> str:
         x = f"'(iw-iw/zoom)/2 + 20*sin(on/{fps}*6.28)'"
         y = f"'(ih-ih/zoom)/2 + 15*sin(on/{fps}*4.71)'"
     else:
-        # static or unknown — very slow push-in reads as "digital cinema"
+        # static or unknown - very slow push-in reads as "digital cinema"
         z = "'min(zoom+0.0004,1.08)'"
         x = "'iw/2-(iw/zoom/2)'"
         y = "'ih/2-(ih/zoom/2)'"
@@ -1836,7 +1836,7 @@ def _render_static_clip(img: str, out_path: str, duration_sec: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 9. Voice Casting — LLM assigns a Piper voice per named character.
+# 9. Voice Casting - LLM assigns a Piper voice per named character.
 # ---------------------------------------------------------------------------
 
 _PIPER_POOL: List[Dict[str, str]] = [
@@ -1870,7 +1870,7 @@ Return JSON:
   ]
 }
 The `voice` field MUST be one of the pool names.
-`gender` MUST be "male", "female", or "neutral" — the XTTS backend uses
+`gender` MUST be "male", "female", or "neutral" - the XTTS backend uses
 this to pick from a gender-split library-speaker pool when no per-character
 reference clip is available. If a character's gender isn't explicit in the
 screenplay, infer from name conventions or pick "neutral". No commentary.
@@ -1963,12 +1963,12 @@ def _guess_gender_from_name(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 10. Voice Actor — Piper synthesizes each dialogue line.
+# 10. Voice Actor - Piper synthesizes each dialogue line.
 # ---------------------------------------------------------------------------
 
 def run_voice_actor(project: Project) -> Dict[str, Any]:
     """Synthesize dialogue with Piper. The Storyboard's `dialogue` field is
-    unreliable — the LLM drops lines, misattributes speakers, and reorders
+    unreliable - the LLM drops lines, misattributes speakers, and reorders
     them. So we ignore that field and parse the screenplay directly, keeping
     the true speaker on every line and distributing lines across shots by
     reading order."""
@@ -1991,12 +1991,12 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
 
     voice_backend = (project.meta.config.voice_backend or "piper").lower()
 
-    # IndexTTS-2 first if requested — best local prosody, disentangled
+    # IndexTTS-2 first if requested - best local prosody, disentangled
     # emotion control. Auto-bootstraps reference clips from Piper on
     # first use per character. Falls through cleanly if model isn't on
     # disk or the package isn't installed.
     indextts2_wrap = _load_indextts2_if_requested(voice_backend, project)
-    # XTTS-v2 fallback — one shared model, per-character speaker embeddings
+    # XTTS-v2 fallback - one shared model, per-character speaker embeddings
     # via reference clips or the built-in speaker library. Also available
     # as its own primary backend (voice_backend='xtts').
     xtts_wrap = _load_xtts_if_requested(voice_backend, project)
@@ -2107,7 +2107,7 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
             ok = False
             err: Optional[str] = None
             backend_used = ""
-            # IndexTTS-2 first if requested — best local prosody. On per-line
+            # IndexTTS-2 first if requested - best local prosody. On per-line
             # failure it falls to XTTS (if loaded) or Piper below without
             # tearing down the whole stage.
             if indextts2_wrap is not None:
@@ -2120,7 +2120,7 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
                     logger.warning("IndexTTS-2 synth failed for %s/%s (%s); trying next backend",
                                    sid, shot["id"], e)
                     err = f"indextts2: {e}"
-            # XTTS — cloned voice with more prosody than Piper.
+            # XTTS - cloned voice with more prosody than Piper.
             if not ok and xtts_wrap is not None:
                 try:
                     xtts_wrap.synthesize(line["text"], wav_abs, speaker=speaker)
@@ -2208,7 +2208,7 @@ def _parse_screenplay_dialogue(text: str) -> List[Dict[str, str]]:
     """Return `[{speaker, text}, ...]` extracted from Fountain-style screenplay
     text.
 
-    Real character cues must be preceded by a blank line — that's the
+    Real character cues must be preceded by a blank line - that's the
     Fountain convention that separates them from character INTRODUCTIONS in
     action prose (e.g. `SASHA (a young woman in a chef's apron) stands at
     one end...` reads as a cue but isn't).
@@ -2216,7 +2216,7 @@ def _parse_screenplay_dialogue(text: str) -> List[Dict[str, str]]:
     Handles three dialogue layouts we've actually seen from various LLMs:
       1. Classical: cue on one line, dialogue on the next.
       2. Cue + optional paren line + dialogue.
-      3. Cue on one line, next line starts with `(paren) actual dialogue text` —
+      3. Cue on one line, next line starts with `(paren) actual dialogue text` - 
          extract the text AFTER the paren.
     """
     import re as _re
@@ -2265,7 +2265,7 @@ def _parse_screenplay_dialogue(text: str) -> List[Dict[str, str]]:
         preceded_by_blank = (i == 0) or (not lines[i - 1].strip())
         can_be_cue = preceded_by_blank or prev_was_dialogue
 
-        # Try inline single-line layout first — it's the most specific match.
+        # Try inline single-line layout first - it's the most specific match.
         if can_be_cue:
             m = inline_one.match(raw.rstrip())
             if m:
@@ -2280,7 +2280,7 @@ def _parse_screenplay_dialogue(text: str) -> List[Dict[str, str]]:
         if cue_match and i + 1 < len(lines):
             speaker, _paren = cue_match
             j = i + 1
-            # Layout 3: `(paren) actual dialogue` — pull the text out and skip past.
+            # Layout 3: `(paren) actual dialogue` - pull the text out and skip past.
             m_inline = _PAREN_THEN_TEXT.match(lines[j]) if j < len(lines) else None
             if m_inline:
                 inline_text = m_inline.group(1).strip()
@@ -2328,7 +2328,7 @@ class _XTTSWrap:
 
     # Curated subsets of the 58 XTTS-v2 built-in speakers, chosen for
     # confident English-name-based gender inference and clean output on
-    # short lines. Not exhaustive — plenty of the other 30 speakers work
+    # short lines. Not exhaustive - plenty of the other 30 speakers work
     # fine, but these two lists are the safe defaults when we don't have
     # a reference clip.
     _FEMALE_SPEAKERS = [
@@ -2363,7 +2363,7 @@ class _XTTSWrap:
         ref = os.path.join(self._voice_refs_dir, f"{_safe_filename(speaker)}.wav")
         if os.path.exists(ref):
             return {"speaker_wav": ref}
-        # No reference clip — pick a library speaker deterministically
+        # No reference clip - pick a library speaker deterministically
         # from the character name, gender-filtered so male characters
         # don't land on Sofia Hellen and vice versa. Falls back to the
         # combined pool when we don't know the gender.
@@ -2384,7 +2384,7 @@ class _XTTSWrap:
         # 0.65 (below the 0.75 default) trims some of the drunk-narrator
         # wobble XTTS tends to add on longer lines while keeping enough
         # variation that flat re-reads don't sound identical. Older XTTS
-        # forks reject the kwarg — fall back to the plain call if so.
+        # forks reject the kwarg - fall back to the plain call if so.
         try:
             self._tts.tts_to_file(
                 text=text, file_path=out_path, language="en",
@@ -2400,7 +2400,7 @@ class _IndexTTS2Wrap:
     """Thin adapter over IndexTeam/IndexTTS-2 with the same shape as
     `_XTTSWrap.synthesize(text, out_path, speaker=)`.
 
-    IndexTTS-2 unlike XTTS ships NO built-in library speakers — every
+    IndexTTS-2 unlike XTTS ships NO built-in library speakers - every
     call needs a reference audio clip. We bootstrap those clips lazily:
     on first synth for a speaker, if no per-character clip lives at
     `<project>/artifacts/voice_refs/<safe>.wav`, we synthesize a short
@@ -2411,7 +2411,7 @@ class _IndexTTS2Wrap:
 
     # Sample text for the auto-bootstrap seed clip. Kept generic and
     # ~8 seconds worth of speech so IndexTTS-2 has enough acoustic
-    # material to lock the timbre — too short and cloned lines drift.
+    # material to lock the timbre - too short and cloned lines drift.
     _SEED_TEXT = (
         "The night was cold. She stood by the window for a long moment, "
         "waiting. Then she turned, picked up the letter from the table, "
@@ -2421,7 +2421,7 @@ class _IndexTTS2Wrap:
     def __init__(self, tts, project, piper_seed_fn):
         # tts is an initialized IndexTTS2 instance
         # piper_seed_fn: callable (voice_name, out_path) -> None that
-        # synthesizes a wav with Piper — passed in so we don't drag
+        # synthesizes a wav with Piper - passed in so we don't drag
         # the Piper import into this class's file scope.
         self._tts = tts
         self._project = project
@@ -2456,7 +2456,7 @@ class _IndexTTS2Wrap:
     def _ensure_ref(self, speaker: str) -> Optional[str]:
         """Return the on-disk path to `speaker`'s reference audio clip,
         seeding it from Piper if it doesn't exist yet. Returns None if
-        we can't produce one — caller must handle."""
+        we can't produce one - caller must handle."""
         if speaker in self._ref_cache:
             return self._ref_cache[speaker]
         ref_path = os.path.join(self._voice_refs_dir,
@@ -2479,7 +2479,7 @@ class _IndexTTS2Wrap:
 
     def synthesize(self, text: str, out_path: str, *, speaker: str = "") -> None:
         """Match the _XTTSWrap.synthesize signature so run_voice_actor
-        can call either wrapper interchangeably. Raises on any failure —
+        can call either wrapper interchangeably. Raises on any failure - 
         run_voice_actor already catches and falls back."""
         ref = self._ensure_ref(speaker) if speaker else None
         if ref is None:
@@ -2490,7 +2490,7 @@ class _IndexTTS2Wrap:
                 "to bypass the seed."
             )
         # IndexTTS-2 emits 22050Hz WAV. We keep that native and let the
-        # mixer handle any resampling — matches the ambient/score chain.
+        # mixer handle any resampling - matches the ambient/score chain.
         self._tts.infer(
             spk_audio_prompt=ref,
             text=text,
@@ -2506,13 +2506,13 @@ def _load_indextts2_if_requested(voice_backend: str, project) -> Optional[_Index
     Model weights live at `~/models/indextts2/` (produced by a one-off
     `hf download IndexTeam/IndexTTS-2 --local-dir=~/models/indextts2`).
     The bilibili license requires the user to read the DISCLAIMER before
-    use — we assume the user has since they explicitly opted in via
+    use - we assume the user has since they explicitly opted in via
     voice_backend=indextts2."""
     if voice_backend != "indextts2":
         return None
     try:
         import torch as _torch
-        # Model files must exist on disk — IndexTTS-2 doesn't self-download
+        # Model files must exist on disk - IndexTTS-2 doesn't self-download
         # from HF the way XTTS does. `_INDEXTTS2_MODEL_DIR` is a fixed
         # per-user path we don't hide behind config: this is a heavy asset,
         # sharing one copy across projects is the right default.
@@ -2548,7 +2548,7 @@ def _load_indextts2_if_requested(voice_backend: str, project) -> Optional[_Index
                            "as-is. If IndexTTS-2 synthesis fails with "
                            "'libtorchcodec' errors, `pip install soundfile`.")
         from indextts.infer_v2 import IndexTTS2
-        # use_fp16 halves VRAM at negligible quality cost — matches what
+        # use_fp16 halves VRAM at negligible quality cost - matches what
         # the upstream README recommends for consumer GPUs.
         # DeepSpeed and the custom CUDA kernel are skipped on Windows;
         # both add install friction for a small speedup.
@@ -2591,8 +2591,8 @@ _INDEXTTS2_MODEL_DIR = os.path.expanduser(
 
 def _load_xtts_if_requested(voice_backend: str, project) -> Optional[_XTTSWrap]:
     """Load Coqui XTTS-v2 when the project asks for `voice_backend="xtts"`.
-    Returns None on any failure — including the common one of `coqui-tts`
-    not being installed — so the caller falls back to Piper cleanly."""
+    Returns None on any failure - including the common one of `coqui-tts`
+    not being installed - so the caller falls back to Piper cleanly."""
     if voice_backend != "xtts":
         return None
     try:
@@ -2658,7 +2658,7 @@ def _wav_duration_seconds(path: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# 11. Composer — MusicGen scores the whole cut.
+# 11. Composer - MusicGen scores the whole cut.
 # ---------------------------------------------------------------------------
 
 _COMPOSER_SYSTEM = """\
@@ -2666,7 +2666,7 @@ You are a film composer. Given the film's tone, brief, and total duration in
 seconds, write ONE short text prompt suitable for MusicGen. Focus on:
 mood, instrumentation, tempo (bpm), and a hint at dynamics.
 
-Return JSON: {"prompt": "..."} — one sentence, under 40 words. No commentary.
+Return JSON: {"prompt": "..."} - one sentence, under 40 words. No commentary.
 """
 
 
@@ -2727,7 +2727,7 @@ def _render_musicgen(prompt: str, out_path: str, *, duration_sec: int) -> None:
     from transformers import AutoProcessor, MusicgenForConditionalGeneration
     import torch as _torch
 
-    # Try local caches ONLY — don't hit HF Hub live, unauthenticated pulls
+    # Try local caches ONLY - don't hit HF Hub live, unauthenticated pulls
     # are throttled to a crawl and can hang a run for hours waiting on a
     # 3+ GB model. Anyone who wants medium/large should pull it out of
     # band with `huggingface-cli download`.
@@ -2811,7 +2811,7 @@ def _crossfade_concat(chunks: List["np.ndarray"], *, sr: int, xfade_sec: float) 
 
 
 # ---------------------------------------------------------------------------
-# 12. Mixer — ffmpeg mux: silent cut + dialogue at shot offsets + score with
+# 12. Mixer - ffmpeg mux: silent cut + dialogue at shot offsets + score with
 #     sidechain ducking under speech.
 # ---------------------------------------------------------------------------
 
@@ -2829,7 +2829,7 @@ def run_mixer(project: Project) -> Dict[str, Any]:
     if not os.path.exists(silent_abs):
         raise ValueError(f"Silent cut missing at {silent_abs}")
 
-    # Cumulative shot offsets (ms) — dialogue for shot N lands at sum(durations 0..N-1).
+    # Cumulative shot offsets (ms) - dialogue for shot N lands at sum(durations 0..N-1).
     offsets_ms: Dict[str, int] = {}
     cursor_ms = 0
     for s in shots_art.get("shots") or []:
@@ -2929,10 +2929,10 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
 
     # Build the speech bus. When there's also a score to duck under, we need
     # it in two branches (sidechain input AND the final amix), so asplit=2
-    # duplicates it — ffmpeg filter labels are single-use. And pad the
+    # duplicates it - ffmpeg filter labels are single-use. And pad the
     # sidechain branch to the requested duration (or a generous ceiling) so
     # sidechaincompress doesn't stop emitting audio when the last dialogue
-    # line ends — sidechaincompress output length matches the shorter of its
+    # line ends - sidechaincompress output length matches the shorter of its
     # two inputs, so a short speech bus would silently truncate the whole mix.
     pad_target = duration_sec if duration_sec and duration_sec > 0 else 3600.0
     if dlg_labels:
@@ -3006,7 +3006,7 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
                 "-c:v", "copy",
                 "-c:a", "aac", "-b:a", "192k"] + duration_args + [out_path]
     else:
-        # Neither dialogue nor score — remux silent cut with an aac silent track
+        # Neither dialogue nor score - remux silent cut with an aac silent track
         # so downstream consumers still see a well-formed audio stream.
         cmd += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                 "-map", "0:v", "-map", "1:a",
@@ -3025,7 +3025,7 @@ def _chat(project: Project, stage_key: str, system: str, user: str, *,
           want_json: bool, temperature: float, max_tokens: int = 4096) -> str:
     """Single blocking chat call. Retries ONCE on LLMError with a bigger
     max_tokens budget and slightly cooler temperature so the same truncation
-    or parse issue doesn't recur — Ollama occasionally cuts a JSON response
+    or parse issue doesn't recur - Ollama occasionally cuts a JSON response
     mid-array when the model runs long, and a modest retry usually clears it.
     """
     cfg = project.meta.config
@@ -3053,7 +3053,7 @@ def _chat(project: Project, stage_key: str, system: str, user: str, *,
 
 
 # ---------------------------------------------------------------------------
-# NEW STAGE — Character Portraits
+# NEW STAGE - Character Portraits
 #
 # Renders one canonical portrait per named character before Shots runs. The
 # portraits are the reference images IP-Adapter conditions on during shot
@@ -3141,7 +3141,7 @@ def _safe_filename(s: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# NEW STAGE — Colorist
+# NEW STAGE - Colorist
 #
 # Applies a mood-driven color grade to the assembled cut. Uses ffmpeg curves
 # and eq filters (no LUT files needed) with per-scene knobs derived from
@@ -3152,7 +3152,7 @@ def _safe_filename(s: str) -> str:
 def run_colorist(project: Project) -> Dict[str, Any]:
     """Grade the mixed cut in one ffmpeg pass. Currently applies a single
     global grade derived from the film's dominant tone. A per-scene grade
-    with segmented filter graphs is a later iteration — this baseline lifts
+    with segmented filter graphs is a later iteration - this baseline lifts
     the flat SDXL Turbo look immediately."""
     mixer_art = project.read_artifact("mixer") or {}
     editor_art = project.read_artifact("editor") or {}
@@ -3229,7 +3229,7 @@ def _pick_grade(tone: str, mostly_night: bool) -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# NEW STAGE — Titles & Credits
+# NEW STAGE - Titles & Credits
 #
 # Generates a front title card (film title over the first shot's frame,
 # fading in and out) and an end credits scroll (crew and cast on black).
@@ -3238,7 +3238,7 @@ def _pick_grade(tone: str, mostly_night: bool) -> Dict[str, str]:
 
 def run_titles(project: Project) -> Dict[str, Any]:
     """Prepend a title card and append an end credits scroll. The result
-    lands at `final.mp4` — the film's canonical export."""
+    lands at `final.mp4` - the film's canonical export."""
     colorist_art = project.read_artifact("colorist") or {}
     mixer_art    = project.read_artifact("mixer") or {}
     editor_art   = project.read_artifact("editor") or {}
@@ -3316,7 +3316,7 @@ def run_titles(project: Project) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# NEW STAGE — Upscale
+# NEW STAGE - Upscale
 #
 # Optional neural upscale of the finished film via Real-ESRGAN. Runs
 # frame by frame on GPU with spandrel as the model loader (works with the
@@ -3351,7 +3351,7 @@ def run_upscale(project: Project) -> Dict[str, Any]:
     weight_name = f"RealESRGAN_x{scale}.pth"
     weight_path = os.path.join(_REALESRGAN_MODEL_DIR, weight_name)
     if not os.path.exists(weight_path):
-        # Try to pull it from HF on demand — small file, one-off cost.
+        # Try to pull it from HF on demand - small file, one-off cost.
         try:
             from huggingface_hub import hf_hub_download
             hf_hub_download("ai-forever/Real-ESRGAN", weight_name,
@@ -3399,11 +3399,11 @@ def _upscale_video_realesrgan(model, src_abs: str, out_abs: str,
     Model input/output is float32 in [0, 1], NCHW. We do batched-of-one
     to keep VRAM predictable across arbitrary source resolutions; a
     720p input at 2x becomes 1440p output which is ~11MB at RGB float32
-    per frame — comfortably inside 12GB VRAM."""
+    per frame - comfortably inside 12GB VRAM."""
     import numpy as _np
     import torch as _torch
 
-    # Read source geometry first — need the output dimensions for ffmpeg.
+    # Read source geometry first - need the output dimensions for ffmpeg.
     probe = subprocess.check_output([
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
@@ -3481,7 +3481,7 @@ def _render_title_card(out_path: str, *, title: str, subtitle: str, duration: fl
     Uses drawtext's `textfile=` mechanism (no shell escaping headaches for
     apostrophes) plus an explicit `fontfile=` (Windows ffmpeg has no
     fontconfig by default). Runs with cwd = titles_dir so filter args stay
-    free of colons — Windows drive letters (`C:\\`) get parsed as filter
+    free of colons - Windows drive letters (`C:\\`) get parsed as filter
     option separators."""
     parent = os.path.dirname(out_path)
     _ensure_titles_font(parent)
@@ -3578,7 +3578,7 @@ def _ensure_titles_font(dir_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# NEW STAGE — Motion Shots (Phase B)
+# NEW STAGE - Motion Shots (Phase B)
 #
 # Wan 2.1 T2V-1.3B turns each SDXL keyframe into a short motion clip. Uses
 # the image-to-video pathway when the keyframe exists so composition and
@@ -3590,7 +3590,7 @@ _WAN_PIPE = None
 _WAN_STATE = "unknown"   # unknown | loaded | disabled
 
 
-_WAN_MODE = "unknown"  # unknown | i2v | t2v — set by _load_wan_pipeline
+_WAN_MODE = "unknown"  # unknown | i2v | t2v - set by _load_wan_pipeline
 
 
 _SVD_PIPE = None
@@ -3601,7 +3601,7 @@ def _load_svd_pipeline():
     """Load Stable Video Diffusion img2vid_xt. ~10 GB weights + fp16 fits
     on 12 GB with CPU offload. Takes a still image and produces ~4 seconds
     of true motion. This is the primary motion backend when a keyframe
-    exists — Wan T2V is a fallback that discards composition."""
+    exists - Wan T2V is a fallback that discards composition."""
     global _SVD_PIPE, _SVD_STATE
     if _SVD_STATE == "disabled":
         return None
@@ -3615,7 +3615,7 @@ def _load_svd_pipeline():
         # the variant shards are on disk they're all we need.
         #
         # Prefer the smaller `stable-video-diffusion-img2vid` (14-frame)
-        # over the `img2vid-xt` (25-frame) — the xt variant loads OK on 12GB
+        # over the `img2vid-xt` (25-frame) - the xt variant loads OK on 12GB
         # with cpu offload but the swap thrashing makes every 4s clip take
         # 5-10 minutes. Fall back to xt when the small variant isn't cached.
         for repo in (
@@ -3689,13 +3689,13 @@ _ANIMATEDIFF_STATE = "unknown"   # unknown | loaded | disabled
 
 def _load_animatediff_pipeline():
     """Load AnimateDiff on top of an SD 1.5 base. Uses guoyww's motion
-    adapter v1.5 (~2 GB). We DON'T stack on SDXL — the SDXL motion module
+    adapter v1.5 (~2 GB). We DON'T stack on SDXL - the SDXL motion module
     is larger (~7 GB) and slower; SD 1.5 + AnimateDiff runs a 16-frame
     clip in ~30 seconds on a 12 GB card versus SVD's 5-10 minutes.
 
     Motion adapter modulates temporal attention on the pretrained UNet.
     Because it uses a different base than our SDXL Turbo shot generator,
-    the output style will differ from the keyframe — that's a known limit
+    the output style will differ from the keyframe - that's a known limit
     of this backend. The trade-off is speed."""
     global _ANIMATEDIFF_PIPE, _ANIMATEDIFF_STATE
     if _ANIMATEDIFF_STATE == "disabled":
@@ -3763,7 +3763,7 @@ def _render_animatediff_t2v(pipe, out_path: str, *, prompt: str,
     full_prompt = f"{prompt}. {motion_hint}."
     fps = 8   # AnimateDiff native
     # 32 is the motion module's hard pos-embed cap on the guoyww v1.5
-    # adapter — the pe tensor is shape [1, 32, d] and pushing past that
+    # adapter - the pe tensor is shape [1, 32, d] and pushing past that
     # raises a size-mismatch, not an OOM. So we clamp at 32 (=4s at 8fps)
     # and let the editor tile the rest. Shorter shots ask for fewer
     # frames so the tile is minimal.
@@ -3804,7 +3804,7 @@ def _load_wan_pipeline():
     fits alongside SDXL and MusicGen on a 12 GB card. The 14B I2V variant
     needs ~28 GB and segfaults loading here, so we skip it entirely. Returns
     the pipeline handle on success, None on any failure. Weights come from
-    the local HF cache — nothing is downloaded from here."""
+    the local HF cache - nothing is downloaded from here."""
     global _WAN_PIPE, _WAN_STATE, _WAN_MODE
     if _WAN_STATE == "disabled":
         return None
@@ -3813,7 +3813,7 @@ def _load_wan_pipeline():
     try:
         import torch as _torch
         from diffusers import WanPipeline
-        # T2V 1.3B — composition-conditions from the SDXL keyframe via the
+        # T2V 1.3B - composition-conditions from the SDXL keyframe via the
         # prompt only (the pipeline is text-to-video). We still get real
         # motion; character consistency comes from the same descriptors
         # baked into every shot prompt.
@@ -3868,7 +3868,7 @@ _WAN22_VENV_PYTHON = os.path.expanduser(
 
 # Force T2V mode by setting WAN22_MODE=t2v. Set to auto (default) to try
 # I2V first when the venv is present, or i2v to fail rather than fall
-# back to T2V — useful when you WANT the venv path to render and would
+# back to T2V - useful when you WANT the venv path to render and would
 # rather see an error than get silently-different output.
 _WAN22_MODE = os.environ.get("WAN22_MODE", "auto").strip().lower()
 
@@ -3885,7 +3885,7 @@ _WAN22_I2V_TIMEOUT_SEC = int(
 def _wan22_i2v_available() -> bool:
     """Cheap check: does the isolated venv exist and does the standalone
     render script live at the expected path? Doesn't verify the venv's
-    packages are healthy — subprocess call will report that. Also honors
+    packages are healthy - subprocess call will report that. Also honors
     WAN22_MODE=t2v to force the in-process T2V path even when the venv
     is present."""
     if _WAN22_MODE == "t2v":
@@ -3938,14 +3938,14 @@ def _load_wan22_pipeline():
     """Load Wan 2.2 TI2V-5B (diffusers format) lazily. Unlike Wan 2.1 T2V
     this one takes a keyframe image directly (I2V mode) and produces 704p
     native output at 24fps for ~5s per generation, which is exactly what
-    the motion_shots stage wants — no more tiling short clips over long
+    the motion_shots stage wants - no more tiling short clips over long
     slots.
 
     Runs at bf16 with full CPU offload to fit 12GB VRAM. Community reports
     put a 5s clip at 15-30 min per shot on 12GB with offload; the caller
     should plan overnight-scale renders for 30+ shot films.
 
-    Weights must be at `~/models/wan22-ti2v-5b/` (or `$WAN22_MODEL_DIR`) —
+    Weights must be at `~/models/wan22-ti2v-5b/` (or `$WAN22_MODEL_DIR`) - 
     the 34GB `Wan-AI/Wan2.2-TI2V-5B-Diffusers` HF repo laid down by a one-
     off `hf download ... --local-dir=~/models/wan22-ti2v-5b`. Returns
     the pipeline handle on success, None on any failure so the caller
@@ -3970,7 +3970,7 @@ def _load_wan22_pipeline():
             )
             _WAN22_STATE = "disabled"
             return None
-        # Newer diffusers required — WanPipeline for Wan 2.2 needs the
+        # Newer diffusers required - WanPipeline for Wan 2.2 needs the
         # `image=` kwarg support that landed after diffusers 0.32. If the
         # installed version predates that we get a TypeError on infer.
         from diffusers import WanPipeline, AutoencoderKLWan
@@ -3985,7 +3985,7 @@ def _load_wan22_pipeline():
             local_files_only=True,
         )
         # model_cpu_offload keeps whole modules on GPU during forward and
-        # swaps at module boundaries — much faster than sequential offload
+        # swaps at module boundaries - much faster than sequential offload
         # (which swaps per-layer). We combine it with the reduced resolution
         # in _render_wan22_i2v below (480x832 instead of 704x1280) so the
         # peak activation stays under 12GB and the segfault-inducing memory
@@ -4028,7 +4028,7 @@ def _render_wan22_i2v(pipe, image_path: str, out_path: str, *,
     current in-process WanPipeline API doesn't expose the `image=` I2V
     path for the 5B model (that lives in main-branch diffusers). So T2V
     fallback uses the shot prompt only and drops the keyframe."""
-    # I2V path — call the standalone renderer in the wan22 venv.
+    # I2V path - call the standalone renderer in the wan22 venv.
     if _wan22_i2v_available():
         if _render_wan22_i2v_venv(image_path, out_path,
                                     prompt=prompt,
@@ -4036,7 +4036,7 @@ def _render_wan22_i2v(pipe, image_path: str, out_path: str, *,
                                     camera_move=camera_move):
             return
         if _WAN22_MODE == "i2v":
-            # Explicit opt-in — surface the failure instead of masking it.
+            # Explicit opt-in - surface the failure instead of masking it.
             raise RuntimeError(
                 "Wan 2.2 I2V venv failed for this shot and WAN22_MODE=i2v "
                 "disables the T2V fallback. Check the venv logs, then either "
@@ -4088,11 +4088,11 @@ _MOTION_SHOTS_MAX_WAN = 40   # Wan T2V is ~260s per 3s clip. Cap when Wan is
 def run_motion_shots(project: Project) -> Dict[str, Any]:
     """For each shot with a rendered SDXL keyframe, generate a short motion
     clip. Backend chosen by `motion_backend` config:
-    - "auto": SVD -> AnimateDiff -> Wan -> Ken Burns (best quality first)
-    - "animatediff": SD 1.5 + AnimateDiff motion module (~30s per clip)
-    - "svd": SVD img2vid keyframe-conditioned (slow on 12GB, 5-10 min)
-    - "wan": Wan 2.1 T2V (text only, discards keyframe)
-    - "kenburns": pan on stills (no motion generation)
+- "auto": SVD -> AnimateDiff -> Wan -> Ken Burns (best quality first)
+- "animatediff": SD 1.5 + AnimateDiff motion module (~30s per clip)
+- "svd": SVD img2vid keyframe-conditioned (slow on 12GB, 5-10 min)
+- "wan": Wan 2.1 T2V (text only, discards keyframe)
+- "kenburns": pan on stills (no motion generation)
 
     The Wan-only cap of 40 shots only applies when no other motion
     backend is available."""
@@ -4120,7 +4120,7 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
     elif backend_cfg == "wan":
         wan_pipe = _load_wan_pipeline()
     elif backend_cfg == "wan22":
-        # Wan 2.2 TI2V-5B — keyframe-conditioned I2V, 704p native, 5s
+        # Wan 2.2 TI2V-5B - keyframe-conditioned I2V, 704p native, 5s
         # clips. Overnight-scale for 30+ shot films (15-30 min/clip on
         # 12GB). Explicit opt-in only; auto never picks it silently.
         wan22_pipe = _load_wan22_pipeline()
@@ -4131,7 +4131,7 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
         if svd_pipe is None and animatediff_pipe is None:
             if len(shots) > _MOTION_SHOTS_MAX_WAN:
                 logger.warning(
-                    "Skipping motion_shots — no SVD or AnimateDiff, and %d shots "
+                    "Skipping motion_shots - no SVD or AnimateDiff, and %d shots "
                     "is over the Wan-only cap of %d. Editor will use Ken Burns.",
                     len(shots), _MOTION_SHOTS_MAX_WAN,
                 )
@@ -4180,7 +4180,7 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
                                   "total": total, "backend": backend})
             continue
 
-        # Wan 2.2 TI2V-5B — keyframe-conditioned, 704p native. Tried
+        # Wan 2.2 TI2V-5B - keyframe-conditioned, 704p native. Tried
         # first when explicitly configured because it's the best quality
         # option on 12GB and produces a full 5s clip per generation.
         if wan22_pipe is not None and os.path.exists(keyframe_abs):
@@ -4210,7 +4210,7 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
                     _disable_svd()
                     svd_pipe = None
 
-        # AnimateDiff — fast text-to-video via SD 1.5 motion adapter
+        # AnimateDiff - fast text-to-video via SD 1.5 motion adapter
         if not rendered and animatediff_pipe is not None:
             try:
                 _render_animatediff_t2v(
@@ -4309,7 +4309,7 @@ def _render_wan_i2v(pipe, image_path: str, out_path: str, *,
 
 
 # ---------------------------------------------------------------------------
-# NEW STAGE — Ambient Bed (Phase C)
+# NEW STAGE - Ambient Bed (Phase C)
 #
 # AudioLDM 2 renders a per-scene atmosphere loop (rain, café hum, night wind).
 # Layered under dialogue and score by the mixer. On any failure the stage

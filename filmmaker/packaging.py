@@ -3,7 +3,7 @@
 Two concerns live here:
 
 - **Delivery package** (``build_delivery_bundle``): the small "hand this
-  to the client" zip — the final mixed cut, a plain-text CREDITS file,
+  to the client" zip - the final mixed cut, a plain-text CREDITS file,
   and a JSON manifest with the render metadata. Reruns don't dilute it
   with intermediate junk, because the film reader only asks for the
   finished outputs.
@@ -79,7 +79,7 @@ def _credits_markdown(meta: ProjectMeta,
             name = c.get("name") or c.get("id") or "Unnamed"
             desc = c.get("description") or ""
             if desc:
-                lines.append(f"- **{name}** — {desc}")
+                lines.append(f"- **{name}** - {desc}")
             else:
                 lines.append(f"- **{name}**")
         lines.append("")
@@ -107,9 +107,9 @@ def build_delivery_bundle(project: Project,
     """Zip the ship-ready outputs for one project.
 
     ``films_dir`` is where the orchestrator drops ``final.mp4`` /
-    ``final_mixed.mp4`` — usually ``.mp/films``. The delivery zip
+    ``final_mixed.mp4`` - usually ``.mp/films``. The delivery zip
     contains that final cut, a CREDITS.md, and a manifest.json. If no
-    final cut is on disk yet we still write the credits and manifest —
+    final cut is on disk yet we still write the credits and manifest - 
     the resulting bundle is honest about it rather than silently empty.
     """
     meta = project.meta
@@ -124,7 +124,7 @@ def build_delivery_bundle(project: Project,
                           arcname=f"{meta.title.replace(os.sep, '_')}.mp4")
             included.append(os.path.basename(final_video))
         else:
-            warning = ("No final render on disk yet — bundle contains "
+            warning = ("No final render on disk yet - bundle contains "
                        "metadata only.")
 
         credits = _credits_markdown(meta, characters, entitlement_tier)
@@ -185,11 +185,11 @@ class ImportResult:
 
 def build_project_export(project: Project, out_path: str) -> ExportResult:
     """Zip the full project directory into a ``.studioproj`` bundle. The
-    zip contains everything under the project's ``dir`` — project.json,
+    zip contains everything under the project's ``dir`` - project.json,
     state.json, artifacts/, logs/, and any per-project generated media
     the pipeline dropped inside.
 
-    The films_dir output (``final.mp4`` etc.) is *not* included here —
+    The films_dir output (``final.mp4`` etc.) is *not* included here - 
     those are large and derivable from the artifacts. Callers that want
     the finished cut too can pair this with a delivery bundle.
     """
@@ -232,7 +232,7 @@ def _safe_extract_member(archive: zipfile.ZipFile, member: str,
     ``dest_root``. Guards against zip-slip in an imported bundle."""
     root = os.path.normpath(dest_root)
     target = os.path.normpath(os.path.join(root, member))
-    # commonpath raises on cross-drive comparisons on Windows — a member
+    # commonpath raises on cross-drive comparisons on Windows - a member
     # containing an absolute path from the wrong drive is caught here.
     try:
         if os.path.commonpath([root, target]) != root:
@@ -253,7 +253,7 @@ def import_project(zip_path: str, films_root: str,
 
     The imported bundle keeps every artifact and log, but the new
     project gets a fresh id so importing the same zip twice produces
-    two independent copies — nothing about the source's on-disk state
+    two independent copies - nothing about the source's on-disk state
     is overwritten.
     """
     if not zipfile.is_zipfile(zip_path):
@@ -262,7 +262,7 @@ def import_project(zip_path: str, films_root: str,
     with zipfile.ZipFile(zip_path, "r") as archive:
         names = archive.namelist()
         if "_studioproj/manifest.json" not in names:
-            raise ValueError("Zip is missing _studioproj/manifest.json — "
+            raise ValueError("Zip is missing _studioproj/manifest.json - "
                              "not a StudioLite project export.")
         header = json.loads(archive.read("_studioproj/manifest.json"))
         if header.get("kind") != "studioproj_export":
@@ -302,7 +302,7 @@ def import_project(zip_path: str, films_root: str,
             raise
 
     # Rewrite project.json so id + title match the new copy. Everything
-    # else — brief, config, timestamps of artifacts — carries over.
+    # else - brief, config, timestamps of artifacts - carries over.
     meta_path = os.path.join(target_dir, "project.json")
     with open(meta_path, "r", encoding="utf-8") as f:
         meta_raw = json.load(f)

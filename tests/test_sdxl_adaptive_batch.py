@@ -1,6 +1,6 @@
 """Adaptive-batch-size loop for the Shot Generator stage.
 
-Doesn't run real SDXL — patches the batch renderer to a mock that OOMs
+Doesn't run real SDXL - patches the batch renderer to a mock that OOMs
 at size 4 and succeeds at size 2, then confirms the loop halves and
 completes without erroring out."""
 from __future__ import annotations

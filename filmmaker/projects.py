@@ -1,6 +1,6 @@
 """
 Thin CRUD wrapper the API layer uses. Everything else touches Project
-directly — this only owns the root directory + list helpers.
+directly - this only owns the root directory + list helpers.
 """
 
 from __future__ import annotations

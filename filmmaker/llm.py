@@ -84,7 +84,7 @@ def chat(
 
 
 def backend_status() -> Dict[str, Dict[str, Any]]:
-    """Report which backends are ready to use. Read-only — never contacts
+    """Report which backends are ready to use. Read-only - never contacts
     an external service, just inspects env vars + local Ollama reachability.
     Used by the /system/llm-backends probe so the UI can gate its picker."""
     status: Dict[str, Dict[str, Any]] = {}
@@ -104,7 +104,7 @@ def backend_status() -> Dict[str, Dict[str, Any]]:
         has = bool(os.environ.get(env_var))
         status[name] = {
             "configured": has,
-            "reachable": has,      # cloud — trust the key exists; live probe would spend a request
+            "reachable": has,      # cloud - trust the key exists; live probe would spend a request
             "host": None,
             "default_model": default_model,
             "env_var": env_var,
@@ -411,10 +411,10 @@ def _repair_truncated_json(text: str) -> Optional[str]:
     """Best-effort completion of a JSON snippet that was cut off mid-way.
 
     Handles the shapes providers actually produce when truncated:
-    - Unclosed string (append `"`)
-    - Trailing `,` or `:` with no value after (strip; insert `null` when
+- Unclosed string (append `"`)
+- Trailing `,` or `:` with no value after (strip; insert `null` when
       mid-key-value)
-    - Unclosed `{` / `[` (append matching closers in reverse)
+- Unclosed `{` / `[` (append matching closers in reverse)
 
     Returns a JSON string that MIGHT parse, or None if the input has no
     JSON-shaped content at all. The caller should still `json.loads` the
@@ -571,10 +571,10 @@ def _repair_truncated_json(text: str) -> Optional[str]:
 
     Handles the shapes Ollama actually produces when its response is
     truncated by num_predict:
-    - Unclosed string (append `"`)
-    - Trailing `,` or `:` with no value after (strip the dangling separator;
+- Unclosed string (append `"`)
+- Trailing `,` or `:` with no value after (strip the dangling separator;
       insert `null` when the caller was mid-key-value)
-    - Unclosed `{` / `[` (append matching closers in reverse)
+- Unclosed `{` / `[` (append matching closers in reverse)
 
     Returns a JSON string that MIGHT parse, or None if the input has no
     JSON-shaped content at all. The caller should still `json.loads` the
@@ -609,7 +609,7 @@ def _repair_truncated_json(text: str) -> Optional[str]:
 
     out = text
     # If we ended mid-string, close it. A dangling `\` at the end is an
-    # unfinished escape sequence — drop it before closing, otherwise the
+    # unfinished escape sequence - drop it before closing, otherwise the
     # appended `"` becomes an escaped quote and the string never closes.
     if in_str:
         if escape:
@@ -618,7 +618,7 @@ def _repair_truncated_json(text: str) -> Optional[str]:
     # Drop dangling separators that would create empty values.
     trimmed = out.rstrip()
     while trimmed and trimmed[-1] in ",:":
-        # `:` means we truncated after a key — insert `null` before closing
+        # `:` means we truncated after a key - insert `null` before closing
         # so the JSON becomes `{ "k": null }` instead of `{ "k": }`.
         if trimmed[-1] == ":":
             trimmed = trimmed + " null"

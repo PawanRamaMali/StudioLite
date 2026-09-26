@@ -17,7 +17,7 @@ class QualityReport:
 
     A stage-level verifier returns one of these. The orchestrator uses
     `accepted` to decide whether to retry the stage with `hints` fed back
-    to the runner as reviewer notes. Verifiers are entirely optional —
+    to the runner as reviewer notes. Verifiers are entirely optional - 
     stages without one behave exactly as before.
 
     `score` is a soft 0-1 signal for the UI; `accepted` is the boolean
@@ -78,7 +78,7 @@ class StageSpec:
     gated_by_default: bool = False
 
 
-# Order matters — this is the pipeline. Dialogue voices and music score fold
+# Order matters - this is the pipeline. Dialogue voices and music score fold
 # into the final cut via the mixer stage, so the film comes out with sound.
 STAGES: List[StageSpec] = [
     StageSpec("producer",           "Producer",           "Turns the brief into 3 loglines and picks one.",              gated_by_default=True),

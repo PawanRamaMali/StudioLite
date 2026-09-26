@@ -25,7 +25,7 @@ if [[ ! -x "$VENV_PY" ]]; then
         echo "  python3 -m venv venv && source venv/bin/activate" >&2
         echo "  pip install -r requirements-cuda.txt && pip install -r requirements.txt" >&2
     else
-        echo "No NVIDIA GPU detected — installing CPU-only torch wheels:" >&2
+        echo "No NVIDIA GPU detected - installing CPU-only torch wheels:" >&2
         echo "  python3 -m venv venv && source venv/bin/activate" >&2
         echo "  pip install -r requirements-cpu.txt && pip install -r requirements.txt" >&2
     fi

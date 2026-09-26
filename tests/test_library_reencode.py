@@ -1,11 +1,11 @@
 """ReencodeJob + list_legacy_videos structural tests.
 
-No real ffmpeg — patches subprocess.Popen so the job "converts" by
+No real ffmpeg - patches subprocess.Popen so the job "converts" by
 writing a stub output file. Verifies:
-  - list_legacy_videos filters by codec case-insensitively
-  - the job runs through every id, tracks counts, and computes bytes saved
-  - cancel drops the partial file
-  - replace_original produces the .legacy sidecar
+- list_legacy_videos filters by codec case-insensitively
+- the job runs through every id, tracks counts, and computes bytes saved
+- cancel drops the partial file
+- replace_original produces the .legacy sidecar
 """
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def test_reencode_job_writes_outputs_and_tallies_saved_bytes():
             out_path = cmd[-1]
             mock = MagicMock()
             def _communicate():
-                # Write a 40KB "encoded" file — 60% smaller than source.
+                # Write a 40KB "encoded" file - 60% smaller than source.
                 with open(out_path, "wb") as f: f.write(b"\0" * 40_000)
                 mock.returncode = 0
                 return (b"", b"")

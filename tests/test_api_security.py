@@ -2,7 +2,7 @@
 
 Each test spins up a fresh isolated api_server import with STUDIOLITE_AUTH
 in a known state and a temp .auth file. This is verbose but the
-alternative — an import-time singleton — makes it too easy for one test
+alternative - an import-time singleton - makes it too easy for one test
 to leak state into another."""
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ class TestUploadHardening:
 
     def test_upload_rejects_wrong_magic_bytes(self, monkeypatch, tmp_path):
         api, client = _fresh_api(monkeypatch, tmp_path, auth="off")
-        # File claims .png but the content is plain text — magic-byte
+        # File claims .png but the content is plain text - magic-byte
         # check should reject it and delete the partial write.
         r = client.post(
             "/api/v1/images/upload",

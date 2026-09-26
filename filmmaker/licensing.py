@@ -3,13 +3,13 @@
 Design in one paragraph
 -----------------------
 
-A StudioLite Pro license is a small JSON payload — tier, features, expiry,
-optional device fingerprint — plus an Ed25519 signature made by the
+A StudioLite Pro license is a small JSON payload - tier, features, expiry,
+optional device fingerprint - plus an Ed25519 signature made by the
 publisher's release key. The install ships with the corresponding public
 key baked in (``LICENSE_PUBLIC_KEY_PEM`` below). At runtime we read the
 license file, verify the signature, and expose an ``EntitlementCheck``
 that tells the API layer whether a feature is unlocked. Nothing here
-talks to the network — activation is intentionally offline so a StudioLite
+talks to the network - activation is intentionally offline so a StudioLite
 box can run behind an air gap and still be legit.
 
 For the community build we ship an obviously-fake dev keypair in
@@ -20,7 +20,7 @@ Fields on the payload
 ---------------------
 
   tier            "free" | "pro" | "studio"
-  features        list of enum-ish strings — anything the API layer wants
+  features        list of enum-ish strings - anything the API layer wants
                   to gate (e.g. "batch_export", "cloud_render").
   device_hash     optional; when set, only a machine whose fingerprint
                   matches will pass verify. Unbound licenses (device_hash
@@ -56,7 +56,7 @@ logger = logging.getLogger("studiolite.licensing")
 
 # --- Publisher key ---------------------------------------------------------
 
-# Placeholder DEV public key — DO NOT ship a Pro-signed license against this
+# Placeholder DEV public key - DO NOT ship a Pro-signed license against this
 # key in production. Real releases replace this string at package time. The
 # key here matches ``dev_keys/dev_ed25519_private.pem`` in the repo so tests
 # and demos work end-to-end.
@@ -105,8 +105,8 @@ def get_public_key() -> Ed25519PublicKey:
 def device_fingerprint() -> str:
     """Coarse, non-PII, stable machine fingerprint. We hash the MAC of the
     primary NIC together with the hostname. Not tamper-proof against a
-    determined attacker with root — a real anti-piracy story would need
-    a TPM binding or a HSM — but it's enough to make casually-shared
+    determined attacker with root - a real anti-piracy story would need
+    a TPM binding or a HSM - but it's enough to make casually-shared
     license files fail verification."""
     try:
         node = uuid.getnode()  # MAC as an int (falls back to a random 48-bit)
@@ -224,7 +224,7 @@ def verify_license(license_bundle: Dict[str, Any],
     except Exception as e:  # noqa: BLE001
         return EntitlementCheck(valid=False, reason=f"License verify error: {e}")
 
-    # Signature valid — apply policy checks.
+    # Signature valid - apply policy checks.
 
     if payload.device_hash and payload.device_hash != fingerprint:
         return EntitlementCheck(
@@ -256,7 +256,7 @@ def verify_license(license_bundle: Dict[str, Any],
 
 def check_entitlement(*, path: Optional[str] = None) -> EntitlementCheck:
     """Read the on-disk license (if any) and report the current
-    entitlement. Absence of a license is not an error — it just means
+    entitlement. Absence of a license is not an error - it just means
     ``valid=False, tier="free"``, and the API layer can gate paid
     features accordingly."""
     if path is None:
@@ -272,7 +272,7 @@ def install_license(bundle: Dict[str, Any], *,
                     path: Optional[str] = None) -> EntitlementCheck:
     """Verify a caller-supplied license bundle and, if valid, persist it.
     On invalid input we return the failure reason without writing
-    anything — no partial state on disk."""
+    anything - no partial state on disk."""
     check = verify_license(bundle)
     if not check.valid:
         return check
@@ -287,7 +287,7 @@ def install_license(bundle: Dict[str, Any], *,
 
 
 def deactivate_license(*, path: Optional[str] = None) -> None:
-    """Remove the on-disk license. Idempotent — a missing file is fine."""
+    """Remove the on-disk license. Idempotent - a missing file is fine."""
     if path is None:
         path = default_license_path()
     try:

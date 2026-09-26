@@ -1,7 +1,7 @@
 """Batch re-encode of legacy-codec videos into modern H.264 / H.265.
 
 Aimed at library maintenance: MPEG-2 rips, WMV screencasts, RM/RMVB
-downloads, DV camcorder footage — anything that most consumer players
+downloads, DV camcorder footage - anything that most consumer players
 still handle but that no longer plays cleanly in browsers, phones, or
 modern editors. Runs ffmpeg per file with a cooperative cancel event.
 
@@ -24,7 +24,7 @@ logger = logging.getLogger("studiolite.library.reencode")
 
 
 # Codec names ffprobe/ffmpeg use, lowercased. Anything not in this set is
-# considered modern-enough to keep as-is — re-encoding h264/hevc/av1/vp9
+# considered modern-enough to keep as-is - re-encoding h264/hevc/av1/vp9
 # just recompresses without benefit and can *lose* quality.
 LEGACY_CODECS = frozenset({
     # MPEG family
@@ -53,11 +53,11 @@ class ReencodeJob(threading.Thread):
     """ffmpeg-convert a list of videos into a modern codec.
 
     Options:
-        video_ids       — library ids to process (ordered)
-        target_codec    — "h264" (default) or "h265"
-        crf             — quality knob; 18 is visually lossless, 23 is
+        video_ids - library ids to process (ordered)
+        target_codec - "h264" (default) or "h265"
+        crf - quality knob; 18 is visually lossless, 23 is
                           "the internet default", 28 is small-file
-        replace_original— if True, move the source to `<name>.legacy` and
+        replace_original - if True, move the source to `<name>.legacy` and
                           replace it with the transcoded file so the
                           library keeps the same path. If False (default),
                           writes to `.mp/library/reencoded/<id>__<codec>.mp4`.
@@ -180,7 +180,7 @@ class ReencodeJob(threading.Thread):
             # Cancel handling: if ffmpeg was killed mid-encode the return
             # code is non-zero and we'll drop the partial in the next branch.
             # If it finished cleanly BEFORE the cancel arrived, keep the file
-            # — the user's work is done for that video, no point discarding.
+            # - the user's work is done for that video, no point discarding.
             if rc != 0 and self._cancelled() and os.path.exists(out_path):
                 try: os.remove(out_path)
                 except OSError: pass
@@ -205,7 +205,7 @@ class ReencodeJob(threading.Thread):
                     shutil.move(src, legacy)
                     shutil.move(out_path, src)
                     # Force a re-scan of this row on the next pass by clearing
-                    # every derived signal — codec/size have all changed.
+                    # every derived signal - codec/size have all changed.
                     self.store.update_video_metadata(
                         vid, sha256=None, phash_hex=None,
                         duration_sec=None, width=None, height=None,

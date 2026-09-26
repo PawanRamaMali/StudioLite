@@ -7,7 +7,7 @@ to the repo root so they survive a restart.
 
 Extracted from ``api_server.py`` as part of the monolith cleanup. The
 root path is resolved lazily so this module doesn't need to run before
-``api_server`` sets up its filesystem layout — the router mounts
+``api_server`` sets up its filesystem layout - the router mounts
 without side effects, and the first request looks up the current
 process's cwd-inferred root."""
 from __future__ import annotations
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api/v1/system", tags=["env-vars"])
 
 
 # Keys the UI is allowed to show/edit. Anything not on this list AND
-# not matching one of the safe prefixes below is rejected — a POST for
+# not matching one of the safe prefixes below is rejected - a POST for
 # ``PATH`` or ``SECRET_KEY`` will not silently succeed.
 MANAGED_ENV_VARS: List[str] = [
     "HF_TOKEN", "HF_HOME", "NEXT_PUBLIC_API_URL",
@@ -37,7 +37,7 @@ def _is_managed(key: str) -> bool:
 
 def _mask(key: str, val: str) -> str:
     """Mask any value whose key contains 'TOKEN'. Short values pass
-    through — masking a 4-char value would tell an attacker exactly
+    through - masking a 4-char value would tell an attacker exactly
     how long the real token is."""
     if "TOKEN" in key and val and len(val) > 8:
         return val[:8] + "..." + val[-4:]
@@ -46,7 +46,7 @@ def _mask(key: str, val: str) -> str:
 
 def _env_file_path() -> str:
     """Locate the repo's ``.env`` alongside ``api_server.py``. Resolved
-    per call so importing the router doesn't touch the filesystem —
+    per call so importing the router doesn't touch the filesystem - 
     keeps the test harness's monkeypatched cwd working."""
     # api_server.py sits at the repo root; this module sits under
     # api/routers/, so two ``dirname`` calls back up walk to the root.

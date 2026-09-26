@@ -1,6 +1,6 @@
 """Opt-in local telemetry endpoints.
 
-Backed by ``filmmaker.telemetry`` — this router is the HTTP shell. All
+Backed by ``filmmaker.telemetry`` - this router is the HTTP shell. All
 data is local; nothing gets shipped anywhere without the user zipping
 the diagnostic bundle themselves."""
 from __future__ import annotations
@@ -48,7 +48,7 @@ async def telemetry_events(limit: int = 100) -> dict:
 @router.get("/bundle")
 async def telemetry_bundle() -> Response:
     """Return a diagnostic zip the user can attach to a bug report. Never
-    sent anywhere by us — this endpoint just packages what's already on
+    sent anywhere by us - this endpoint just packages what's already on
     disk with the same redaction the module documents."""
     data = telemetry.build_diagnostic_bundle()
     return Response(

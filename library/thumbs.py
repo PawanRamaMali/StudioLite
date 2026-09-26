@@ -16,7 +16,7 @@ def thumb_path(root_dir: str, video_id: int) -> str:
 
 def ensure_image_thumb(root_dir: str, media_id: int, image_abs_path: str,
                         *, width: int = 480) -> Optional[str]:
-    """PIL-based thumbnail for a still image — quick, offline, no ffmpeg needed."""
+    """PIL-based thumbnail for a still image - quick, offline, no ffmpeg needed."""
     out = thumb_path(root_dir, media_id)
     if os.path.isfile(out) and os.path.getsize(out) > 100:
         return out
@@ -41,7 +41,7 @@ def ensure_image_thumb(root_dir: str, media_id: int, image_abs_path: str,
 def ensure_thumb(root_dir: str, video_id: int, video_abs_path: str,
                  *, width: int = 480, at_percent: float = 0.15) -> Optional[str]:
     """Generate the thumbnail if it's missing, return its path.
-    `at_percent` seeks that fraction into the video for a frame — 15%
+    `at_percent` seeks that fraction into the video for a frame - 15%
     tends to skip title cards and land on real content."""
     out = thumb_path(root_dir, video_id)
     if os.path.isfile(out) and os.path.getsize(out) > 100:
@@ -66,7 +66,7 @@ def ensure_thumb(root_dir: str, video_id: int, video_abs_path: str,
         logger.debug("thumb ffmpeg failed on %s: %s", video_abs_path, e)
         return None
     if proc.returncode != 0 or not os.path.isfile(out) or os.path.getsize(out) < 100:
-        # Retry without seeking — very short clips don't have a frame at t=2.
+        # Retry without seeking - very short clips don't have a frame at t=2.
         cmd_retry = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-i", video_abs_path,

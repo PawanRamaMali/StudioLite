@@ -1,4 +1,4 @@
-"""ffprobe wrapper — pulls duration / width / height / codec / fps from a
+"""ffprobe wrapper - pulls duration / width / height / codec / fps from a
 video file. Fail-open; on any error every field is None."""
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ class ProbeResult:
 
 
 def probe_image(path: str) -> ProbeResult:
-    """PIL-based probe for still images — width, height, and format-as-codec.
+    """PIL-based probe for still images - width, height, and format-as-codec.
     Duration is left as None (a still image has no duration).
     Never raises."""
     if not os.path.isfile(path):
@@ -84,7 +84,7 @@ def probe(path: str, *, timeout: float = 20.0) -> ProbeResult:
         if duration is None and s.get("duration"):
             try: duration = float(s["duration"])
             except Exception: pass
-        # avg_frame_rate is "30000/1001" — parse safely
+        # avg_frame_rate is "30000/1001" - parse safely
         rate = s.get("avg_frame_rate") or s.get("r_frame_rate")
         if rate and "/" in rate:
             try:

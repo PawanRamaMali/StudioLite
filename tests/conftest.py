@@ -1,4 +1,4 @@
-"""Shared pytest fixtures. Kept minimal on purpose — the test suite is
+"""Shared pytest fixtures. Kept minimal on purpose - the test suite is
 opinionated about touching real disk only via `tmp_path`, so most tests
 build up whatever they need inline and don't share state."""
 from __future__ import annotations

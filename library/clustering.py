@@ -1,6 +1,6 @@
 """K-means clustering over CLIP embeddings + auto-labeling.
 
-The number of clusters defaults to sqrt(N) — enough to give the user a
+The number of clusters defaults to sqrt(N) - enough to give the user a
 useful bird's-eye view without every cluster being tiny. Each cluster
 gets a human label by asking CLIP which of the taxonomy tags best
 matches the cluster centroid.

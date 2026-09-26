@@ -106,7 +106,7 @@ export default function StoryPanel() {
           setLipSyncAvailable(!!data.lip_sync?.available);
         }
       } catch {
-        // leave defaults — selector will show "auto" only
+        // leave defaults - selector will show "auto" only
       }
     };
     fetchEngines();
@@ -322,7 +322,7 @@ export default function StoryPanel() {
       }
     } catch (e) {
       console.error("Import failed:", e);
-      alert("Import failed — check if API server is running.");
+      alert("Import failed - check if API server is running.");
     } finally {
       setImportingChars(false);
     }
@@ -595,7 +595,7 @@ export default function StoryPanel() {
           <div>
             <p className="font-medium text-amber-300">Story Mode requires an NVIDIA GPU to render scenes.</p>
             <p className="text-amber-200/80 mt-1">
-              The script writer, character notes, and scene planner still work — you can draft a full script here — but
+              The script writer, character notes, and scene planner still work - you can draft a full script here - but
               actually rendering scene video needs a CUDA GPU. Try Images Studio or Audio Studio for CPU-friendly output.
             </p>
           </div>

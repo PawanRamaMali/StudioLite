@@ -3,7 +3,7 @@ On-disk project model.
 
 Every film is a directory under `.mp/films/<project_id>/` holding
 `project.json`, `state.json`, an `artifacts/` tree, and rendered media.
-The Project class is the only code that touches those files — everything
+The Project class is the only code that touches those files - everything
 else in the pipeline reads/writes via its helpers.
 """
 
@@ -30,7 +30,7 @@ class ProjectConfig:
     llm_backend: str = "ollama"
     llm_model: str = "llama3.2"
     llm_host: Optional[str] = None  # e.g. http://localhost:11434
-    # Visual style — passed to Cinematographer and Shot Generator prompts.
+    # Visual style - passed to Cinematographer and Shot Generator prompts.
     style: str = "stylized"          # "stylized" | "photoreal"
     # Target runtime hint the Producer and Breakdown agents anchor on.
     target_minutes: float = 2.0
@@ -45,7 +45,7 @@ class ProjectConfig:
     # only wired when the weights land on disk under fp8). "flux-schnell":
     # black-forest-labs/FLUX.1-schnell, 4 steps, ~12GB fp16 / ~7GB fp8.
     # Loaders try local_files_only first and fall through to the current
-    # SDXL Turbo path on any miss — no downloads triggered by the pipeline.
+    # SDXL Turbo path on any miss - no downloads triggered by the pipeline.
     sdxl_variant: str = "turbo"
     # Motion backend for motion_shots. "auto" tries SVD -> AnimateDiff ->
     # Wan -> Ken Burns; individual backends can be forced. Newer options
@@ -59,7 +59,7 @@ class ProjectConfig:
     # "xtts": Coqui XTTS-v2, 24kHz, 6s-clip cloning. Forward-compatible
     # values whose loaders fall through until weights are on disk:
     # "indextts2" (IndexTeam/IndexTTS-2, Apache, ~6GB, disentangled
-    # emotion control — the current best local TTS for prosody stability),
+    # emotion control - the current best local TTS for prosody stability),
     # "qwen3tts" (Qwen/Qwen3-TTS-12Hz-1.7B, Apache, ~4GB, voice-design
     # from a text prompt so characters can get truly unique voices),
     # "chatterbox" (resemble-ai/chatterbox, MIT, ~6GB, expressive).
@@ -72,7 +72,7 @@ class ProjectConfig:
     # Post-processing upscale of the final cut. "none" (default) leaves the
     # 1280x720 output alone. "realesrgan_x2" runs each frame through a
     # Real-ESRGAN 2x model, lifting 720p to 1440p with sharp neural edges.
-    # "realesrgan_x4" upscales 4x (720p -> 2880p) — usually overkill on
+    # "realesrgan_x4" upscales 4x (720p -> 2880p) - usually overkill on
     # AI video that's noisy under magnification. Weights come from
     # ai-forever/Real-ESRGAN on HF; loader falls through to no-op if the
     # spandrel package or the weights file isn't available.
@@ -108,14 +108,14 @@ class ProjectState:
 
 class Project:
     """
-    Wraps a project directory. Cheap to construct — reads project.json
+    Wraps a project directory. Cheap to construct - reads project.json
     and state.json each time you touch them (small files, no cache), so
     a background orchestrator writing on one side and the API reading on
     the other stay coherent without an in-process lock across processes.
     Within one process a per-project RLock guards write bursts.
 
     Meta index + artifact version snapshots go through a shared
-    ``filmmaker.project_store.ProjectStore``. The store is optional — if
+    ``filmmaker.project_store.ProjectStore``. The store is optional - if
     it can't open its SQLite file we silently skip both index and
     history, and the JSON tree remains fully authoritative.
     """
@@ -156,7 +156,7 @@ class Project:
 
     @classmethod
     def set_store(cls, store) -> None:
-        """Test hook — install a specific ProjectStore instance so the
+        """Test hook - install a specific ProjectStore instance so the
         tmp path is honored. Passing None resets to lazy init."""
         with cls._store_guard:
             cls._store = store
@@ -299,7 +299,7 @@ class Project:
         with self._lock():
             state = self.state
             for down_key in downstream_of(key):
-                # Preserve failed/pending — only nudge completed ones.
+                # Preserve failed/pending - only nudge completed ones.
                 if state.stage_status.get(down_key) in ("done", "needs_review"):
                     state.stage_status[down_key] = "stale"
             self.save_state(state)
@@ -323,7 +323,7 @@ class Project:
                        *, snapshot: bool = True, note: str = "") -> None:
         """Write an artifact and (by default) drop a version snapshot in
         the project store. Pass ``snapshot=False`` for hot-loop writes
-        that don't want history — the current callers all leave it on
+        that don't want history - the current callers all leave it on
         so every stage completion becomes a restorable point."""
         with self._lock():
             self._write_json(self.artifact_path(key), data)

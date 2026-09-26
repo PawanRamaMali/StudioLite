@@ -19,7 +19,7 @@ from filmmaker import telemetry
 def _isolate_telemetry_dir(tmp_path, monkeypatch):
     """Point telemetry storage at a fresh tmp dir for every test.
     The module reads its state on every call, so patching the module-
-    level constants is enough — no cache to invalidate."""
+    level constants is enough - no cache to invalidate."""
     d = tmp_path / ".telemetry"
     monkeypatch.setattr(telemetry, "TELEMETRY_DIR", str(d))
     monkeypatch.setattr(telemetry, "CONSENT_FILE", str(d / "consent.json"))
@@ -107,7 +107,7 @@ class TestEventRecording:
         events = telemetry.recent_events()
         revoked = next(e for e in events if e["event"] == "consent_revoked")
         assert revoked["installation_id"] == ""
-        # But earlier grant-time events still carry their id — that's
+        # But earlier grant-time events still carry their id - that's
         # the history the user asked to log.
         earlier = next(
             e for e in events

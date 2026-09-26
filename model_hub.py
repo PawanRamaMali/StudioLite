@@ -274,7 +274,7 @@ def estimate_download_size(model_key: str) -> int:
     Hits HfApi.model_info(files_metadata=True) once per key (results cached in
     process) and sums the sibling file sizes. Returns 0 if the model has no
     hf_id, if huggingface_hub isn't importable, or if the metadata call fails
-    (network, gated repo, rate limit) — callers should treat 0 as "unknown"
+    (network, gated repo, rate limit) - callers should treat 0 as "unknown"
     and fall back to size-agnostic behavior rather than blocking on it.
     """
     model = MODEL_REGISTRY.get(model_key)
@@ -317,7 +317,7 @@ def download_model(model_key: str, progress_callback=None, cancel_event=None) ->
     are present. If size is unknown, falls back to a bytes-downloaded counter.
 
     cancel_event: optional threading.Event. Checked between files (not
-    mid-file — huggingface_hub has no finer granularity). When set() is
+    mid-file - huggingface_hub has no finer granularity). When set() is
     called, the currently in-flight file finishes and the function raises
     DownloadCancelled. Partial files stay on disk so a re-download resumes.
 
@@ -329,7 +329,7 @@ def download_model(model_key: str, progress_callback=None, cancel_event=None) ->
         raise RuntimeError(f"Unknown model: {model_key}")
     hf_id = model.get("hf_id", "")
     if not hf_id:
-        raise RuntimeError(f"Model {model_key} has no hf_id — can't download.")
+        raise RuntimeError(f"Model {model_key} has no hf_id - can't download.")
     if check_model_installed(model_key):
         return {
             "key": model_key,
@@ -349,7 +349,7 @@ def download_model(model_key: str, progress_callback=None, cancel_event=None) ->
 
     # Enumerate files so we can check cancel_event between them. If the
     # metadata call fails (network / gated / rate-limit) fall back to the
-    # single-blocking-call snapshot_download path — no cancel support there,
+    # single-blocking-call snapshot_download path - no cancel support there,
     # but the download still works.
     files: list[tuple[str, int]] = []
     try:
@@ -408,7 +408,7 @@ def download_model(model_key: str, progress_callback=None, cancel_event=None) ->
                 except Exception as e:
                     raise RuntimeError(f"Download failed on {rfilename}: {e}") from e
         else:
-            # Metadata call failed — fall back to snapshot_download without
+            # Metadata call failed - fall back to snapshot_download without
             # cancel support. Still respects resume_download.
             try:
                 path = snapshot_download(
@@ -444,7 +444,7 @@ def delete_model(model_key: str) -> dict:
         raise RuntimeError(f"Unknown model: {model_key}")
     hf_id = model.get("hf_id", "")
     if not hf_id:
-        raise RuntimeError(f"Model {model_key} has no hf_id — can't delete.")
+        raise RuntimeError(f"Model {model_key} has no hf_id - can't delete.")
 
     try:
         from huggingface_hub import scan_cache_dir

@@ -20,7 +20,7 @@ from . import embeddings as _emb
 logger = logging.getLogger("studiolite.library.tagger")
 
 
-# Curated tag taxonomy. Deliberately broad — the goal is to cover
+# Curated tag taxonomy. Deliberately broad - the goal is to cover
 # home-video-library territory without pretending we can name every
 # possible concept.
 TAG_TAXONOMY: List[str] = [

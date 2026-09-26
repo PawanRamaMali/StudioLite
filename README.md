@@ -9,16 +9,16 @@
 
 ## About
 
-**StudioLite** is a local-first, open-source AI film studio. Write a one-paragraph brief, pick a template, and it runs an 18-stage pipeline (Producer, Screenwriter, Cinematographer, Shot Generator, Motion, Voice, Composer, Editor) into a finished short film on your own hardware. When you want to work directly instead of driving the pipeline, it also ships an NLE-style timeline editor, a media library with semantic search and deduplication, an image studio, and a real-time transcription suite.
+**StudioLite** is a local-first, open-source AI film studio. Give it a one-paragraph brief and it drives an 18-stage pipeline (producer, screenwriter, cinematographer, shot generator, motion, voice, composer, editor) to a finished short film on your own hardware. When you would rather work directly, there is also a timeline editor, a media library with semantic search and deduplication, an image studio, and a real-time transcription suite. The pipeline and the direct tools share the same backend, so a shot rendered in the pipeline can be trimmed on the timeline without leaving the app.
 
-Everything runs offline against local models: Ollama, Gemini, Groq, or Hugging Face for text; SDXL family for stills; Wan 2.2, HunyuanVideo, LTX-Video, AnimateDiff for motion; IndexTTS-2, XTTS, Piper for voice. Cloud accounts are never required. Your project data, drafts, characters, and renders never leave the machine.
+Everything runs offline against local models. Text: Ollama, Gemini, Groq, Hugging Face. Stills: SDXL family. Motion: Wan 2.2, HunyuanVideo, LTX-Video, AnimateDiff. Voice: IndexTTS-2, XTTS, Piper. Music: MusicGen, ACE-Step. Your brief, your characters, and your renders never leave the machine. There is no cloud account to sign up for and nothing calls home.
 
-MIT licensed. Two front-end surfaces sit on top of the same FastAPI engine.
+MIT licensed. Ships a Next.js UI on top of a FastAPI backend, with a Windows setup package for one-click install.
 
 ## Table of contents
 
 - [Features](#features)
-- [Comparison with commercial tools](#comparison-with-commercial-tools)
+- [How it compares](#how-it-compares)
 - [Architecture](#architecture)
 - [Installation](#installation)
 - [Usage](#usage)
@@ -34,41 +34,41 @@ MIT licensed. Two front-end surfaces sit on top of the same FastAPI engine.
 
 18 stages, one artifact per stage, versioned on every write, editable in the panel:
 
-1. **Producer**: expands the one-paragraph brief into a pitch.
-2. **Beats**: three-act beat sheet.
-3. **Outline**: scene-by-scene structure.
-4. **Cast**: named characters with visual descriptions.
-5. **Screenwriter**: full script with dialogue and action.
-6. **Cinematographer**: per-scene visual language and shot list.
-7. **Breakdown**: shots with prompts, timing, camera notes.
-8. **Character portraits**: SDXL front / three-quarter / side / back reference sheets.
-9. **Shot generator**: SDXL keyframes with adaptive OOM-halving batch sizing.
-10. **Motion shots**: Wan 2.2, HunyuanVideo, LTX-Video, AnimateDiff, or SVD I2V clips.
-11. **Continuity**: cross-shot consistency verifier.
-12. **Voice actor**: per-character narration via IndexTTS-2, XTTS-v2, Qwen3-TTS, Chatterbox, or Piper.
-13. **Composer**: MusicGen or ACE-Step score.
-14. **SFX**: procedural or generated sound effects.
-15. **Editor**: cut the film with the chosen pacing.
-16. **Mixer**: ducked dialogue against music and SFX.
-17. **Upscale**: optional Real-ESRGAN 2x or 4x neural pass.
-18. **Delivery**: final mixed cut ready to ship.
+1. **Producer**. Expands the brief into a pitch.
+2. **Beats**. Three-act beat sheet.
+3. **Outline**. Scene-by-scene structure.
+4. **Cast**. Named characters with visual descriptions.
+5. **Screenwriter**. Full script with dialogue and action.
+6. **Cinematographer**. Per-scene visual language and shot list.
+7. **Breakdown**. Shots with prompts, timing, camera notes.
+8. **Character portraits**. SDXL front, three-quarter, side, and back sheets.
+9. **Shot generator**. SDXL keyframes with adaptive OOM-halving batch sizing.
+10. **Motion shots**. Wan 2.2, HunyuanVideo, LTX-Video, AnimateDiff, or SVD I2V clips.
+11. **Continuity**. Cross-shot consistency verifier.
+12. **Voice actor**. Per-character narration via IndexTTS-2, XTTS-v2, Qwen3-TTS, Chatterbox, or Piper.
+13. **Composer**. MusicGen or ACE-Step score.
+14. **SFX**. Procedural or generated sound effects.
+15. **Editor**. Cuts the film to the chosen pacing.
+16. **Mixer**. Ducks dialogue against music and SFX.
+17. **Upscale**. Optional Real-ESRGAN 2x or 4x pass.
+18. **Delivery**. Final mixed cut, ready to hand off.
 
-Five starter templates (short story, explainer, teaser trailer, product demo, draft scene) so you never start from a blank config.
+Five starter templates ship in-box (short story, explainer, teaser trailer, product demo, draft scene) so you never open a blank config.
 
 ### Timeline editor
 
-NLE-style multi-clip timeline. Trim in/out per clip, reorder, and export with codec presets: H.264, H.265, or ProRes at high / medium / low quality. Free-tier renders carry a StudioLite watermark. A Pro or Studio license removes it, and the server double-checks the license before honoring the client's request.
+Multi-clip NLE-style timeline. Trim in and out per clip, reorder, export with codec presets: H.264, H.265, or ProRes at high, medium, or low quality. Free-tier renders carry a StudioLite watermark; a Pro or Studio license removes it, and the server verifies the license before honoring the client's request.
 
 ### Batch render
 
-Queue N timeline exports as one batch. Individual jobs remain cancellable and retryable. One rollup endpoint reports done / in-flight / counts so you have one thing to watch instead of twelve.
+Queue N timeline exports as a single batch. Individual jobs stay cancellable and retryable, and the rollup endpoint reports done, in-flight, and per-status counts so a "render twelve shots overnight" workflow is one thing to watch, not twelve.
 
 ### Media Library
 
 Point it at folders, and it walks them for videos and images. Then:
 
-- Perceptual-hash duplicate detection with review-and-delete plans.
-- Semantic search with CLIP embeddings.
+- Perceptual-hash duplicate detection with a review-and-delete plan.
+- Semantic search using CLIP embeddings.
 - Cluster view for visual grouping.
 - Speech-to-text index with FTS5 full-text search.
 - Batch re-encode of legacy codecs (mpeg2, wmv, rmvb, dv) to H.264.
@@ -76,100 +76,98 @@ Point it at folders, and it walks them for videos and images. Then:
 
 ### Video Generator, Story Mode, Images Studio
 
-Direct panels for one-shot diffusion runs when you do not need the full pipeline: T2V, I2V, multi-scene Story Mode, and an image studio for T2I, edit, inpaint, upscale, and background removal.
+Direct panels for one-shot diffusion runs when the full pipeline is more machinery than the job needs: T2V, I2V, multi-scene Story Mode, and an image studio for T2I, edit, inpaint, upscale, and background removal.
 
 ### Video Editor
 
-Trim, merge, compress, rotate, stabilize, color-correct, region-effect, picture-in-picture, background music mix, speed change, GIF export, thumbnail extraction. All ffmpeg-backed; all queued as background jobs with progress polling.
+Trim, merge, compress, rotate, stabilize, color-correct, region-effect, picture-in-picture, background music mix, speed change, GIF export, thumbnail extraction. All ffmpeg-backed and queued as background jobs with progress polling.
 
 ### Transcription
 
-WhisperX and faster-whisper on files. Live mic and desktop-audio transcription. Live screen OCR with RapidOCR. Optional LLM clean-up into Markdown, DOCX, or PDF.
+WhisperX and faster-whisper on files. Live mic and desktop-audio capture. Live screen OCR with RapidOCR. Optional LLM cleanup into Markdown, DOCX, or PDF.
 
-### Delivery packaging and project export
+### Delivery and portable projects
 
-One-click package produces a shippable zip: final mixed cut, CREDITS.md, and a JSON manifest with render metadata. The tier and watermark state are recorded so the recipient can see how it was made. A portable `.studioproj` export bundles the whole project (artifacts, logs, state) so another machine can import it and continue.
+One click packages a project into a shippable zip: the final mixed cut, a CREDITS.md, and a JSON manifest recording tier, watermark state, and render settings. Alongside that, a portable `.studioproj` export bundles the whole project (artifacts, logs, state) so another machine can import it and continue where you left off.
 
 ### Jobs, licensing, telemetry
 
-- Every background runner is cancellable and retryable. Job state persists in SQLite so a restart never loses in-flight work.
-- Offline signed licensing with Ed25519. Feature gating with per-key entitlements. Grace-period support for expired keys.
-- Opt-in local telemetry writes a redacted diagnostic bundle you export by hand. Nothing ships without consent.
+Every background runner is cancellable and retryable. Job state persists in SQLite, so a restart never loses in-flight work. Licensing is offline and Ed25519-signed, with per-key feature gating and a grace period for expired keys. Telemetry is off by default; when you turn it on, it writes a redacted diagnostic bundle you export by hand, and nothing ships without consent.
 
 ### Windows installer
 
-Source-based IExpress setup with optional Authenticode signing (opt-in via env var). Every build writes a JSON release manifest with size, SHA-256, version, and signing state so a future auto-updater has a canonical file to read.
+Source-based IExpress setup with optional Authenticode signing (opt-in via env var). Every build writes a JSON release manifest with size, SHA-256, version, and signing state, so a future auto-updater has a canonical file to read.
 
-## Comparison with commercial tools
+## How it compares
 
-StudioLite covers ground that today usually requires stringing together three or four separate SaaS products. The tables below show how it lines up. Ratings are fair-witness: the commercial services do many things better, and StudioLite calls those out honestly.
+StudioLite covers a range that today usually costs three or four separate SaaS subscriptions to cover. The tables below are honest: the commercial services do many things better, and the "where StudioLite trails" section calls out where.
 
-### vs cloud AI video generators
+### Cloud AI video generators
 
 | Capability | StudioLite | RunwayML | Pika | Luma Dream Machine | OpenAI Sora |
 |---|---|---|---|---|---|
-| Text-to-video | Wan 2.2, LTX, AnimateDiff (local) | Gen-4 (SaaS) | Pika 2.0 (SaaS) | Ray 2 (SaaS) | Sora (SaaS, waitlisted) |
+| Text-to-video | Wan 2.2, LTX, AnimateDiff (local) | Gen-4 (cloud) | Pika 2.0 (cloud) | Ray 2 (cloud) | Sora (cloud, waitlisted) |
 | Image-to-video | Wan I2V, SVD (local) | Gen-3 I2V | Yes | Yes | Yes |
-| Motion quality | Good, model-dependent | Excellent | Very good | Very good | Best-in-class |
+| Motion fidelity | Good, backend-dependent | Strong | Strong | Strong | State of the art |
 | Runs offline | Yes | No | No | No | No |
-| Per-render cost | Zero (your electricity) | ~$0.05/s | Credit tiers | Credit tiers | Credit tiers |
-| Multi-scene film from a brief | Yes (18-stage pipeline) | No | No | No | No |
+| Per-render cost | Your electricity | ~$0.05 / second | Credit tiers | Credit tiers | Credit tiers |
+| Multi-scene film from a brief | Yes, 18-stage pipeline | No | No | No | No |
 | Own the outputs | Yes, on disk | ToS-bound | ToS-bound | ToS-bound | ToS-bound |
-| Watermark on free tier | Yes, removable with license | Yes | Yes | Yes | N/A |
+| Watermark on free tier | Yes, license removes it | Yes | Yes | Yes | N/A |
 | Open source | Yes (MIT) | No | No | No | No |
-| Hardware needed | 12-24 GB VRAM (NVIDIA) | None | None | None | None |
+| Hardware | 12-24 GB VRAM (NVIDIA) | None | None | None | None |
 | Batch export | Yes | Limited | Limited | Limited | Limited |
 
-### vs commercial NLEs
+### Commercial NLEs
 
 | Capability | StudioLite Timeline | Adobe Premiere Pro | DaVinci Resolve | Final Cut Pro |
 |---|---|---|---|---|
 | Multi-clip timeline | Yes (v1) | Full | Full | Full |
-| Trim per clip | Yes | Yes | Yes | Yes |
-| Codec presets (H.264/H.265/ProRes) | Yes | Yes | Yes | Yes |
+| Per-clip trim | Yes | Yes | Yes | Yes |
+| Codec presets (H.264 / H.265 / ProRes) | Yes | Yes | Yes | Yes |
 | Multi-track audio | Not yet | Yes | Yes | Yes |
-| Color grading | Basic (color-correct utility) | Lumetri | Best-in-class | Yes |
-| Motion graphics | No | Yes (After Effects) | Fusion | Motion |
-| AI-generated shots as source clips | Yes, native pipeline | Requires plugins | Requires plugins | Requires plugins |
+| Color grading | Basic | Lumetri | Industry standard | Yes |
+| Motion graphics | No | After Effects | Fusion | Motion |
+| AI-generated shots as source clips | Native | Requires plugins | Requires plugins | Requires plugins |
 | Runs offline | Yes | Yes | Yes | Yes |
-| Cost | Free (MIT) | ~$23/mo | Free / $295 (Studio) | $300 (one-time) |
-| Platform | Windows, Linux | Windows, macOS | Windows, macOS, Linux | macOS only |
+| Cost | Free (MIT) | ~$23 / month | Free / $295 Studio | $300 one-time |
+| Platforms | Windows, Linux | Windows, macOS | Windows, macOS, Linux | macOS only |
 | Open source | Yes | No | No | No |
 
-StudioLite is intentionally a v1 timeline. If you need finishing-grade color and multi-track audio, run DaVinci Resolve on the exported cut. StudioLite is best at the stage before finishing: turning ideas into shots and stitching them together.
+StudioLite ships a v1 timeline on purpose. If you need finishing-grade color or multi-track audio, run DaVinci Resolve on the exported cut. StudioLite is best at the stage before finishing: turning ideas into shots and stitching them together.
 
-### vs specialized AI tools
+### Specialized AI tools
 
 | Capability | StudioLite | Descript | HeyGen | ElevenLabs | Suno |
 |---|---|---|---|---|---|
-| Voice cloning | IndexTTS-2, XTTS-v2 (local) | Yes (cloud) | Yes (cloud) | Best-in-class (cloud) | N/A |
+| Voice cloning | IndexTTS-2, XTTS-v2 (local) | Yes (cloud) | Yes (cloud) | Category leader (cloud) | N/A |
 | Voice styling | Emotion via IndexTTS-2 | Overdub | Avatars | Extensive | N/A |
-| Music generation | MusicGen, ACE-Step (local) | Stock library | Stock library | N/A | Best-in-class (cloud) |
+| Music generation | MusicGen, ACE-Step (local) | Stock library | Stock library | N/A | Category leader (cloud) |
 | Transcription | WhisperX, faster-whisper | Yes | N/A | Yes | N/A |
-| Talking-head avatars | Character portraits, no lipsync yet | No | Best-in-class | No | No |
-| Script + voice + edit in one product | Yes | Yes | Partial | Voice only | Music only |
-| Per-project cost | Zero | $12-24/mo | $24-89/mo | $5-330/mo | $8-24/mo |
+| Talking-head avatars | Character portraits (lipsync not wired yet) | No | Category leader | No | No |
+| Script, voice, edit in one product | Yes | Yes | Partial | Voice only | Music only |
+| Per-project cost | Zero | $12-24 / month | $24-89 / month | $5-330 / month | $8-24 / month |
 | Own the outputs | Yes | Yes with limits | ToS-bound | Yes with limits | ToS-bound |
 | Open source | Yes | No | No | No | No |
 
-### Where StudioLite wins and where it does not
+### Where StudioLite wins and where it trails
 
-**Wins:**
+**Wins**
 
-- Local and private. Your brief, your characters, your renders never leave the box.
-- One product covers what usually needs three or four subscriptions.
+- Local and private. Your brief, your characters, and your renders never leave the box.
+- One product covers what today needs three or four subscriptions stitched together.
 - Zero marginal cost. Once the hardware is paid for, iteration is free.
-- Every model is swappable, so you can pick faster / cheaper / higher-quality per stage.
-- MIT licensed with no telemetry unless you opt in.
+- Every model is swappable. You can pick faster, cheaper, or higher-quality per stage.
+- MIT licensed. Telemetry is off by default and requires an explicit opt-in.
 
-**Where it does not:**
+**Trails**
 
-- Motion fidelity trails Sora and Runway Gen-4 by a full generation.
-- Real-time collaboration is not a thing. There is no cloud project sharing beyond the portable export zip.
+- Motion fidelity trails Sora and Runway Gen-4 by roughly a model generation.
+- No real-time collaboration and no cloud project sharing beyond the portable export zip.
 - Lipsync is not wired end-to-end yet.
 - Timeline is v1: no multi-track audio, no compositor, no proxy workflow.
-- Real-time rendering is not a thing either. A one-minute short takes minutes to hours depending on hardware and quality settings.
-- Requires a modern NVIDIA GPU for the interesting bits. CPU-only mode is honest about what it can and cannot do.
+- Rendering is not real-time. A one-minute short takes minutes to hours depending on hardware and settings.
+- The interesting bits assume a modern NVIDIA GPU. CPU-only mode is honest about what it can and cannot do.
 
 ## Architecture
 
@@ -192,7 +190,7 @@ StudioLite is intentionally a v1 timeline. If you need finishing-grade color and
       └────────────┘ └────────────┘ └─────────────┘ └───────────┘ └───────────┘
 ```
 
-Runtime output lives in `.mp/` (git-ignored). Every long-running task is a job. Every job carries progress, is cancellable, is retryable, and survives a process restart.
+Runtime output lives under `.mp/` (git-ignored). Every long-running task is a job, every job reports progress, is cancellable, is retryable, and survives a process restart.
 
 ## Installation
 
@@ -200,8 +198,8 @@ Runtime output lives in `.mp/` (git-ignored). Every long-running task is a job. 
 
 - Python 3.11
 - Node.js 22
-- FFmpeg on your PATH
-- Recommended for the GPU-heavy features: an NVIDIA GPU with 12+ GB VRAM
+- FFmpeg on PATH
+- For the GPU-heavy features, an NVIDIA GPU with 12 GB or more of VRAM
 
 Ubuntu:
 
@@ -233,7 +231,7 @@ python -m venv venv
 # Windows: .\venv\Scripts\activate
 source venv/bin/activate
 
-# Pick one, based on your hardware:
+# Pick one based on hardware:
 pip install -r requirements-cuda.txt   # NVIDIA GPU
 # or
 pip install -r requirements-cpu.txt    # CPU-only
@@ -266,7 +264,7 @@ Start everything with the one-click launcher:
 
 The launcher boots FastAPI on `:8000` and Next.js on `:3000`, waits for both to be reachable, and opens the browser. Ctrl+C cleanly stops both.
 
-Run manually if you prefer:
+Manual start:
 
 ```bash
 python api_server.py                           # backend on :8000
@@ -276,16 +274,16 @@ cd web && npm run dev                          # frontend on :3000
 ### Your first film
 
 1. Open the **Film Studio** panel.
-2. Pick a template ("Short Story" is a good first pick).
-3. Edit the sample brief or replace it with your own paragraph.
+2. Pick a template. "Short Story" is a good first pick.
+3. Edit the sample brief, or replace it with your own paragraph.
 4. Click **Create**.
 5. Click **Run**. Watch the pipeline advance stage-by-stage in the event stream.
-6. Edit any stage's artifact between runs. Downstream stages automatically mark themselves stale so you can re-run only the affected shots.
+6. Edit any stage's artifact between runs. Downstream stages automatically mark themselves stale so a re-run only touches the affected shots.
 7. When it finishes, click **Package** to get a delivery zip.
 
 ## Configuration
 
-Copy `config.example.json` to `config.json` (git-ignored) and edit it.
+Copy `config.example.json` to `config.json` (git-ignored) and edit.
 
 Environment variables (also editable from the Settings panel):
 
@@ -293,10 +291,10 @@ Environment variables (also editable from the Settings panel):
 |---|---|
 | `HF_TOKEN` | Hugging Face token for gated models |
 | `HF_HOME` | Custom cache dir for HF weights |
-| `NEXT_PUBLIC_API_URL` | Backend URL for the Next.js UI |
-| `CUDA_VISIBLE_DEVICES` | Which GPU(s) to use |
+| `NEXT_PUBLIC_API_URL` | Backend URL used by the Next.js UI |
+| `CUDA_VISIBLE_DEVICES` | Which GPU(s) to expose |
 | `PYTORCH_CUDA_ALLOC_CONF` | Memory allocator tuning |
-| `STUDIOLITE_AUTH` | `on` / `off` for API bearer auth |
+| `STUDIOLITE_AUTH` | `on` or `off` for API bearer auth |
 | `STUDIOLITE_LICENSE_FILE` | Custom path for the offline license |
 | `GEMINI_API_KEY`, `GROQ_API_KEY` | Cloud LLM backends (optional) |
 
@@ -319,11 +317,11 @@ The code is MIT. The **product** ships a two-tier entitlement layer for feature 
 | Tier | What you get | Watermark on export |
 |---|---|---|
 | Free | Full pipeline, all editors, all tools | Yes |
-| Pro / Studio | Same, plus watermark removal and `watermark_removal` feature flag | No |
+| Pro / Studio | Same, plus watermark removal and the `watermark_removal` feature flag | No |
 
-Licenses are Ed25519-signed JSON payloads with tier, features, optional device fingerprint, expiry, and grace-days. Verification is offline. Nothing calls home to check.
+Licenses are Ed25519-signed JSON payloads carrying tier, features, optional device fingerprint, expiry, and grace-days. Verification is offline. Nothing calls home.
 
-For your own installs the free tier is unlimited. For third-party distribution (packaging StudioLite as part of a product) the licensing scaffold gives you a way to gate features cleanly.
+For your own installs, the free tier is unlimited. For third-party distribution (packaging StudioLite as part of a product), the licensing scaffold gives you a clean way to gate features.
 
 ## Contributing
 
@@ -335,4 +333,4 @@ For your own installs the free tier is unlimited. For third-party distribution (
 
 MIT for the source. See `LICENSE`.
 
-Third-party dependencies, bundled fonts, and model weights carry their own licenses. See `THIRD_PARTY_NOTICES.md` for the full list; note that some model weights (Stable Diffusion XL, HunyuanVideo, LTX-Video, CogVideoX 5B) have restrictions on commercial use that supersede StudioLite's MIT grant.
+Third-party dependencies, bundled fonts, and model weights each carry their own licenses. See `THIRD_PARTY_NOTICES.md` for the full list. Note that some model weights (Stable Diffusion XL, HunyuanVideo, LTX-Video, CogVideoX 5B) have restrictions on commercial use that supersede StudioLite's MIT grant.

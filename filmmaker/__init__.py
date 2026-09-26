@@ -1,5 +1,5 @@
 """
-Film Studio — end-to-end short-film pipeline of specialty AI agents.
+Film Studio - end-to-end short-film pipeline of specialty AI agents.
 
 Public surface used by api_server:
     from filmmaker import registry, projects, orchestrator

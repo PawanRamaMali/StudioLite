@@ -135,7 +135,7 @@ class TestSubprocessTracking:
         class _FinishedProc:
             def poll(self):
                 return 0  # already exited
-            def terminate(self):  # pragma: no cover — should never be called
+            def terminate(self):  # pragma: no cover - should never be called
                 raise AssertionError("should not terminate a finished proc")
 
         api._register_subprocess("j2", _FinishedProc())

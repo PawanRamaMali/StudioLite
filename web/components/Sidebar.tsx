@@ -83,7 +83,7 @@ export default function Sidebar({ activeTab, onTabChange, isOpen, onToggle }: Si
               const active = activeTab === item.id;
               const dimmed = !hasGpu && item.gpuRequired === true;
               const titleText = dimmed
-                ? `${item.label} — requires NVIDIA GPU`
+                ? `${item.label} - requires NVIDIA GPU`
                 : item.label;
               return (
                 <button

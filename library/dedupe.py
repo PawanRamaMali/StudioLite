@@ -35,7 +35,7 @@ def near_duplicate_clusters(store: LibraryStore, *,
                             min_group: int = 2) -> List[Dict[str, Any]]:
     """Return near-duplicate clusters. Each cluster is a group of videos
     where every pair is within `threshold` Hamming distance of at least
-    one other member — union-find, not clique."""
+    one other member - union-find, not clique."""
     pairs = store.phash_candidate_pairs()
     if not pairs:
         return []
@@ -47,7 +47,7 @@ def near_duplicate_clusters(store: LibraryStore, *,
             dsu.union(a.id, b.id)
 
     # Also make sure singletons that came out of the candidate pairs stay
-    # accessible — but we only emit clusters with ≥ min_group members.
+    # accessible - but we only emit clusters with ≥ min_group members.
     groups: Dict[int, List[Video]] = {}
     for vid, v in by_id.items():
         if vid in dsu.parent:
@@ -66,7 +66,7 @@ def near_duplicate_clusters(store: LibraryStore, *,
             "key": f"cluster-{root}",
             "members": [v.__dict__ for v in members],
         })
-    # Largest clusters first — those are usually the most interesting.
+    # Largest clusters first - those are usually the most interesting.
     out.sort(key=lambda c: len(c["members"]), reverse=True)
     return out
 
@@ -92,7 +92,7 @@ def combined_clusters(store: LibraryStore,
 
 
 # ---------------------------------------------------------------------------
-# Deletion planning — "delete all but one per cluster"
+# Deletion planning - "delete all but one per cluster"
 # ---------------------------------------------------------------------------
 
 _KEEPER_STRATEGIES = {"largest", "smallest", "oldest", "newest", "shortest_path"}
@@ -121,12 +121,12 @@ def build_deletion_plan(store: LibraryStore, *,
                         ) -> Dict[str, Any]:
     """Return a preview of what a bulk 'delete all but one' would remove.
 
-    - `keeper_strategy` picks a default keeper per cluster.
-    - `cluster_keeper_overrides` maps `cluster.key -> video_id` and wins over
+- `keeper_strategy` picks a default keeper per cluster.
+- `cluster_keeper_overrides` maps `cluster.key -> video_id` and wins over
       the strategy for that one cluster (the UI uses this so the user can
       hand-pick a keeper in specific clusters before confirming).
 
-    The returned plan is stable JSON — same input, same output — so a UI
+    The returned plan is stable JSON - same input, same output - so a UI
     can show it, let the user tweak, and re-fetch."""
     strategy = keeper_strategy if keeper_strategy in _KEEPER_STRATEGIES else "largest"
     overrides = cluster_keeper_overrides or {}
@@ -151,7 +151,7 @@ def build_deletion_plan(store: LibraryStore, *,
         if override_id is not None:
             keeper = next((m for m in members if int(m["id"]) == int(override_id)), None)
             if keeper is None:
-                # override id no longer valid — fall back to strategy default
+                # override id no longer valid - fall back to strategy default
                 members.sort(key=key)
                 keeper = members[0]
             else:

@@ -2,7 +2,7 @@
 
 The tests here exercise the export-profile matrix (codec × quality) and
 the license-gated watermark decision. The runner itself needs moviepy
-plus a real video file to end-to-end verify, so we don't invoke it —
+plus a real video file to end-to-end verify, so we don't invoke it - 
 the split above keeps the fast unit tests fast while the API-integration
 side still confirms the endpoint is wired and rejects bad input."""
 from __future__ import annotations
@@ -64,7 +64,7 @@ class TestExportProfile:
     def test_quality_lowers_crf_higher(self):
         api = importlib.import_module("api_server")
         # 'low' should produce a HIGHER CRF (worse quality, smaller file)
-        # than 'high' — the intuition users have for the labels.
+        # than 'high' - the intuition users have for the labels.
         high = api._export_profile("h264", "high")["extra"]
         low = api._export_profile("h264", "low")["extra"]
         # crf 18 < crf 26
@@ -113,7 +113,7 @@ class TestWatermarkGating:
             and (ent.tier in {"pro", "studio"} or ent.has("watermark_removal"))
         )
         assert allow_no_watermark is False
-        # User asked for no watermark — still watermarked.
+        # User asked for no watermark - still watermarked.
         assert (False or not allow_no_watermark) is True
 
     def test_pro_tier_can_remove(self):
@@ -130,7 +130,7 @@ class TestWatermarkGating:
 
     def test_end_to_end_free_default(self, monkeypatch, tmp_path):
         """With no license installed, the license status endpoint should
-        say tier=free — the same reading the timeline runner uses."""
+        say tier=free - the same reading the timeline runner uses."""
         from fastapi.testclient import TestClient
         api = _reload_api(monkeypatch, tmp_path)
         client = TestClient(api.app)

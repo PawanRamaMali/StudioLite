@@ -10,12 +10,12 @@ a database is a several-day refactor and would break every third-party
 tool anyone has built against the JSON layout. Instead we treat the
 files as canonical and use SQLite for two crisp jobs:
 
-  1. **Index** — the ``projects`` table stores id, title, brief, and
+  1. **Index** - the ``projects`` table stores id, title, brief, and
      timestamps for fast list/search without walking .mp/films on every
      request. ``upsert_from_disk()`` reconciles the index with what's
      on disk, so nothing goes silently out of sync.
 
-  2. **Version history** — every artifact write can call
+  2. **Version history** - every artifact write can call
      ``snapshot_artifact()``, which stores a JSON blob in the
      ``artifact_versions`` table keyed by (project_id, stage_key,
      version_no). The user can list versions, view any of them, and
@@ -23,7 +23,7 @@ files as canonical and use SQLite for two crisp jobs:
      to keep the DB bounded on a screenplay-heavy project.
 
 Everything is fail-open. If SQLite refuses to open the file, we log a
-warning and every method returns an empty result or no-ops — the JSON
+warning and every method returns an empty result or no-ops - the JSON
 tree still works, just without the fast index and history."""
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ CREATE INDEX IF NOT EXISTS idx_versions_by_stage
 """
 
 
-# Only compress payloads bigger than this — below 8 KiB the gzip overhead
+# Only compress payloads bigger than this - below 8 KiB the gzip overhead
 # beats the wins.
 _COMPRESS_THRESHOLD = 8 * 1024
 
@@ -179,7 +179,7 @@ class ProjectStore:
             compressed = 1
         with self._lock:
             try:
-                # Next version number for (project, stage) — pure sqlite,
+                # Next version number for (project, stage) - pure sqlite,
                 # no round-trip in Python.
                 row = self._conn.execute(
                     "SELECT COALESCE(MAX(version_no), 0) + 1 AS next "
@@ -205,7 +205,7 @@ class ProjectStore:
     def list_versions(self, project_id: str, stage_key: str,
                       limit: int = 50) -> List[Dict[str, Any]]:
         """Return {version_no, saved_at, note, size} newest-first for one
-        artifact. Payloads are not included — the client asks for a
+        artifact. Payloads are not included - the client asks for a
         specific version via ``load_version()``."""
         if self._conn is None:
             return []

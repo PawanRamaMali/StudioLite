@@ -184,7 +184,7 @@ class TestPackagingEndpoints:
         blob = r.content
         assert len(blob) > 100
 
-        # POST it back as an import — should get a new id back.
+        # POST it back as an import - should get a new id back.
         files = {"file": ("roundtrip.studioproj", io.BytesIO(blob),
                           "application/zip")}
         r = client.post("/api/v1/films/import", files=files)

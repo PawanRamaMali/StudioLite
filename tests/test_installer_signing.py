@@ -1,6 +1,6 @@
 """Coverage for the Windows installer signing hook.
 
-We exercise the build module's helpers in isolation — the real
+We exercise the build module's helpers in isolation - the real
 ``build.py`` shells out to IExpress, which we can't run here. The
 signing helper is where the risk lives, so that's what we test:
 - missing thumbprint yields a clear "unsigned" reason;
@@ -21,7 +21,7 @@ import pytest
 
 
 def _load_build_module():
-    """Load packaging/windows/build.py by path — its script-mode side
+    """Load packaging/windows/build.py by path - its script-mode side
     effects (mkdir dist/) fire at import, so we import it into a
     scratch namespace after monkeypatching ROOT."""
     here = Path(__file__).resolve()
@@ -34,7 +34,7 @@ def test_sign_installer_no_thumbprint(monkeypatch, tmp_path):
     nothing is shelled out."""
     monkeypatch.delenv("STUDIOLITE_SIGN_THUMBPRINT", raising=False)
     # Import the two helpers directly by execing the file's function
-    # bodies — we avoid triggering the module-level IExpress path by
+    # bodies - we avoid triggering the module-level IExpress path by
     # never running the top-level script.
     src = _load_build_module()
     src_text = src.read_text(encoding="utf-8")

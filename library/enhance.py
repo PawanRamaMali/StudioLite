@@ -1,10 +1,10 @@
-"""T3 — Quality enhancement for library videos.
+"""T3 - Quality enhancement for library videos.
 
 Wraps the existing ``upscaler.upscale_video`` (Real-ESRGAN if the model
 is on disk, Lanczos otherwise) plus a face-restoration pass (GFPGAN) that
 loads only if its weights are available.
 
-Recommendations are heuristic and read-only — they don't touch a file,
+Recommendations are heuristic and read-only - they don't touch a file,
 they just answer "if I were to enhance this, which preset makes sense?"
 The user always confirms the actual run.
 """
@@ -61,7 +61,7 @@ def recommend(v: Video) -> List[Recommendation]:
     br = _bitrate_bps(v)
     px = w * h
 
-    # Sub-720p — always upscale-friendly.
+    # Sub-720p - always upscale-friendly.
     if h < 720 and w < 1280:
         out.append(Recommendation(
             "quality_2x",
@@ -82,12 +82,12 @@ def recommend(v: Video) -> List[Recommendation]:
             priority=1,
         ))
 
-    # Very low bitrate — the video is likely compression-scarred; grain +
+    # Very low bitrate - the video is likely compression-scarred; grain +
     # blocking are exactly what Real-ESRGAN "quality" models fix.
     if br is not None and br < 1_200_000 and px < 1920 * 1080:
         out.append(Recommendation(
             "quality_2x",
-            reason=f"Low bitrate ({br/1e6:.1f} Mbps) — heavy compression artifacts.",
+            reason=f"Low bitrate ({br/1e6:.1f} Mbps) - heavy compression artifacts.",
             priority=4,
             face_restore=True,
         ))
@@ -173,7 +173,7 @@ def _apply_face_restore(input_path: str, output_path: str,
                 progress_cb(idx / max(total, 1), f"Face restore {idx}/{total}")
         cap.release()
 
-        # Re-encode via ffmpeg — preserves audio from the source.
+        # Re-encode via ffmpeg - preserves audio from the source.
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-framerate", str(fps),
@@ -284,7 +284,7 @@ class EnhanceJob(threading.Thread):
             return
 
         # Optional face restoration pass on the upscaled video. Image-mode
-        # face restore is a future add — GFPGAN accepts still images too,
+        # face restore is a future add - GFPGAN accepts still images too,
         # but for T3 we keep it to the video path (which the recommender
         # already flags for us).
         if self.face_restore and not is_image and not self._cancelled():

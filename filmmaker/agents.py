@@ -498,9 +498,21 @@ def run_story_editor(project: Project) -> Dict[str, Any]:
         notes = [{"fail": "prose", "quote": "", "why": notes_raw.strip()}]
     else:
         notes = []
-    revised = str(data.get("revised_fountain", "")).strip()
+    # Accept several field names smaller models emit for the revised draft.
+    revised = ""
+    for key in ("revised_fountain", "revised_screenplay", "revised",
+                "screenplay", "fountain"):
+        candidate = str(data.get(key, "")).strip()
+        if candidate:
+            revised = candidate
+            break
     if not revised:
-        raise llm.LLMError("Story editor returned no revised draft.")
+        # Story editor is a polish pass, not a required stage. If the model
+        # produced only notes (or nothing usable), keep the screenwriter's
+        # draft as the revised draft so downstream stages can still run.
+        logger.warning("Story editor emitted no revised_fountain field; "
+                        "passing screenwriter draft through unchanged.")
+        revised = fountain
     return {
         "notes": notes,
         "revised_fountain": revised,

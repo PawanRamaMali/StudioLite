@@ -2917,14 +2917,20 @@ def run_mixer(project: Project) -> Dict[str, Any]:
             d["delay_ms"] = scheduled_end + _MIN_GAP_MS
         scheduled_end = d["delay_ms"] + d["dur_ms"]
 
+    # Composer and Ambient write a silent placeholder wav when the model
+    # they wanted to run OOM'd or failed to load. Trust the artifact's
+    # `rendered` flag over mere file existence so mixing doesn't stir in
+    # 4 minutes of digital silence pretending to be a score.
     score_rel = composer_art.get("path")
     score_abs = os.path.join(project.dir, score_rel) if score_rel else None
-    have_score = bool(score_abs and os.path.exists(score_abs))
+    have_score = (bool(score_abs and os.path.exists(score_abs))
+                  and composer_art.get("rendered", True))
     have_speech = bool(dialogue)
 
     ambient_rel = ambient_art.get("path")
     ambient_abs = os.path.join(project.dir, ambient_rel) if ambient_rel else None
-    have_ambient = bool(ambient_abs and os.path.exists(ambient_abs))
+    have_ambient = (bool(ambient_abs and os.path.exists(ambient_abs))
+                    and ambient_art.get("rendered", True))
 
     out_abs = os.path.join(project.dir, "final_mixed.mp4")
     total_dur = float(editor_art.get("duration_sec", 0) or 0)

@@ -4,760 +4,335 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Next.js 16](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
-[![Runs locally](https://img.shields.io/badge/models-local%20%2F%20offline-brightgreen.svg)](#getting-started)
+[![Runs locally](https://img.shields.io/badge/models-local%20%2F%20offline-brightgreen.svg)](#installation)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
 
 ## About
 
-**StudioLite** is a local-first, open-source AI film studio. Write a one-
-paragraph brief and it runs an 18-stage pipeline — script → beats →
-storyboard → keyframes → motion → voice → music → cut — into a finished
-short film on your own hardware. When you'd rather work directly, it
-also ships an NLE-style timeline editor, a Media Library with semantic
-search and duplicate detection, an image studio, a real-time
-transcription suite, and every stage's output as a versioned artifact
-you can edit and re-render.
+**StudioLite** is a local-first, open-source AI film studio. Write a one-paragraph brief, pick a template, and it runs an 18-stage pipeline (Producer, Screenwriter, Cinematographer, Shot Generator, Motion, Voice, Composer, Editor) into a finished short film on your own hardware. When you want to work directly instead of driving the pipeline, it also ships an NLE-style timeline editor, a media library with semantic search and deduplication, an image studio, and a real-time transcription suite.
 
-Everything runs offline against local models — Ollama / Gemini / Groq /
-Hugging Face for text, SDXL family for stills, Wan 2.2 / HunyuanVideo /
-LTX-Video / AnimateDiff for motion, IndexTTS-2 / XTTS / Piper for voice.
-Cloud accounts are never required.
+Everything runs offline against local models: Ollama, Gemini, Groq, or Hugging Face for text; SDXL family for stills; Wan 2.2, HunyuanVideo, LTX-Video, AnimateDiff for motion; IndexTTS-2, XTTS, Piper for voice. Cloud accounts are never required. Your project data, drafts, characters, and renders never leave the machine.
 
-Two front-ends share the same Python engines:
+MIT licensed. Two front-end surfaces sit on top of the same FastAPI engine.
 
-- **Next.js** (modern) — Film Studio, Timeline, Library, Images, video
-  generation, Story Mode, Characters, transcription, licensing.
-- **Streamlit** (legacy) — the complete ~20-tool toolbox.
+## Table of contents
 
-## Screenshots
-
-| Video Generator | Story Mode |
-|:---:|:---:|
-| ![Video Generator](docs/screenshots/01-video-generator.png) | ![Story Mode](docs/screenshots/02-story-mode.png) |
-| **Images Studio** | **Characters** |
-| ![Images Studio](docs/screenshots/03-images-studio.png) | ![Characters](docs/screenshots/04-characters.png) |
-| **Audio Studio** | **Video Transcribe** |
-| ![Audio Studio](docs/screenshots/05-audio-studio.png) | ![Video Transcribe](docs/screenshots/06-video-transcribe.png) |
-| **Live Transcribe** | **Settings** |
-| ![Live Transcribe](docs/screenshots/07-live-transcribe.png) | ![Settings](docs/screenshots/08-settings.png) |
+- [Features](#features)
+- [Comparison with commercial tools](#comparison-with-commercial-tools)
+- [Architecture](#architecture)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Windows setup package](#windows-setup-package)
+- [Licensing model](#licensing-model)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Features
 
-| Tool | Description |
-|------|-------------|
-| **Film Studio** | 18-stage multi-agent pipeline that turns a one-paragraph brief into a finished short film. Producer → Screenwriter → Cinematographer → Shot Generator → Motion → Voice → Composer → Editor, each stage a versioned artifact you can edit and re-render. Five starter templates (short story, explainer, teaser trailer, product demo, draft scene). |
-| **Timeline Editor** | NLE-style multi-clip timeline. Trim in/out per clip, reorder, export with H.264/H.265/ProRes codec presets at high / medium / low quality. Free-tier watermark; removed under a Pro/Studio license. |
-| **Batch Render** | Queue N timeline exports as one batch; individual jobs still cancellable and retryable, one rollup to watch. |
-| **Media Library** | Scan folders for videos + images. Perceptual-hash dedupe, semantic search (CLIP embeddings + clusters), speech-to-text index with FTS5 full-text search, batch re-encode of legacy codecs (mpeg2/wmv/rmvb/dv → h264), per-video enhance recommendations. |
-| **Video Generator** | Real AI video generation using diffusion models (Wan 2.1/2.2, HunyuanVideo, LTX-Video, CogVideoX). |
-| **Story Mode** | Multi-scene AI movie creator with storyboard editor, per-scene video generation, narration, and music. |
-| **Images Studio** | Local SDXL image generation, editing, variation, upscaling, and background removal. Adaptive OOM-halving batch sizing so a mid-render VRAM spike halves the batch instead of crashing. |
-| **Characters** | Portrait generation (front / three-quarter / side / back) with IP-Adapter reference for consistency across shots. |
-| **Video Editor** | Trim, merge, compress, rotate, stabilize, color-correct, region-effect, picture-in-picture, background music, speed, GIF, thumbnail. |
-| **Keyframes** | Alpha-blend keyframe animation with easing curves (linear, ease-in / out / in-out, bounce). |
-| **Upscale** | Real-ESRGAN 2x / 4x neural upscale for finished output. |
-| **Transcribe** | WhisperX / faster-whisper on files, live mic, live desktop audio, and live screen OCR (RapidOCR). Optional LLM clean-up into Markdown / DOCX / PDF. |
-| **Audio Studio** | Text-to-speech (Piper, KittenTTS, XTTS-v2, IndexTTS-2), SFX generation, voice isolation, normalize. |
-| **Delivery Packaging** | One-click zip of a finished project: final mixed cut, credits, and a manifest with render metadata. |
-| **Project Export / Import** | Portable `.studioproj` bundle for moving a project between machines. Zip-slip guarded on import; a fresh id is minted so importing twice never clobbers. |
-| **Jobs Panel** | Live progress monitor. Universal cancel and retry for every background runner. SQLite-persisted so a restart never loses in-flight state. |
-| **Licensing** | Offline Ed25519 signed license verification with tier (free / pro / studio), feature gating, and grace-period support. |
-| **ReelForge** | AI-powered short-video generator (LLM script + image gen + TTS + subtitles + background music). |
-| **YouTube Publish** | Preview video and upload directly via OAuth 2.0. |
-| **Opt-in Telemetry** | Local-only diagnostic bundle you export by hand; nothing ships without consent. |
-| **Windows Installer** | Source-based IExpress setup with optional Authenticode signing and a JSON release manifest. |
+### Film Studio pipeline
 
----
+18 stages, one artifact per stage, versioned on every write, editable in the panel:
 
-## UI Options: Streamlit vs Next.js
+1. **Producer**: expands the one-paragraph brief into a pitch.
+2. **Beats**: three-act beat sheet.
+3. **Outline**: scene-by-scene structure.
+4. **Cast**: named characters with visual descriptions.
+5. **Screenwriter**: full script with dialogue and action.
+6. **Cinematographer**: per-scene visual language and shot list.
+7. **Breakdown**: shots with prompts, timing, camera notes.
+8. **Character portraits**: SDXL front / three-quarter / side / back reference sheets.
+9. **Shot generator**: SDXL keyframes with adaptive OOM-halving batch sizing.
+10. **Motion shots**: Wan 2.2, HunyuanVideo, LTX-Video, AnimateDiff, or SVD I2V clips.
+11. **Continuity**: cross-shot consistency verifier.
+12. **Voice actor**: per-character narration via IndexTTS-2, XTTS-v2, Qwen3-TTS, Chatterbox, or Piper.
+13. **Composer**: MusicGen or ACE-Step score.
+14. **SFX**: procedural or generated sound effects.
+15. **Editor**: cut the film with the chosen pacing.
+16. **Mixer**: ducked dialogue against music and SFX.
+17. **Upscale**: optional Real-ESRGAN 2x or 4x neural pass.
+18. **Delivery**: final mixed cut ready to ship.
 
-StudioLite ships with **two front-ends** that share the underlying Python engines but cover different feature subsets.
+Five starter templates (short story, explainer, teaser trailer, product demo, draft scene) so you never start from a blank config.
 
-| UI | Default URL | Stack | Status |
-|----|-------------|-------|--------|
-| **Streamlit** (legacy) | http://localhost:8501 | `app.py` | Feature-complete (~20 tools) |
-| **Next.js** (modern) | http://localhost:3000 | `web/` + FastAPI `api_server.py` on :8000 | Curated subset focused on creative/GPU workflows |
+### Timeline editor
 
-### Running both
+NLE-style multi-clip timeline. Trim in/out per clip, reorder, and export with codec presets: H.264, H.265, or ProRes at high / medium / low quality. Free-tier renders carry a StudioLite watermark. A Pro or Studio license removes it, and the server double-checks the license before honoring the client's request.
 
-```bash
-# Streamlit
-streamlit run app.py
+### Batch render
 
-# Next.js (two processes)
-python api_server.py            # FastAPI backend on :8000
-cd web && npm install && npm run dev   # Next.js dev server on :3000
-```
+Queue N timeline exports as one batch. Individual jobs remain cancellable and retryable. One rollup endpoint reports done / in-flight / counts so you have one thing to watch instead of twelve.
 
-### Feature coverage
+### Media Library
 
-| Feature | Streamlit | Next.js |
-|---------|:---------:|:-------:|
-| Film Studio (18-stage multi-agent pipeline) | — | ✓ |
-| Timeline Editor (multi-clip, codec presets) | — | ✓ |
-| Batch Render | — | ✓ (API) |
-| Media Library (scan, dedupe, semantic search, STT index, re-encode) | — | ✓ |
-| Video Generator (T2V / I2V) | ✓ | ✓ |
-| Story Mode (multi-scene movies) | ✓ | ✓ |
-| Characters (portrait + IP-Adapter) | ✓ | ✓ |
-| Images Studio (T2I / edit / inpaint / upscale / bg-remove) | — | ✓ |
-| Audio Studio (TTS) | ✓ | ✓ |
-| Audio Studio (SFX, voice isolation) | ✓ | stub — falls back to Streamlit |
-| Video Editor (utilities: trim, merge, compress, rotate, stabilize, color, PiP, music, speed, GIF, thumbnail) | ✓ | ✓ |
-| Keyframes (alpha-blend + easing) | ✓ | ✓ |
-| Upscale Video (Real-ESRGAN) | ✓ | ✓ |
-| Delivery Packaging + Project Export / Import | — | ✓ (API) |
-| Jobs Panel (live progress, cancel, retry) | — | ✓ |
-| Licensing (offline Ed25519, tier + feature gating) | — | ✓ |
-| Live / Screen / Video Transcribe | ✓ | ✓ |
-| Remove Watermark | ✓ | — |
-| Add Image Overlay | ✓ | — |
-| Change Speed | ✓ | ✓ (as utility) |
-| Extract Frame | ✓ | ✓ (as thumbnail) |
-| Export Video (codec / resolution) | ✓ | ✓ (via Timeline) |
-| Transcribe (WhisperX) | ✓ | ✓ |
-| View & Publish (YouTube OAuth) | ✓ | — |
-| Motion Brush | ✓ | — |
-| ReelForge (LLM-driven short videos) | ✓ | — |
+Point it at folders, and it walks them for videos and images. Then:
 
-### Which one should I use?
+- Perceptual-hash duplicate detection with review-and-delete plans.
+- Semantic search with CLIP embeddings.
+- Cluster view for visual grouping.
+- Speech-to-text index with FTS5 full-text search.
+- Batch re-encode of legacy codecs (mpeg2, wmv, rmvb, dv) to H.264.
+- Per-video enhancement recommendations.
 
-- **Streamlit** for: transcription, YouTube upload, watermark removal, frame/format export, image overlay, speed control, ReelForge, motion brush, video editor.
-- **Next.js** for: image generation, multi-scene story mode, character portraits, video gen, live job monitoring.
+### Video Generator, Story Mode, Images Studio
 
-Tracking work to close the gaps: see the GitHub issue **"Next.js UI feature parity with Streamlit"**.
+Direct panels for one-shot diffusion runs when you do not need the full pipeline: T2V, I2V, multi-scene Story Mode, and an image studio for T2I, edit, inpaint, upscale, and background removal.
 
----
+### Video Editor
 
-## Video Generator - AI Video Diffusion
+Trim, merge, compress, rotate, stabilize, color-correct, region-effect, picture-in-picture, background music mix, speed change, GIF export, thumbnail extraction. All ffmpeg-backed; all queued as background jobs with progress polling.
 
-Video Generator creates **real AI-generated video** using state-of-the-art diffusion models. Unlike ReelForge (which stitches images), this generates actual motion video frame-by-frame.
+### Transcription
 
-### Supported Engines
+WhisperX and faster-whisper on files. Live mic and desktop-audio transcription. Live screen OCR with RapidOCR. Optional LLM clean-up into Markdown, DOCX, or PDF.
 
-| Engine | VRAM | Description |
-|--------|------|-------------|
-| **Wan 2.1/2.2** | 8-24GB | Best quality, supports 1.3B (fast) and 14B (quality) models |
-| **HunyuanVideo** | 24GB+ | Tencent's 8.3B model, up to 1080p resolution |
-| **LTX-Video** | 8-12GB | Fast generation with distilled models |
-| **CogVideoX** | 8-16GB | Versatile with 2B and 5B variants |
+### Delivery packaging and project export
 
-### Generation Modes
+One-click package produces a shippable zip: final mixed cut, CREDITS.md, and a JSON manifest with render metadata. The tier and watermark state are recorded so the recipient can see how it was made. A portable `.studioproj` export bundles the whole project (artifacts, logs, state) so another machine can import it and continue.
 
-- **Text to Video**: Generate video from text description
-- **Image to Video**: Animate a static image with AI motion
-- **Extend Video**: Continue/extend an existing video clip (Wan 2.2 only)
+### Jobs, licensing, telemetry
 
-### Features
+- Every background runner is cancellable and retryable. Job state persists in SQLite so a restart never loses in-flight work.
+- Offline signed licensing with Ed25519. Feature gating with per-key entitlements. Grace-period support for expired keys.
+- Opt-in local telemetry writes a redacted diagnostic bundle you export by hand. Nothing ships without consent.
 
-- **Scene-based Generation**: Create longer videos by generating multiple scenes
-- **Audio Integration**: Add AI-generated music/audio to videos
-- **Auto VRAM Detection**: Automatically configures optimal settings for your GPU
-- **Multiple Resolutions**: 480p, 720p, 832p (Wan), up to 1080p (HunyuanVideo)
-- **Quantization Support**: INT8 quantization for lower VRAM usage
+### Windows installer
 
-### Quick Start
+Source-based IExpress setup with optional Authenticode signing (opt-in via env var). Every build writes a JSON release manifest with size, SHA-256, version, and signing state so a future auto-updater has a canonical file to read.
 
-1. Select "Video Generator" from the sidebar
-2. Choose your generation mode (Text/Image/Extend)
-3. Enter a detailed prompt describing the video
-4. Adjust settings (engine, resolution, frames)
-5. Click "Generate Video"
+## Comparison with commercial tools
 
-### Model Downloads
+StudioLite covers ground that today usually requires stringing together three or four separate SaaS products. The tables below show how it lines up. Ratings are fair-witness: the commercial services do many things better, and StudioLite calls those out honestly.
 
-Models are downloaded automatically on first use to `/mnt/hdd/huggingface/` (configurable via `HF_HOME`).
+### vs cloud AI video generators
 
-| Model | Size | Use Case |
-|-------|------|----------|
-| Wan2.1-T2V-1.3B | ~8GB | Fast text-to-video, good for testing |
-| Wan2.1-T2V-14B | ~28GB | High-quality text-to-video |
-| Wan2.2-T2V-A14B | ~28GB | Latest Wan model with improvements |
-| Wan2.1-I2V-480P | ~28GB | Image-to-video animation |
+| Capability | StudioLite | RunwayML | Pika | Luma Dream Machine | OpenAI Sora |
+|---|---|---|---|---|---|
+| Text-to-video | Wan 2.2, LTX, AnimateDiff (local) | Gen-4 (SaaS) | Pika 2.0 (SaaS) | Ray 2 (SaaS) | Sora (SaaS, waitlisted) |
+| Image-to-video | Wan I2V, SVD (local) | Gen-3 I2V | Yes | Yes | Yes |
+| Motion quality | Good, model-dependent | Excellent | Very good | Very good | Best-in-class |
+| Runs offline | Yes | No | No | No | No |
+| Per-render cost | Zero (your electricity) | ~$0.05/s | Credit tiers | Credit tiers | Credit tiers |
+| Multi-scene film from a brief | Yes (18-stage pipeline) | No | No | No | No |
+| Own the outputs | Yes, on disk | ToS-bound | ToS-bound | ToS-bound | ToS-bound |
+| Watermark on free tier | Yes, removable with license | Yes | Yes | Yes | N/A |
+| Open source | Yes (MIT) | No | No | No | No |
+| Hardware needed | 12-24 GB VRAM (NVIDIA) | None | None | None | None |
+| Batch export | Yes | Limited | Limited | Limited | Limited |
 
----
+### vs commercial NLEs
 
-## Story Mode - Multi-Scene AI Movie Creator
+| Capability | StudioLite Timeline | Adobe Premiere Pro | DaVinci Resolve | Final Cut Pro |
+|---|---|---|---|---|
+| Multi-clip timeline | Yes (v1) | Full | Full | Full |
+| Trim per clip | Yes | Yes | Yes | Yes |
+| Codec presets (H.264/H.265/ProRes) | Yes | Yes | Yes | Yes |
+| Multi-track audio | Not yet | Yes | Yes | Yes |
+| Color grading | Basic (color-correct utility) | Lumetri | Best-in-class | Yes |
+| Motion graphics | No | Yes (After Effects) | Fusion | Motion |
+| AI-generated shots as source clips | Yes, native pipeline | Requires plugins | Requires plugins | Requires plugins |
+| Runs offline | Yes | Yes | Yes | Yes |
+| Cost | Free (MIT) | ~$23/mo | Free / $295 (Studio) | $300 (one-time) |
+| Platform | Windows, Linux | Windows, macOS | Windows, macOS, Linux | macOS only |
+| Open source | Yes | No | No | No |
 
-Story Mode lets you create complete AI-generated movies by planning multiple scenes, generating video for each one using diffusion models, and assembling them with voiceover narration and background music.
+StudioLite is intentionally a v1 timeline. If you need finishing-grade color and multi-track audio, run DaVinci Resolve on the exported cut. StudioLite is best at the stage before finishing: turning ideas into shots and stitching them together.
 
-### Three-Phase Workflow
+### vs specialized AI tools
 
-**Phase 1: Plan Your Story**
-- Enter a movie concept/idea in natural language
-- Choose genre (Cinematic, Sci-Fi, Fantasy, Horror, Documentary, etc.) and mood (Epic, Calm, Tense, Mysterious, etc.)
-- Set number of scenes (2-8)
-- Click **AI Generate Script** to have the LLM write a structured screenplay with scene titles, visual prompts, narration, and timing
-- Or manually add blank scenes and write everything yourself
+| Capability | StudioLite | Descript | HeyGen | ElevenLabs | Suno |
+|---|---|---|---|---|---|
+| Voice cloning | IndexTTS-2, XTTS-v2 (local) | Yes (cloud) | Yes (cloud) | Best-in-class (cloud) | N/A |
+| Voice styling | Emotion via IndexTTS-2 | Overdub | Avatars | Extensive | N/A |
+| Music generation | MusicGen, ACE-Step (local) | Stock library | Stock library | N/A | Best-in-class (cloud) |
+| Transcription | WhisperX, faster-whisper | Yes | N/A | Yes | N/A |
+| Talking-head avatars | Character portraits, no lipsync yet | No | Best-in-class | No | No |
+| Script + voice + edit in one product | Yes | Yes | Partial | Voice only | Music only |
+| Per-project cost | Zero | $12-24/mo | $24-89/mo | $5-330/mo | $8-24/mo |
+| Own the outputs | Yes | Yes with limits | ToS-bound | Yes with limits | ToS-bound |
+| Open source | Yes | No | No | No | No |
 
-**Phase 2: Edit Storyboard**
-- Visual timeline bar showing scene proportions with color coding
-- Per-scene editing cards with:
-  - **Title** - Short scene name
-  - **Visual Prompt** - Detailed description for AI video generation (camera angles, lighting, motion)
-  - **Narration** - Voiceover text spoken by TTS
-  - **Duration** - Per-scene duration slider (2-12 seconds)
-  - **Reference Image** - Optional upload for Image-to-Video generation
-- Reorder scenes (Move Up/Down), Duplicate, or Remove
-- Live preview of generated scene videos
+### Where StudioLite wins and where it does not
 
-**Phase 3: Generate Movie**
-- **Video Engine**: Wan 2.1 (recommended), LTX-Video (fast), CogVideoX, HunyuanVideo (HD)
-- **Engine Settings**: Model variant, resolution, frames per scene, inference steps, guidance scale
-- **Scene Continuity** (configurable): Keep subjects, characters, and style consistent across scenes
-- **Narration**: TTS voice selection (Piper or KittenTTS voices)
-- **Background Music**: Track selection with volume control
-- **Output**: Aspect ratio (Landscape/Portrait/Square/Instagram), FPS, negative prompt
-- Step-by-step progress bar showing each scene being generated
-- Final movie with download button and scene breakdown grid
+**Wins:**
 
-### Scene Continuity Methods
+- Local and private. Your brief, your characters, your renders never leave the box.
+- One product covers what usually needs three or four subscriptions.
+- Zero marginal cost. Once the hardware is paid for, iteration is free.
+- Every model is swappable, so you can pick faster / cheaper / higher-quality per stage.
+- MIT licensed with no telemetry unless you opt in.
 
-| Method | How It Works | Best For |
-|--------|-------------|----------|
-| **None** | Each scene generated independently | Abstract/varied scenes |
-| **Prompt Anchoring** | A "visual identity" description (subject appearance, color palette, art style) is injected into every scene's prompt | Consistent characters, settings, and style |
-| **Scene Chaining** | Last frame of scene N is used as Image-to-Video input for scene N+1 | Smooth visual flow between scenes |
-| **Both** | Combines prompt anchoring + scene chaining | Maximum consistency |
-| **Shared Seed** | Same random seed used for all scenes (combinable with any method above) | Similar textures and patterns |
+**Where it does not:**
 
-- **Visual Identity Anchor**: Auto-generated by the AI script writer, or manually written. Describes exact subject appearance, color palette, and camera style. Appended to every scene prompt.
-- **Chaining Strength**: Controls how much the previous scene's last frame influences the next (0.3 = creative freedom, 0.9 = strong continuity).
+- Motion fidelity trails Sora and Runway Gen-4 by a full generation.
+- Real-time collaboration is not a thing. There is no cloud project sharing beyond the portable export zip.
+- Lipsync is not wired end-to-end yet.
+- Timeline is v1: no multi-track audio, no compositor, no proxy workflow.
+- Real-time rendering is not a thing either. A one-minute short takes minutes to hours depending on hardware and quality settings.
+- Requires a modern NVIDIA GPU for the interesting bits. CPU-only mode is honest about what it can and cannot do.
 
-### Story Mode Pipeline
+## Architecture
 
 ```
-Concept + Genre + Mood
-    ↓
-AI Script Generation (LLM → scene titles, visuals, narration, visual identity anchor)
-    ↓
-Storyboard Editing (manual refinement of each scene)
-    ↓
-Scene Continuity Engine:
-  ├─ Prompt Anchoring: visual identity injected into every scene prompt
-  ├─ Scene Chaining: last frame of scene N → I2V input for scene N+1
-  └─ Shared Seed: same random seed across all scenes
-    ↓
-Per-Scene Video Generation (diffusion model: Wan/LTX/CogVideoX)
-    ↓
-TTS Narration (per-scene voiceover → concatenated audio)
-    ↓
-Video Assembly (concatenate scenes → add narration → mix music)
-    ↓
-Final Movie (.mp4 with synced video, narration, and music)
+                                 ┌──────────────┐
+                                 │   Next.js    │  :3000
+                                 │  (React UI)  │
+                                 └──────┬───────┘
+                                        │ REST + WebSocket
+                                 ┌──────▼───────┐
+                                 │   FastAPI    │  :8000
+                                 │ api_server.py│
+                                 └──────┬───────┘
+             ┌──────────────┬──────────┼──────────────┬─────────────────┐
+             │              │          │              │                 │
+      ┌──────▼─────┐ ┌──────▼─────┐ ┌──▼──────────┐ ┌─▼─────────┐ ┌────▼──────┐
+      │ filmmaker  │ │  library   │ │ api/routers │ │  models   │ │  jobs +   │
+      │ (pipeline) │ │ (media db) │ │ (extracted) │ │ (SDXL /   │ │  license  │
+      │  18 stages │ │ FTS5 + CLIP│ │             │ │ Wan / TTS)│ │  SQLite   │
+      └────────────┘ └────────────┘ └─────────────┘ └───────────┘ └───────────┘
 ```
 
-### VRAM Requirements for Story Mode
+Runtime output lives in `.mp/` (git-ignored). Every long-running task is a job. Every job carries progress, is cancellable, is retryable, and survives a process restart.
 
-| Engine + Model | Min VRAM | Scenes | Notes |
-|----------------|----------|--------|-------|
-| Wan 2.1 1.3B (480p) | 8GB | 2-8 | Best quality/VRAM ratio, CPU offloading |
-| LTX-Video base | 8-12GB | 2-8 | Fastest generation |
-| CogVideoX 2B | 8-10GB | 2-8 | Good quality, versatile |
-| Wan 2.1 14B (480p) | 16GB+ | 2-8 | Higher quality with CPU offloading |
-| HunyuanVideo | 24GB+ | 2-8 | Up to 1080p resolution |
-
----
-
-## ReelForge - AI Video Generation Engine
-
-ReelForge is a complete AI-powered video generation pipeline that creates short-form videos from a simple topic prompt.
-
-### Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           ReelForge Pipeline                                 │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌──────────┐    ┌──────────────┐    ┌─────────────┐    ┌────────────────┐  │
-│  │  Topic   │───▶│ LLM Backend  │───▶│   Script    │───▶│ Scene Data     │  │
-│  │  Input   │    │ (llamacpp/   │    │ Generator   │    │ (narration +   │  │
-│  └──────────┘    │  ollama)     │    │             │    │  visual desc)  │  │
-│                  └──────────────┘    └─────────────┘    └───────┬────────┘  │
-│                                                                  │           │
-│  ┌───────────────────────────────────────────────────────────────┼─────────┐│
-│  │                         For Each Scene                        ▼         ││
-│  │  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────────────┐  ││
-│  │  │ Image       │◀───│ Image       │◀───│ Visual Description          │  ││
-│  │  │ (SDXL/      │    │ Prompt      │    │ → Detailed Image Prompt     │  ││
-│  │  │ Gemini)     │    │ Generator   │    │                             │  ││
-│  │  └─────────────┘    └─────────────┘    └─────────────────────────────┘  ││
-│  │         │                                                                ││
-│  │         ▼                                                                ││
-│  │  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────────────┐  ││
-│  │  │ Audio       │◀───│ TTS Engine  │◀───│ Narration Text              │  ││
-│  │  │ (.wav)      │    │ (Piper/     │    │ (what to speak)             │  ││
-│  │  │             │    │ KittenTTS)  │    │                             │  ││
-│  │  └─────────────┘    └─────────────┘    └─────────────────────────────┘  ││
-│  └──────────────────────────────────────────────────────────────────────────┘│
-│                                                                              │
-│  ┌──────────────────────────────────────────────────────────────────────────┐│
-│  │                        Video Assembly                                    ││
-│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────────────┐ ││
-│  │  │ Images     │  │ Audio      │  │ Subtitles  │  │ Background Music   │ ││
-│  │  │ + Motion   │ +│ Concat     │ +│ (PIL       │ +│ (AudioMixer with   │ ││
-│  │  │ Effects    │  │ (numpy)    │  │ rendering) │  │ auto-ducking)      │ ││
-│  │  └────────────┘  └────────────┘  └────────────┘  └────────────────────┘ ││
-│  │                           │                                              ││
-│  │                           ▼                                              ││
-│  │                    ┌─────────────┐                                       ││
-│  │                    │ Final Video │                                       ││
-│  │                    │ (.mp4)      │                                       ││
-│  │                    └─────────────┘                                       ││
-│  └──────────────────────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### ReelForge Features
-
-- **Multiple LLM Backends**: llama.cpp (GGUF models, offline) or Ollama
-- **Multiple TTS Engines**: Piper TTS (high-quality neural) or KittenTTS (lightweight)
-- **Multiple Image Providers**: SDXL Turbo (local GPU), Gemini Image API, Fooocus API
-- **Multiple Aspect Ratios**: 9:16 (Portrait), 16:9 (Landscape), 1:1 (Square), 4:5 (Instagram)
-- **Background Music**: Auto-ducking mixer that lowers music during speech
-- **Motion Effects**: Zoom in, zoom out, pan effects
-- **Color Filters**: Warm, cool, vintage, vivid
-- **Animated Subtitles**: PIL-rendered text overlays synced to speech
-
----
-
-## Configuration
-
-All settings are stored in `config.json`. Here's the complete configuration reference:
-
-### config.json
-
-```json
-{
-  "verbose": true,
-  "headless": false,
-
-  "llm_backend": "llamacpp",
-  "gguf_model": "mistral-7b-instruct-v0.2.Q4_K_M.gguf",
-  "ollama_base_url": "http://127.0.0.1:11434",
-  "ollama_model": "",
-
-  "tts_engine": "piper",
-  "tts_voice": "Amy",
-
-  "stt_provider": "local_whisper",
-  "whisper_model": "base",
-  "whisper_device": "auto",
-  "whisper_compute_type": "int8",
-  "assembly_ai_api_key": "",
-
-  "image_provider": "sdxl_turbo",
-  "nanobanana2_api_base_url": "https://generativelanguage.googleapis.com/v1beta",
-  "nanobanana2_api_key": "",
-  "nanobanana2_model": "gemini-3.1-flash-image-preview",
-  "nanobanana2_aspect_ratio": "9:16",
-  "fooocus_api_url": "http://127.0.0.1:8888",
-  "fooocus_style": "Fooocus V2",
-
-  "default_aspect_ratio": "9:16",
-  "background_music_enabled": false,
-  "background_music_volume": 0.15,
-
-  "threads": 2,
-  "font": "Anton-Regular.ttf",
-  "imagemagick_path": "/usr/bin/convert",
-  "script_sentence_length": 4
-}
-```
-
-### Configuration Options
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| **LLM Settings** ||||
-| `llm_backend` | string | `"llamacpp"` | LLM backend: `"llamacpp"` or `"ollama"` |
-| `gguf_model` | string | `""` | GGUF model filename for llama.cpp |
-| `ollama_base_url` | string | `"http://127.0.0.1:11434"` | Ollama server URL |
-| `ollama_model` | string | `""` | Ollama model name (e.g., `"llama3.2:3b"`) |
-| **TTS Settings** ||||
-| `tts_engine` | string | `"piper"` | TTS engine: `"piper"` (neural) or `"kitten"` (lightweight) |
-| `tts_voice` | string | `"Amy"` | Voice name (engine-specific) |
-| **STT Settings** ||||
-| `stt_provider` | string | `"local_whisper"` | Speech-to-text provider |
-| `whisper_model` | string | `"base"` | Whisper model size: `tiny`, `base`, `small`, `medium`, `large` |
-| `whisper_device` | string | `"auto"` | Device: `"auto"`, `"cpu"`, `"cuda"` |
-| `whisper_compute_type` | string | `"int8"` | Compute type: `"int8"`, `"float16"`, `"float32"` |
-| **Image Generation** ||||
-| `image_provider` | string | `"sdxl_turbo"` | Provider: `"sdxl_turbo"`, `"nanobanana2"`, `"fooocus"` |
-| `nanobanana2_api_key` | string | `""` | Gemini API key for image generation |
-| `fooocus_api_url` | string | `"http://127.0.0.1:8888"` | Fooocus API endpoint |
-| **Audio Settings** ||||
-| `background_music_enabled` | bool | `false` | Enable background music by default |
-| `background_music_volume` | float | `0.15` | Music volume (0.0-1.0), ducked during speech |
-| **Video Settings** ||||
-| `default_aspect_ratio` | string | `"9:16"` | Default video format |
-| `threads` | int | `2` | MoviePy encoding threads |
-| `font` | string | `"Anton-Regular.ttf"` | Font file for subtitles (any `.ttf` in `fonts/`) |
-
----
-
-## Project Structure
-
-```
-StudioLite/
-├── app.py                      # Streamlit web interface (full toolbox)
-├── api_server.py               # FastAPI backend for the Next.js UI
-├── reelforge.py                # ReelForge AI video generation engine
-├── videogen.py                 # Video Generator (diffusion-based video gen)
-├── scene_generator.py          # Story Mode multi-scene movie engine
-├── imagegen.py                 # SDXL image generation / edit / upscale
-├── remover.py                  # Video/image/PDF watermark removal
-├── transcriber.py              # WhisperX / faster-whisper speech-to-text
-├── screen_ocr.py               # Live on-screen OCR (Screen Transcribe)
-├── llm_filter.py               # LLM post-processing of transcripts
-├── youtube_uploader.py         # YouTube OAuth 2.0 upload
-├── config.example.json         # Config template (copy to config.json)
-├── requirements.txt            # Python dependencies
-│
-├── filmmaker/                  # Film Studio pipeline
-│   ├── project.py              # On-disk project model (versioned artifacts)
-│   ├── project_store.py        # SQLite index + artifact version history
-│   ├── job_store.py            # Persistent job engine
-│   ├── stages.py               # 18-stage graph definition
-│   ├── agents.py               # Per-stage agent implementations
-│   ├── orchestrator.py         # Runs the pipeline, honors gates + pause
-│   ├── llm.py                  # LLM backends (Ollama, Gemini, Groq, HF)
-│   ├── film_templates.py       # Starter templates
-│   ├── licensing.py            # Offline Ed25519 license verification
-│   ├── packaging.py            # Delivery zip + portable .studioproj export/import
-│   └── telemetry.py            # Opt-in local diagnostic events
-│
-├── library/                    # Media Library subsystem
-│   ├── store.py                # SQLite + FTS5 index
-│   ├── scanner.py              # Folder walker
-│   ├── embeddings.py           # CLIP embeddings for semantic search
-│   ├── dedupe.py + phash.py    # Perceptual-hash duplicate finder
-│   ├── clustering.py           # Semantic clusters
-│   ├── transcribe.py           # Whisper STT index
-│   ├── reencode.py             # Legacy-codec batch re-encode
-│   └── enhance.py              # Per-video enhance recommendations
-│
-├── api/routers/                # Extracted FastAPI routers
-│   ├── health.py, licensing.py, telemetry.py
-│   └── env_vars.py, models_inventory.py
-│
-├── mpv2/                       # Core modules (TTS wrappers, LLM abstraction)
-├── web/                        # Next.js front-end (App Router + Tailwind)
-├── packaging/windows/          # IExpress setup + optional Authenticode signing
-├── tests/                      # pytest suite (~160 tests)
-├── docs/screenshots/           # README screenshots
-├── fonts/                      # Subtitle fonts (Anton, OFL 1.1)
-├── models/                     # GGUF & SDXL models (git-ignored)
-└── .mp/                        # Runtime output — films, uploads, logs (git-ignored)
-```
-
-> **Configuration:** copy `config.example.json` to `config.json` (git-ignored)
-> and edit it. `config.json`, `models/`, and API keys are never committed.
-
----
-
-## Getting Started
+## Installation
 
 ### Prerequisites
 
-- Python 3.10+
-- FFmpeg on your system PATH
-- **Optional but strongly recommended:** NVIDIA GPU with CUDA drivers
+- Python 3.11
+- Node.js 22
+- FFmpeg on your PATH
+- Recommended for the GPU-heavy features: an NVIDIA GPU with 12+ GB VRAM
 
-StudioLite runs on Windows and Ubuntu Linux, with or without an NVIDIA GPU.
-Without a GPU, all CPU-safe features (Audio Studio, Transcription, Video
-Editor, LLM, Doc Writer, Live/Screen/Video Transcribe) work at full speed,
-Images Studio and Character Portraits work but slowly (~5-15 min per image
-on CPU), and video generation / Qwen edit / LatentSync are disabled with a
-clear in-app explanation.
+Ubuntu:
 
-### System dependencies
-
-**Ubuntu / Debian**
 ```bash
 sudo apt update
 sudo apt install -y ffmpeg imagemagick python3-venv python3-dev build-essential
 ```
 
-**Windows**
+Windows:
+
 ```powershell
 winget install Gyan.FFmpeg
-winget install ImageMagick.ImageMagick   # only if you use MoviePy TextClip
+winget install ImageMagick.ImageMagick
 ```
 
-### Installation
+macOS:
 
 ```bash
-# Clone
+brew install ffmpeg imagemagick
+```
+
+### Set up the app
+
+```bash
 git clone https://github.com/PawanRamaMali/StudioLite.git
 cd StudioLite
 
-# Create the venv
-python3 -m venv venv                                # Windows: python -m venv venv
-source venv/bin/activate                            # Windows: .\venv\Scripts\Activate.ps1
+python -m venv venv
+# Windows: .\venv\Scripts\activate
+source venv/bin/activate
 
-# Install torch first (the right build for your hardware), then the rest
-pip install -r requirements-cuda.txt   # NVIDIA GPU:  pulls default (CUDA) torch
-# --- OR ---
-pip install -r requirements-cpu.txt    # CPU only:    pulls torch from the CPU index
+# Pick one, based on your hardware:
+pip install -r requirements-cuda.txt   # NVIDIA GPU
+# or
+pip install -r requirements-cpu.txt    # CPU-only
+
 pip install -r requirements.txt
 
-# For llama.cpp with GPU acceleration (optional):
-CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python --force-reinstall --no-cache-dir
-```
-
-### Running the App
-
-**Next.js UI (recommended for creative workflows)**
-```bash
-./launch.sh                                          # Linux/macOS
-.\launch.ps1                                         # Windows
-```
-The launcher starts the FastAPI backend on :8000 and the Next.js dev server
-on :3000, waits for both, then opens http://localhost:3000 in your browser.
-
-**Streamlit UI (full toolbox)**
-```bash
-streamlit run app.py                                 # http://localhost:8501
+# Front-end
+cd web && npm install && npm run build && cd ..
 ```
 
 ### Docker
 
-Pre-baked images for both CPU and NVIDIA GPU setups. Compose profiles pick the right one:
+```bash
+docker compose --profile cuda up   # NVIDIA
+docker compose --profile cpu  up   # CPU-only
+```
+
+Both profiles publish `:3000` (Next.js) and `:8000` (FastAPI). Model weights persist under bind-mounted `.models/` and `.mp/` volumes.
+
+## Usage
+
+Start everything with the one-click launcher:
 
 ```bash
-docker compose --profile cuda up          # NVIDIA GPU (needs nvidia-container-toolkit)
-docker compose --profile cpu  up          # CPU only
-
-# Or build & run directly:
-docker build -f Dockerfile.cuda -t studiolite:cuda .
-docker run --gpus all -p 8000:8000 -p 3000:3000 \
-           -v $PWD/.models:/app/.models \
-           -v $PWD/.mp:/app/.mp \
-           studiolite:cuda
+# Linux / macOS
+./launch.sh
+# Windows
+.\launch.ps1        # or double-click launch.bat
 ```
 
-Model weights live in host-side bind mounts (`.models/`, `.mp/`, `outputs/`,
-`models/`), so they download once and survive container rebuilds. Set
-`HF_TOKEN` in a `.env` file next to `docker-compose.yml` if you need gated
-HuggingFace repos. The container exposes the FastAPI backend on `:8000` and
-the Next.js production build on `:3000`.
+The launcher boots FastAPI on `:8000` and Next.js on `:3000`, waits for both to be reachable, and opens the browser. Ctrl+C cleanly stops both.
 
-### LatentSync (optional, GPU only)
+Run manually if you prefer:
 
-Story Mode's lip-sync uses [LatentSync 1.6](https://github.com/bytedance/LatentSync)
-via subprocess. If you want it:
-
-1. Clone: `git clone https://github.com/bytedance/LatentSync.git third_party/LatentSync`
-2. Download the weights from HuggingFace into `.models/latentsync-16/`
-3. The app auto-creates the `third_party/LatentSync/checkpoints` link on first launch
-   (symlink on Linux/macOS, junction on Windows) — no manual `mklink`/`ln -s` needed
-
-Do **not** `pip install -r third_party/LatentSync/requirements.txt` — its pin on
-`torch==2.5.1+cu121` conflicts with the main venv's torch and breaks CPU installs.
-LatentSync runs against whatever torch is already in your venv.
-
----
-
-## ReelForge Setup
-
-### 1. LLM Backend
-
-**Option A: llama.cpp (Recommended - Offline)**
-1. Download a GGUF model (e.g., Mistral 7B Instruct)
-2. Place it in the `models/` directory
-3. Set `llm_backend: "llamacpp"` in config
-
-**Option B: Ollama**
-1. Install [Ollama](https://ollama.com/download)
-2. Run `ollama pull llama3.2:3b`
-3. Set `llm_backend: "ollama"` in config
-
-### 2. TTS Engine
-
-**Piper TTS (Default - High Quality)**
-- Voice models download automatically on first use
-- Available voices: Amy, Ryan, Lessac, Kristin, Bryce, Danny, Joe, Kathleen
-
-**KittenTTS (Lightweight)**
-- Faster but lower quality
-- Available voices: Jasper, Luna, Marcus, Elena, Thomas, Sofia, Alex, Emma
-
-### 3. Image Generation
-
-**SDXL Turbo (Local GPU)**
-- Download SDXL models to `models/` directory
-- Recommended: [RealVisXL V4.0](https://huggingface.co/SG161222/RealVisXL_V4.0), [Juggernaut XL](https://huggingface.co/RunDiffusion/Juggernaut-XL-v9)
-
-**Gemini API (Cloud)**
-- Get API key from [Google AI Studio](https://aistudio.google.com/)
-- Set `nanobanana2_api_key` in config
-
-### 4. Background Music
-
-Place `.mp3` or `.wav` files in the `music/` directory. Music will automatically:
-- Loop to match video duration
-- Duck (reduce volume) when narration is playing
-- Mix at the configured volume level
-
----
-
-## API Reference
-
-### ReelForge Generation Function
-
-```python
-from reelforge import rf_generate_full
-
-result = rf_generate_full(
-    topic="Benefits of meditation",      # Video topic
-    language="English",                   # Script language
-    sentence_count=4,                     # Sentences per scene
-    image_provider="sdxl_turbo",          # Image provider
-    sdxl_model="RealVisXL_V4.0.safetensors",
-    progress_callback=on_progress,        # Progress updates
-    image_style="photorealistic",         # Visual style preset
-    image_steps=8,                        # SDXL inference steps
-    image_guidance=2.0,                   # SDXL guidance scale
-    subtitle_style="bold_yellow",         # Text style
-    ken_burns_effect="zoom_in",           # Motion effect
-    color_filter="none",                  # Color grading
-    num_images=3,                         # Number of scenes
-    aspect_ratio="9:16",                  # Video format
-    music_enabled=True,                   # Add background music
-    music_path=None,                      # Specific track or random
-    music_volume=0.15,                    # Music volume (0.0-1.0)
-)
-
-# Result contains:
-# - scenes: list of scene data with images, audio, timing
-# - script: full narration text
-# - video_path: path to generated video
-# - title, description: AI-generated metadata
-# - total_duration: video length in seconds
+```bash
+python api_server.py                           # backend on :8000
+cd web && npm run dev                          # frontend on :3000
 ```
 
-### Image Style Presets
+### Your first film
 
-| Style | Description |
-|-------|-------------|
-| `photorealistic` | Ultra-realistic photography |
-| `cinematic` | Movie-like dramatic lighting |
-| `digital_art` | Polished digital illustration |
-| `anime` | Japanese anime style |
-| `watercolor` | Soft watercolor painting |
-| `oil_painting` | Classical oil painting |
-| `3d_render` | 3D rendered graphics |
-| `minimalist` | Clean, simple design |
+1. Open the **Film Studio** panel.
+2. Pick a template ("Short Story" is a good first pick).
+3. Edit the sample brief or replace it with your own paragraph.
+4. Click **Create**.
+5. Click **Run**. Watch the pipeline advance stage-by-stage in the event stream.
+6. Edit any stage's artifact between runs. Downstream stages automatically mark themselves stale so you can re-run only the affected shots.
+7. When it finishes, click **Package** to get a delivery zip.
 
-### Subtitle Styles
+## Configuration
 
-| Style | Description |
-|-------|-------------|
-| `bold_yellow` | Yellow text with black outline |
-| `white_shadow` | White text with drop shadow |
-| `neon_glow` | Glowing neon effect |
-| `minimal_white` | Clean white text |
-| `bold_red` | Red text with outline |
+Copy `config.example.json` to `config.json` (git-ignored) and edit it.
 
-### Motion Effects
+Environment variables (also editable from the Settings panel):
 
-- `zoom_in` - Slow zoom towards center
-- `zoom_out` - Slow zoom outward
-- `none` - Static image
+| Variable | Purpose |
+|---|---|
+| `HF_TOKEN` | Hugging Face token for gated models |
+| `HF_HOME` | Custom cache dir for HF weights |
+| `NEXT_PUBLIC_API_URL` | Backend URL for the Next.js UI |
+| `CUDA_VISIBLE_DEVICES` | Which GPU(s) to use |
+| `PYTORCH_CUDA_ALLOC_CONF` | Memory allocator tuning |
+| `STUDIOLITE_AUTH` | `on` / `off` for API bearer auth |
+| `STUDIOLITE_LICENSE_FILE` | Custom path for the offline license |
+| `GEMINI_API_KEY`, `GROQ_API_KEY` | Cloud LLM backends (optional) |
 
-### Color Filters
+## Windows setup package
 
-- `none` - No filter
-- `warm` - Warm orange tones
-- `cool` - Cool blue tones
-- `vintage` - Faded retro look
-- `vivid` - Enhanced saturation
+`packaging/windows/build.py` builds a source-based IExpress installer:
 
----
+```powershell
+python packaging/windows/build.py
+```
 
-## Tech Stack
+Outputs land under `dist/`: `StudioLite-Setup.exe`, a fallback zip, SHA-256 checksums, and `release-manifest.json` describing the build.
 
-- **Streamlit** - Web interface
-- **OpenCV** - Video/image processing
-- **FFmpeg** - Video encoding, trimming, merging
-- **PyMuPDF** - PDF processing
-- **WhisperX / faster-whisper** - Speech-to-text transcription
-- **Google API** - YouTube upload integration
-- **llama.cpp / Ollama** - LLM text generation
-- **Stable Diffusion XL** - AI image generation via diffusers
-- **Piper TTS** - High-quality neural text-to-speech
-- **KittenTTS** - Lightweight text-to-speech
-- **MoviePy** - Video compositing
-- **NumPy / SoundFile** - Audio processing
-- **SciPy** - Audio resampling and signal processing
-- **Diffusers** - Video generation pipelines (Wan, HunyuanVideo, LTX, CogVideoX)
-- **HuggingFace Hub** - Model downloading and caching
+**Signing is opt-in.** Set `STUDIOLITE_SIGN_THUMBPRINT` (SHA-1 of the code-signing cert in your user store), optionally `STUDIOLITE_SIGN_TSA` (defaults to DigiCert), and optionally `STUDIOLITE_SIGNTOOL` (full path). If any of those are missing, the build finishes unsigned and records the reason in the manifest. See `packaging/windows/README.md` for the full release procedure.
 
----
+## Licensing model
 
-## Troubleshooting
+The code is MIT. The **product** ships a two-tier entitlement layer for feature gating:
 
-### Audio Issues
-- **Missing audio**: The pipeline uses numpy-based audio concatenation to ensure reliable playback
-- **Silent scenes**: TTS failures are caught and fallback text is generated
+| Tier | What you get | Watermark on export |
+|---|---|---|
+| Free | Full pipeline, all editors, all tools | Yes |
+| Pro / Studio | Same, plus watermark removal and `watermark_removal` feature flag | No |
 
-### GPU Memory
-- For SDXL on limited VRAM, reduce `image_steps` or use SDXL Turbo
-- Piper TTS runs on CPU and doesn't require GPU
+Licenses are Ed25519-signed JSON payloads with tier, features, optional device fingerprint, expiry, and grace-days. Verification is offline. Nothing calls home to check.
 
-### Model Downloads
-- GGUF models: Place in `models/` directory
-- SDXL models: Place `.safetensors` files in `models/` directory
-- Piper voices: Download automatically to `~/.local/share/piper/`
-
----
+For your own installs the free tier is unlimited. For third-party distribution (packaging StudioLite as part of a product) the licensing scaffold gives you a way to gate features cleanly.
 
 ## Contributing
 
-Pull requests are welcome! For major changes, please open an issue first to
-discuss what you would like to change. Good first areas: closing the Next.js /
-Streamlit feature gap, additional export formats, and documentation.
-
----
+- Open an issue for anything that surprised you, especially wrong outputs.
+- PRs welcome. Keep changes focused. New features should ship with tests under `tests/`.
+- The test suite is 162 tests today and CI is green on both Ubuntu and Windows. Please keep both true.
 
 ## License
 
-StudioLite is released under the **MIT License** — see [LICENSE](LICENSE).
+MIT for the source. See `LICENSE`.
 
-### Licensing notes for third-party components
-
-This project depends on several third-party libraries, models, and tools. They
-are installed by you (via `pip` / `npm` / model downloads) and are **not**
-redistributed in this repository, except for the bundled subtitle font. A full
-breakdown lives in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Highlights:
-
-- **PyMuPDF** (PDF watermark removal) is **AGPL-3.0**. Using it as a dependency
-  does not change StudioLite's MIT license, but if you deploy StudioLite as a
-  network service, AGPL requires offering users the corresponding source. Omit
-  this dependency if you do not need PDF processing.
-- **FFmpeg** (required, installed separately) is LGPL/GPL depending on the build.
-- **AI model weights** (Wan, HunyuanVideo, LTX-Video, CogVideoX, SDXL, Whisper,
-  LLMs) each carry their **own** licenses — some restrict commercial use. You are
-  responsible for complying with the license of any model you download.
-- The bundled subtitle font **Anton** (`fonts/Anton-Regular.ttf`) is licensed
-  under the **SIL Open Font License 1.1** (see `fonts/Anton-OFL.txt`).
-
----
-
-## Credits
-
-Built on the shoulders of excellent open-source projects:
-
-- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) / [WhisperX](https://github.com/m-bain/whisperX) — Speech recognition
-- [RapidOCR](https://github.com/RapidAI/RapidOCR) — On-screen OCR
-- [Diffusers](https://github.com/huggingface/diffusers) — Video & image diffusion pipelines
-- [Stable Diffusion XL](https://stability.ai/stable-diffusion) — Image generation
-- [Piper TTS](https://github.com/rhasspy/piper) — Neural text-to-speech
-- [KittenTTS](https://github.com/KittenML/KittenTTS) — Lightweight text-to-speech
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) / [Ollama](https://github.com/ollama/ollama) — Local LLM inference
-- [Streamlit](https://streamlit.io/) & [Next.js](https://nextjs.org/) — Front-ends
-- [Anton](https://github.com/googlefonts/AntonFont) by Vernon Adams — Subtitle font (OFL 1.1)
-
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the complete list.
+Third-party dependencies, bundled fonts, and model weights carry their own licenses. See `THIRD_PARTY_NOTICES.md` for the full list; note that some model weights (Stable Diffusion XL, HunyuanVideo, LTX-Video, CogVideoX 5B) have restrictions on commercial use that supersede StudioLite's MIT grant.

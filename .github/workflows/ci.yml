@@ -93,17 +93,23 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # The unit tests only need the pure-Python surface (project, stages,
-      # telemetry) plus fastapi/pydantic for the API integration checks.
-      # We deliberately do NOT install the heavy inference stack — that would
-      # push CI wall-clock past the free-tier budget and give us nothing over
-      # the unit surface we actually care about here.
+      # The unit tests only need a slim pure-Python surface — but "slim"
+      # grew as more modules landed at the filmmaker package root. Every
+      # dep below is imported at module-load time by something the tests
+      # ``from filmmaker import ...`` touches (llm.py -> requests,
+      # licensing -> cryptography, library subsystem -> Pillow/numpy/
+      # imagehash). We deliberately do NOT install the heavy inference
+      # stack (torch, diffusers, transformers, whisperx) — that would
+      # push CI wall-clock past the free-tier budget for no test-surface
+      # coverage over what the unit tests already prove.
       - name: Install test-only deps
         shell: bash
         run: |
           set -e
           python -m pip install --upgrade pip
-          python -m pip install pytest httpx fastapi pydantic uvicorn python-multipart
+          python -m pip install \
+            pytest httpx fastapi pydantic uvicorn python-multipart \
+            requests cryptography Pillow numpy imagehash
 
       - name: Run pytest
         shell: bash
@@ -122,7 +128,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
 

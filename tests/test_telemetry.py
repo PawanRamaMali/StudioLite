@@ -136,7 +136,13 @@ class TestRedaction:
         assert "hf_ABCDEFGH" not in telemetry._redact_line(line)
 
     def test_path_outside_root_redacted(self):
-        line = "Opening C:\\Users\\alice\\Documents\\secret.txt"
+        # Use an OS-appropriate absolute path so the redactor's install-
+        # root check sees a real path and doesn't accidentally resolve a
+        # foreign-OS path (e.g. "C:\Users\alice" on Linux) into cwd.
+        if os.name == "nt":
+            line = "Opening C:\\Users\\alice\\Documents\\secret.txt"
+        else:
+            line = "Opening /home/alice/Documents/secret.txt"
         redacted = telemetry._redact_line(line)
         assert "<user-path>" in redacted
         assert "alice" not in redacted

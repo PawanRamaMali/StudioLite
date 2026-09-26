@@ -1427,6 +1427,21 @@ def _disable_ip_adapter() -> None:
     except Exception:
         pass
     _IP_ADAPTER_STATE = "disabled"
+
+
+def _unload_ip_adapter_transient() -> None:
+    """Unload IP-Adapter for a single call because this shot has no
+    character reference. Unlike ``_disable_ip_adapter`` this resets state
+    to ``unknown`` so a subsequent shot with a reference can reload it."""
+    global _IP_ADAPTER_STATE
+    try:
+        import reelforge as _rf
+        pipe = getattr(_rf, "_sdxl_pipe", None)
+        if pipe is not None and hasattr(pipe, "unload_ip_adapter"):
+            pipe.unload_ip_adapter()
+    except Exception:
+        pass
+    _IP_ADAPTER_STATE = "unknown"
     logger.warning("IP-Adapter disabled for the rest of the session")
 
 
@@ -1504,6 +1519,12 @@ def _load_sdxl_renderer(variant: str = "turbo"):
     def _render(prompt: str, out_path: str, *, steps: Optional[int] = None,
                 ref_image=None) -> None:
         # rf_generate_image writes to `.mp/<uuid>.png` and returns that path.
+        # IP-Adapter is a global pipeline state. If a previous shot loaded it
+        # and this shot has no reference, we MUST unload before calling the
+        # pipeline. Otherwise diffusers fails with "image_embeds required"
+        # because the UNet's encoder_hid_dim_type is still `ip_image_proj`.
+        if ref_image is None and _IP_ADAPTER_STATE == "loaded":
+            _unload_ip_adapter_transient()
         use_ref = ref_image is not None and _ensure_ip_adapter_loaded()
         try:
             if use_ref:
@@ -1567,12 +1588,19 @@ def _load_sdxl_batch_renderer():
             "width": ar["image_gen_width"],
             "height": ar["image_gen_height"],
         }
-        # If any shot in the batch has a reference image, load IP-Adapter and
-        # pass a list matching the batch size. Diffusers accepts None per slot
-        # to mean "no reference for this prompt".
-        use_refs = (ref_images is not None
-                    and any(r is not None for r in ref_images)
-                    and _ensure_ip_adapter_loaded())
+        # IP-Adapter is a pipeline-wide switch: once loaded, the UNet demands
+        # image_embeds for every prompt in the batch. That means a mixed batch
+        # (some shots have refs, some don't) fails with
+        # "requires the keyword argument `image_embeds`" on the ref-less slots.
+        # Only load IP-Adapter when ALL shots in the batch have a ref; if the
+        # batch is mixed, unload it (transiently) and skip refs for this batch.
+        has_any_ref = ref_images is not None and any(r is not None for r in ref_images)
+        all_have_ref = ref_images is not None and all(r is not None for r in ref_images)
+        use_refs = all_have_ref and _ensure_ip_adapter_loaded()
+        if has_any_ref and not all_have_ref and _IP_ADAPTER_STATE == "loaded":
+            # Mixed batch and IP-Adapter is currently loaded — unload so the
+            # ref-less slots don't crash. Next all-ref batch will reload it.
+            _unload_ip_adapter_transient()
         if use_refs:
             if len(ref_images) != len(prompts):
                 raise ValueError("ref_images length must match prompts length")

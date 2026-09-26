@@ -1,9 +1,9 @@
-# StudioLite — CPU-only image
+# StudioLite CPU-only image.
 # Base: python:3.11-slim on Debian (~150 MB base).
 # Ships everything CPU-safe: Audio Studio, Transcription, Video Editor, LLM
-# (via Ollama sidecar or configured URL), Doc Writer, live/screen/video
+# (via Ollama sidecar or configured URL), Library, live/screen/video
 # transcribe. Local SDXL runs on CPU but is very slow (~5-15 min per image).
-# Video generation, Qwen edit, and LatentSync are visibly disabled in the UI.
+# Video generation and LatentSync are visibly disabled in the UI.
 #
 # Build:
 #   docker build -f Dockerfile.cpu -t studiolite:cpu .

@@ -21,14 +21,13 @@ up-to-date license terms.
 
 | Asset | Source | License |
 |-------|--------|---------|
-| `fonts/Anton-Regular.ttf` | [Anton](https://github.com/googlefonts/AntonFont) by Vernon Adams / The Anton Project Authors | SIL Open Font License 1.1 — see `fonts/Anton-OFL.txt` |
+| `fonts/Anton-Regular.ttf` | [Anton](https://github.com/googlefonts/AntonFont) by Vernon Adams / The Anton Project Authors | SIL Open Font License 1.1 - see `fonts/Anton-OFL.txt` |
 | `web/` frontend scaffold | Bootstrapped with [create-next-app](https://github.com/vercel/next.js) | MIT |
 
 ## Python dependencies
 
 | Package | License |
 |---------|---------|
-| streamlit | Apache-2.0 |
 | fastapi, uvicorn, python-multipart | MIT / BSD |
 | numpy | BSD-3-Clause |
 | Pillow | HPND (permissive) |
@@ -53,8 +52,8 @@ up-to-date license terms.
 | imagehash | BSD-2-Clause |
 | python-docx | MIT |
 | reportlab | BSD-3-Clause |
-| audio-recorder-streamlit | MIT |
 | google-api-python-client, google-auth-oauthlib, google-auth-httplib2 | Apache-2.0 |
+| cryptography | Apache-2.0 / BSD-3-Clause |
 
 ## Frontend (Next.js) dependencies
 

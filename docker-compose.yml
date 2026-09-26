@@ -1,4 +1,4 @@
-# StudioLite — docker-compose for local development.
+# StudioLite docker-compose for local development.
 #
 # Pick one:
 #   docker compose --profile cuda up      # NVIDIA GPU (needs nvidia-container-toolkit)

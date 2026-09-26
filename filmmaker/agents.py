@@ -2067,6 +2067,95 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
                 return v.get("voice") or _PIPER_POOL[0]["name"]
         return _PIPER_POOL[0]["name"]
 
+    def _synth(sid: str, shot: Dict[str, Any],
+                line: Dict[str, str]) -> Dict[str, Any]:
+        """Synthesize one dialogue line to `voice/{sid}_{shot_id}.wav` and
+        return the record for the artifact. When multiple lines land on the
+        same shot they are concatenated before this is called."""
+        speaker = line["speaker"]
+        voice_name = voice_for(speaker)
+        wav_rel = f"voice/{sid}_{shot['id']}.wav"
+        wav_abs = os.path.join(project.artifacts_dir, "voice",
+                               f"{sid}_{shot['id']}.wav")
+        ok = False
+        err: Optional[str] = None
+        backend_used = ""
+        if indextts2_wrap is not None:
+            try:
+                indextts2_wrap.synthesize(line["text"], wav_abs, speaker=speaker)
+                _pad_wav_with_silence(wav_abs, head_sec=0.25, tail_sec=0.45)
+                ok = True
+                backend_used = "indextts2"
+            except Exception as e:
+                logger.warning("IndexTTS-2 synth failed for %s/%s (%s); trying next backend",
+                                sid, shot["id"], e)
+                err = f"indextts2: {e}"
+        if not ok and xtts_wrap is not None:
+            try:
+                xtts_wrap.synthesize(line["text"], wav_abs, speaker=speaker)
+                _pad_wav_with_silence(wav_abs, head_sec=0.25, tail_sec=0.45)
+                ok = True
+                backend_used = "xtts"
+            except Exception as e:
+                logger.warning("XTTS synth failed for %s/%s (%s); falling back to Piper",
+                                sid, shot["id"], e)
+                err = f"{err or ''}; xtts: {e}"
+        tts = get_tts(voice_name) if not ok else None
+        if not ok and tts is not None:
+            try:
+                tts.synthesize(line["text"], wav_abs)
+                _pad_wav_with_silence(wav_abs, head_sec=0.25, tail_sec=0.45)
+                ok = True
+                backend_used = "piper"
+                err = None
+            except Exception as e:
+                logger.warning("Piper synth failed for %s/%s (%s); writing silence",
+                                sid, shot["id"], e)
+                err = f"{err or ''}; piper: {e}"
+        if not ok:
+            _write_silent_wav(wav_abs, 1.0)
+        return {
+            "scene_id": sid, "shot_id": shot["id"],
+            "speaker": speaker, "voice": voice_name,
+            "backend": backend_used or "silent",
+            "text": line["text"], "wav": wav_rel,
+            "duration_sec": _wav_duration_seconds(wav_abs),
+            "synthesized": ok, "error": err,
+        }
+
+    # Fallback path: if the screenplay didn't carry enough scene headings
+    # for _split_screenplay_by_scene to bucket per scene, we end up with
+    # all dialogue collapsed under s01 and every other scene silent.
+    # Detect that and redistribute the WHOLE dialogue across the WHOLE
+    # shot list proportionally so no scene ends up mute.
+    scenes_with_shots = [s for s in scenes if shots_by_scene.get(s["id"])]
+    scenes_with_dialogue = sum(
+        1 for s in scenes_with_shots
+        if _parse_screenplay_dialogue(per_scene_script.get(s["id"], ""))
+    )
+    if scenes_with_dialogue < len(scenes_with_shots):
+        flat_dialogue = _parse_screenplay_dialogue(full_screenplay)
+        flat_shots: List[tuple] = []
+        for s in scenes_with_shots:
+            for sh in shots_by_scene.get(s["id"], []):
+                flat_shots.append((s["id"], sh))
+        if flat_shots and flat_dialogue:
+            lines: List[Dict[str, Any]] = []
+            n = len(flat_shots)
+            for idx, (sid, sh) in enumerate(flat_shots):
+                start = idx * len(flat_dialogue) // n
+                end = (idx + 1) * len(flat_dialogue) // n
+                bucket = flat_dialogue[start:end]
+                if not bucket:
+                    continue
+                # Concatenate all lines assigned to this shot into one
+                # synthesized wav so the wav-per-shot invariant holds.
+                merged_text = " ".join(l["text"] for l in bucket).strip()
+                merged_speaker = bucket[0]["speaker"]
+                lines.append(_synth(sid, sh,
+                    {"speaker": merged_speaker, "text": merged_text}))
+            return {"lines": lines}
+
     lines: List[Dict[str, Any]] = []
     for scene in scenes:
         sid = scene["id"]
@@ -2125,70 +2214,7 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
         for slot_idx, line in enumerate(assignments):
             if line is None:
                 continue
-            shot = shots[slot_idx]
-            speaker = line["speaker"]
-            voice_name = voice_for(speaker)
-
-            wav_rel = f"voice/{sid}_{shot['id']}.wav"
-            wav_abs = os.path.join(project.artifacts_dir, "voice",
-                                   f"{sid}_{shot['id']}.wav")
-            ok = False
-            err: Optional[str] = None
-            backend_used = ""
-            # IndexTTS-2 first if requested - best local prosody. On per-line
-            # failure it falls to XTTS (if loaded) or Piper below without
-            # tearing down the whole stage.
-            if indextts2_wrap is not None:
-                try:
-                    indextts2_wrap.synthesize(line["text"], wav_abs, speaker=speaker)
-                    _pad_wav_with_silence(wav_abs, head_sec=0.25, tail_sec=0.45)
-                    ok = True
-                    backend_used = "indextts2"
-                except Exception as e:
-                    logger.warning("IndexTTS-2 synth failed for %s/%s (%s); trying next backend",
-                                   sid, shot["id"], e)
-                    err = f"indextts2: {e}"
-            # XTTS - cloned voice with more prosody than Piper.
-            if not ok and xtts_wrap is not None:
-                try:
-                    xtts_wrap.synthesize(line["text"], wav_abs, speaker=speaker)
-                    _pad_wav_with_silence(wav_abs, head_sec=0.25, tail_sec=0.45)
-                    ok = True
-                    backend_used = "xtts"
-                except Exception as e:
-                    logger.warning("XTTS synth failed for %s/%s (%s); falling back to Piper",
-                                   sid, shot["id"], e)
-                    err = f"{err or ''}; xtts: {e}"
-
-            tts = get_tts(voice_name) if not ok else None
-            if not ok and tts is not None:
-                try:
-                    tts.synthesize(line["text"], wav_abs)
-                    # Piper voices land tight against the file boundaries and
-                    # feel rushed inside a short shot. Bake head+tail silence
-                    # in so the line has breathing room when mixed.
-                    _pad_wav_with_silence(wav_abs, head_sec=0.25, tail_sec=0.45)
-                    ok = True
-                    backend_used = "piper"
-                    err = None
-                except Exception as e:
-                    logger.warning("Piper synth failed for %s/%s (%s); writing silence",
-                                   sid, shot["id"], e)
-                    err = f"{err or ''}; piper: {e}"
-            if not ok:
-                _write_silent_wav(wav_abs, 1.0)
-            lines.append({
-                "scene_id": sid,
-                "shot_id":  shot["id"],
-                "speaker":  speaker,
-                "voice":    voice_name,
-                "backend":  backend_used or "silent",
-                "text":     line["text"],
-                "wav":      wav_rel,
-                "duration_sec": _wav_duration_seconds(wav_abs),
-                "synthesized": ok,
-                "error": err,
-            })
+            lines.append(_synth(sid, shots[slot_idx], line))
     return {"lines": lines}
 
 

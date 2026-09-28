@@ -993,7 +993,14 @@ def run_shots(project: Project) -> Dict[str, Any]:
     screenwriter = project.read_artifact("screenwriter") or {}
     full_screenplay = (editor.get("revised_fountain")
                        or screenwriter.get("fountain") or "")
-    character_bios = _extract_character_bios(full_screenplay)
+    # The story editor sometimes strips character intro parentheticals
+    # (`JESS (30s, worn jacket) turns` → `JESS turns`), which leaves the
+    # bio extractor no ALL-CAPS intro to match and it starts picking up
+    # false Title-Case intros from action prose like "then to Jess, his
+    # eyes narrowing". Always mine bios from the original screenwriter
+    # draft, which keeps the intro parentheticals intact.
+    bio_source = screenwriter.get("fountain") or full_screenplay
+    character_bios = _extract_character_bios(bio_source)
 
     # Load character portraits (from the character_portraits stage) as PIL
     # images keyed by uppercased name. Each shot whose subject/action names

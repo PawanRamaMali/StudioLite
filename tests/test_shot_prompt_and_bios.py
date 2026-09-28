@@ -253,6 +253,84 @@ def test_story_editor_accepts_real_revised_screenplay():
     assert out["revised_fountain"] == revised.strip()
 
 
+def test_screenwriter_verifier_flags_over_target_length():
+    """A 15-second brief (target 0.25 min) with a 200-line draft must
+    fail verification so the retry loop asks for a rewrite. Before this
+    check landed, the max bound was computed and thrown away; llama3.1:8b
+    happily wrote 7-minute films for 15-second briefs and wasted GPU hours."""
+    class _Cfg:
+        target_minutes = 0.25
+    class _Meta:
+        config = _Cfg()
+    class _Proj:
+        meta = _Meta()
+
+    fountain = ("INT. LIGHTHOUSE - NIGHT\n\n"
+                "The storm rages outside.\n\n"
+                "    JESS\n    Come inside.\n\n"
+                "    KAI\n    Not tonight.\n\n"
+                # Pad to ~120 non-empty lines with alternating cues + short beats.
+                + "\n\n".join(
+                    [f"Beat number {i} lands here as a short action line."
+                     for i in range(60)]
+                ))
+    report = agents.verify_screenwriter(_Proj(),
+                                        {"fountain": fountain})
+    max_hints = [h for h in report.hints
+                 if "should be under" in h or "non-empty lines" in h and "under" in h]
+    assert max_hints, (
+        f"Verifier didn't flag over-length draft. Hints: {report.hints}"
+    )
+    assert report.score < 1.0
+
+
+def test_screenwriter_verifier_flags_under_target_length():
+    """Symmetric: a 5-min target with a 4-line draft should fail as too short."""
+    class _Cfg:
+        target_minutes = 5.0
+    class _Meta:
+        config = _Cfg()
+    class _Proj:
+        meta = _Meta()
+
+    fountain = "INT. DINER - DAY\n\n    MARGO\n    Hey.\n"
+    report = agents.verify_screenwriter(_Proj(), {"fountain": fountain})
+    assert any("at least" in h for h in report.hints), (
+        f"Verifier didn't flag too-short draft. Hints: {report.hints}"
+    )
+
+
+def test_screenwriter_verifier_accepts_draft_matching_target_length():
+    """Sanity check: a 2-min target with a 60-line draft passes the length
+    check (may fail on other rubric points, but the length hints should
+    not be present)."""
+    class _Cfg:
+        target_minutes = 2.0
+    class _Meta:
+        config = _Cfg()
+    class _Proj:
+        meta = _Meta()
+
+    # 60 non-empty lines, real slug, plenty of cues.
+    body = []
+    body.append("INT. DINER - DAY")
+    body.append("")
+    body.append("MARGO wipes the counter as the last customer leaves.")
+    body.append("")
+    for i in range(20):
+        body.append("    MARGO")
+        body.append(f"    Line {i} of the exchange.")
+        body.append("")
+        body.append("    KAI")
+        body.append(f"    Response {i} in kind.")
+        body.append("")
+    fountain = "\n".join(body)
+
+    report = agents.verify_screenwriter(_Proj(), {"fountain": fountain})
+    assert not any("at least" in h for h in report.hints), report.hints
+    assert not any("should be under" in h for h in report.hints), report.hints
+
+
 def test_story_editor_accepts_alternate_field_names_for_revision():
     """Smaller Ollama models sometimes name the field `screenplay` or
     `revised` instead of `revised_fountain`. All four aliases should be

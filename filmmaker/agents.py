@@ -247,6 +247,22 @@ def run_screenwriter(project: Project) -> Dict[str, Any]:
             pitch_ctx += f"{label}: {val}\n"
 
     hint = getattr(project, "_retry_hint", "") or ""
+    # Translate target_minutes into a concrete line budget so the model
+    # has an anchor beyond "about one page per minute". Small models
+    # (llama3.1:8b in particular) tend to ignore short targets and write
+    # 5-minute drafts for 15-second briefs when the budget is left
+    # implicit. The verifier's expected_max uses the same formula.
+    target_min = float(cfg.target_minutes or 2.0)
+    budget_max = max(30, int(target_min * 60) + 20)
+    budget_min = max(10, int(target_min * 15))
+    if target_min < 1.0:
+        budget_line = (f"BUDGET: this is a very short piece. Keep the whole "
+                       f"screenplay between {budget_min} and {budget_max} "
+                       "non-empty lines including scene headings, cues, and "
+                       "action. Use one scene, one clear beat.")
+    else:
+        budget_line = (f"BUDGET: keep the screenplay between {budget_min} "
+                       f"and {budget_max} non-empty lines total.")
     user_msg = (
         f"Title: {chosen.get('title')}\n"
         f"Tone: {chosen.get('tone')}\n"
@@ -254,6 +270,7 @@ def run_screenwriter(project: Project) -> Dict[str, Any]:
         f"{pitch_ctx}"
         f"Target runtime: {cfg.target_minutes:.1f} minutes\n"
         f"Visual style: {cfg.style}\n\n"
+        f"{budget_line}\n\n"
         "Write the screenplay now."
     )
     if hint:
@@ -342,17 +359,26 @@ def verify_screenwriter(project: Project, artifact: Dict[str, Any]):
     if len(all_caps_cues) < 4:
         hints.append(f"only {len(all_caps_cues)} character cues detected; "
                      "each speaking line needs its name in ALL CAPS on its own line")
-    # Rough runtime check: expect ~1 page per minute, ~30 lines per page.
+    # Rough runtime check: expect ~1 page per minute, roughly 15-60
+    # non-empty lines per minute of runtime once you count scene headings,
+    # cues, and action. The lower bound catches models that hand back a
+    # sketch; the upper bound catches models (llama3.1:8b in particular)
+    # that ignore `target_minutes` and write a 5-minute film when we asked
+    # for 15 seconds - which then wastes hours of downstream render.
     try:
         target_min = float(project.meta.config.target_minutes)
     except Exception:
         target_min = 2.0
     line_count = len([l for l in fountain.splitlines() if l.strip()])
-    expected_min = max(15, int(target_min * 15))
-    expected_max = max(80, int(target_min * 60))
+    expected_min = max(10, int(target_min * 15))
+    expected_max = max(30, int(target_min * 60) + 20)
     if line_count < expected_min:
         hints.append(f"draft is only {line_count} non-empty lines; "
                      f"target runtime {target_min:.1f} min expects at least ~{expected_min}")
+    if line_count > expected_max:
+        hints.append(f"draft is {line_count} non-empty lines; target "
+                     f"runtime {target_min:.1f} min should be under ~{expected_max}. "
+                     "Cut scenes and tighten dialogue rather than adding padding.")
     score = 1.0 - min(1.0, len(hints) * 0.25)
     return QualityReport(score=score, hints=hints)
 

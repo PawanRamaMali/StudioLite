@@ -506,12 +506,26 @@ def run_story_editor(project: Project) -> Dict[str, Any]:
         if candidate:
             revised = candidate
             break
-    if not revised:
-        # Story editor is a polish pass, not a required stage. If the model
-        # produced only notes (or nothing usable), keep the screenwriter's
-        # draft as the revised draft so downstream stages can still run.
-        logger.warning("Story editor emitted no revised_fountain field; "
-                        "passing screenwriter draft through unchanged.")
+    # Smaller models sometimes echo the field description ("the full revised
+    # screenplay in Fountain format") instead of writing content. Any output
+    # that lacks a scene slug and any character cue can't be a real screenplay
+    # and would poison the downstream Breakdown stage into confabulating a
+    # completely different story. Detect and fall back.
+    def _looks_like_real_screenplay(text: str) -> bool:
+        if len(text) < 200:
+            return False
+        import re as _re
+        has_slug = bool(_re.search(r"(?im)^\s*(INT|EXT)[\.\s/]", text))
+        # Any all-caps character cue on its own line, 1-3 words.
+        has_cue = bool(_re.search(r"(?m)^\s*[A-Z][A-Z .'\-]{1,40}\s*$", text))
+        return has_slug and has_cue
+    if not _looks_like_real_screenplay(revised):
+        logger.warning(
+            "Story editor output does not look like a real screenplay "
+            "(len=%d, first 80 chars: %r); passing screenwriter draft "
+            "through unchanged so Breakdown does not hallucinate.",
+            len(revised), revised[:80],
+        )
         revised = fountain
     return {
         "notes": notes,

@@ -75,6 +75,38 @@ def test_bio_extraction_dedupes_case_insensitively():
     assert "eyes narrowing" not in bios[jess_keys[0]]
 
 
+def test_bio_extraction_rejects_possessive_verb_phrase():
+    """A comma pattern like `Jess, his eyes narrowing` slips past the
+    word-list check because it contains `eyes`. It must be rejected on
+    the grounds that a real appearance description doesn't lead with a
+    possessive pronoun. Otherwise this verb phrase gets baked into every
+    shot prompt as if it were the character's canonical look."""
+    script = (
+        "INT. LIGHTHOUSE - NIGHT\n\n"
+        "The storm rages outside. Jess, his eyes narrowing, stares out.\n\n"
+        "    JESS\n    We should not be here.\n"
+    )
+    bios = agents._extract_character_bios(script)
+    for name, desc in bios.items():
+        assert "eyes narrowing" not in desc.lower(), (
+            f"Verb phrase `{desc}` slipped in as bio for {name}"
+        )
+
+
+def test_bio_extraction_rejects_her_verb_phrase():
+    """Same for `her hand tightening`."""
+    script = (
+        "INT. LIGHTHOUSE - NIGHT\n\n"
+        "Kai looks over. Margo, her hand tightening on the rail, watches him.\n\n"
+        "    MARGO\n    Go.\n"
+    )
+    bios = agents._extract_character_bios(script)
+    for name, desc in bios.items():
+        assert "hand tightening" not in desc.lower(), (
+            f"Verb phrase `{desc}` slipped in as bio for {name}"
+        )
+
+
 def test_bio_extraction_prefers_paren_intro_over_action_prose():
     """A properly-formed `NAME (age, wardrobe)` intro should always beat
     an action-prose comma pattern that happens to include the character's

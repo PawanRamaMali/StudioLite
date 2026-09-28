@@ -1441,6 +1441,15 @@ def _looks_like_desc(text: str) -> bool:
             r"skinny|slim|broad|muscular|heavyset|petite|slender|lanky)\b",
             _re.I,
         )
+    # Verb-phrase reject: a real appearance description names features
+    # ("green eyes, silver hair") rather than staging actions ("his eyes
+    # narrowing, her hand tightening"). Descriptions that lead with a
+    # possessive pronoun are almost always the latter and slip past the
+    # word-list check because they contain "eyes" or "hair".
+    low = text.strip().lower()
+    if low.startswith(("his ", "her ", "their ", "its ", "my ", "your ",
+                       "our ", "this ", "that ", "these ", "those ")):
+        return False
     if _DESC_AGE.search(text):
         return True
     if _DESC_WORDS.search(text):

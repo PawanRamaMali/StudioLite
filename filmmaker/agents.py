@@ -1356,11 +1356,11 @@ def _extract_character_bios(script: str) -> Dict[str, str]:
 
         for m in paren_intro.finditer(line):
             picked = _accept(m.group(1), m.group(2))
-            if picked and picked[0] not in bios:
+            if picked and not any(k.upper() == picked[0].upper() for k in bios):
                 bios[picked[0]] = picked[1]
         for m in comma_intro.finditer(line):
             picked = _accept(m.group(1), m.group(2))
-            if picked and picked[0] not in bios:
+            if picked and not any(k.upper() == picked[0].upper() for k in bios):
                 bios[picked[0]] = picked[1]
     return bios
 

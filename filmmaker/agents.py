@@ -1219,8 +1219,20 @@ def _shot_prompt(style: str, scene: Dict[str, Any], shot: Dict[str, Any],
     what nudges Wan T2V (which sees the same prompt as SDXL) toward the
     right character shot after shot without requiring the I2V keyframe
     conditioning."""
-    style_prefix = "cinematic photorealistic still, film grain" if style == "photoreal" \
-                   else "stylized illustrated frame, painterly, cinematic"
+    # Map the config's `style` string to an SDXL prompt prefix. Anything
+    # unrecognized falls to the stylized-illustrated default because that
+    # is the historical behavior; adding cases here is the right way to
+    # honor a new config value without regressing existing projects.
+    _STYLE_PREFIXES = {
+        "photoreal":  "cinematic photorealistic still, film grain, "
+                      "sharp focus, natural lighting, 8K",
+        "cinematic":  "cinematic photorealistic still, film grain, "
+                      "sharp focus, dramatic lighting, shallow depth of field",
+        "clean":      "clean modern editorial illustration, minimal, "
+                      "high contrast, sharp lines",
+        "stylized":   "stylized illustrated frame, painterly, cinematic",
+    }
+    style_prefix = _STYLE_PREFIXES.get(style, _STYLE_PREFIXES["stylized"])
 
     parts = [
         style_prefix,

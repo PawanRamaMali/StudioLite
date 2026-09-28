@@ -1642,7 +1642,11 @@ def _load_sdxl_batch_renderer():
         if use_refs:
             if len(ref_images) != len(prompts):
                 raise ValueError("ref_images length must match prompts length")
-            kwargs["ip_adapter_image"] = ref_images
+            # Diffusers interprets a flat `ip_adapter_image=[img1, img2, ...]`
+            # as one image per IP-Adapter (there is one), which fails with
+            # "3 images and 1 IP Adapters" for a batch of 3. Wrap in an
+            # outer list so it reads as one adapter, many batch images.
+            kwargs["ip_adapter_image"] = [ref_images]
 
         try:
             result = pipe(**kwargs)

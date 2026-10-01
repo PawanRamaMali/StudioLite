@@ -110,6 +110,7 @@ _AUTH_EXEMPT_PATH_PREFIXES = (
     "/static/",
     "/docs", "/redoc", "/openapi.json",
     "/api/v1/system/auth-status",  # public read-only "is auth on?" probe
+    "/api/v1/health",  # liveness probe for Docker HEALTHCHECK / load balancers
 )
 _AUTH_EXEMPT_METHODS = ("OPTIONS",)  # CORS preflight
 

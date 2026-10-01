@@ -36,6 +36,12 @@ class TestAuthMiddleware:
         assert body["auth_enabled"] is True
         assert body["header"] == "X-StudioLite-Token"
 
+    def test_health_is_public(self, monkeypatch, tmp_path):
+        api, client = _fresh_api(monkeypatch, tmp_path, auth="on")
+        r = client.get("/api/v1/health")
+        assert r.status_code == 200
+        assert r.json() == {"status": "ok"}
+
     def test_write_endpoint_401_without_token(self, monkeypatch, tmp_path):
         api, client = _fresh_api(monkeypatch, tmp_path, auth="on")
         r = client.post(

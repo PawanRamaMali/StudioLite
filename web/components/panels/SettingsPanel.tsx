@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import {
   getSystemStatus, SystemStatus, getModelInventory, type ModelInventoryItem,
-  downloadModel, deleteModel, getJob, cancelJob, type Job,
+  downloadModel, deleteModel, getJob, cancelJob, type Job, authFetch,
 } from "@/lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -158,7 +158,7 @@ export default function SettingsPanel() {
   // Fetch env vars
   const fetchEnv = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/v1/system/env`);
+      const res = await authFetch(`${API_BASE}/api/v1/system/env`);
       if (res.ok) {
         const data = await res.json();
         const vars: EnvVar[] = Object.entries(data.env || {}).map(([k, v]) => ({ key: k, value: v as string }));
@@ -171,7 +171,7 @@ export default function SettingsPanel() {
   const fetchLogs = useCallback(async () => {
     setLogsLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/v1/system/logs?lines=200`);
+      const res = await authFetch(`${API_BASE}/api/v1/system/logs?lines=200`);
       if (res.ok) {
         const data = await res.json();
         setLogLines(data.log_lines || []);
@@ -193,14 +193,14 @@ export default function SettingsPanel() {
   const saveEnvVar = async (key: string, value: string) => {
     setEnvSaving(key);
     try {
-      await fetch(`${API_BASE}/api/v1/system/env?key=${encodeURIComponent(key)}&value=${encodeURIComponent(value)}`, { method: "POST" });
+      await authFetch(`${API_BASE}/api/v1/system/env?key=${encodeURIComponent(key)}&value=${encodeURIComponent(value)}`, { method: "POST" });
       await fetchEnv();
     } catch { /* */ } finally { setEnvSaving(null); }
   };
 
   const deleteEnvVar = async (key: string) => {
     try {
-      await fetch(`${API_BASE}/api/v1/system/env?key=${encodeURIComponent(key)}`, { method: "DELETE" });
+      await authFetch(`${API_BASE}/api/v1/system/env?key=${encodeURIComponent(key)}`, { method: "DELETE" });
       await fetchEnv();
     } catch { /* */ }
   };
@@ -215,7 +215,7 @@ export default function SettingsPanel() {
     if (!hfToken.trim()) return;
     setHfTesting(true); setHfTestResult(null);
     try {
-      const res = await fetch(`${API_BASE}/api/v1/system/hf-token-test?token=${encodeURIComponent(hfToken.trim())}`, { method: "POST" });
+      const res = await authFetch(`${API_BASE}/api/v1/system/hf-token-test?token=${encodeURIComponent(hfToken.trim())}`, { method: "POST" });
       const data = await res.json();
       setHfTestResult(data.message);
       if (data.status === "ok") {

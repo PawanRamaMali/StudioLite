@@ -63,6 +63,15 @@ for port in 8000 3000; do
     fi
 done
 
+# Mint the API token up front (api_server reuses .auth) so the web server
+# can hand the same token to the UI; see web/app/layout.tsx.
+AUTH_FILE="$ROOT/.auth"
+if [[ -z "$(tr -d '[:space:]' 2>/dev/null < "$AUTH_FILE")" ]]; then
+    (umask 077 && "$VENV_PY" -c "import secrets; print(secrets.token_urlsafe(32), end='')" > "$AUTH_FILE")
+fi
+STUDIOLITE_API_TOKEN="$(tr -d '[:space:]' < "$AUTH_FILE")"
+export STUDIOLITE_API_TOKEN
+
 echo "Starting API server  (uvicorn) on http://localhost:8000 ..."
 "$VENV_PY" -u -m uvicorn api_server:app --host 127.0.0.1 --port 8000 \
     --ws-ping-interval 30 --ws-ping-timeout 90 \
@@ -72,7 +81,8 @@ API_PID=$!
 echo "Starting Next.js dev server on http://localhost:3000 ..."
 (
     cd "$WEB_DIR"
-    npm run dev
+    # Loopback only: the page carries the API token (web/app/layout.tsx).
+    npm run dev -- --hostname 127.0.0.1
 ) >"$WEB_OUT" 2>"$WEB_ERR" &
 WEB_PID=$!
 

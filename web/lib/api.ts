@@ -1,18 +1,23 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-// The API token is either baked in at build time (NEXT_PUBLIC_API_TOKEN)
-// or read from browser storage. When both are absent, requests still go
-// out headerless - the server will 401 if auth is enabled, and the UI
-// can then surface the auth-status probe to ask the user for it.
+// The API token is baked in at build time (NEXT_PUBLIC_API_TOKEN), served
+// at runtime by the root layout's meta tag (STUDIOLITE_API_TOKEN, set by
+// the launchers), or read from browser storage. When all are absent,
+// requests still go out headerless - the server will 401 if auth is
+// enabled, and the UI can then surface the auth-status probe to ask the
+// user for it.
 const _buildToken =
   typeof process !== "undefined" && process.env
     ? process.env.NEXT_PUBLIC_API_TOKEN || ""
     : "";
 const TOKEN_STORAGE_KEY = "studiolite.api_token";
+export const TOKEN_META_NAME = "studiolite-api-token";
 
 export function getApiToken(): string {
   if (_buildToken) return _buildToken;
   if (typeof window === "undefined") return "";
+  const meta = document.querySelector<HTMLMetaElement>(`meta[name="${TOKEN_META_NAME}"]`);
+  if (meta?.content) return meta.content;
   try {
     return window.localStorage.getItem(TOKEN_STORAGE_KEY) || "";
   } catch {
@@ -28,6 +33,24 @@ export function setApiToken(token: string): void {
   } catch {
     // Storage failed (private mode, quota) - the caller can retry.
   }
+}
+
+// Plain fetch() plus the auth header, for panels that call the backend
+// directly instead of through apiFetch. Only use it for backend URLs.
+export function authFetch(input: string, init?: RequestInit): Promise<Response> {
+  const token = getApiToken();
+  if (!token) return fetch(input, init);
+  const headers = new Headers(init?.headers);
+  if (!headers.has("X-StudioLite-Token")) headers.set("X-StudioLite-Token", token);
+  return fetch(input, { ...init, headers });
+}
+
+// Browsers can't set headers on a WebSocket handshake (or on <a href> /
+// <audio src>), so the server also takes the token as `?token=`.
+export function withApiToken(url: string): string {
+  const t = getApiToken();
+  if (!t) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(t)}`;
 }
 
 export interface AuthStatus {
@@ -153,7 +176,7 @@ export const getJob = (id: string) => apiFetch<Job>(`/api/v1/jobs/${id}`);
 export const listJobs = (limit = 50) => apiFetch<JobList>(`/api/v1/jobs?limit=${limit}`);
 export const cancelJob = (id: string) =>
   apiFetch<Job>(`/api/v1/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
-export const jobDownloadUrl = (id: string) => `${API_BASE}/api/v1/jobs/${encodeURIComponent(id)}/download`;
+export const jobDownloadUrl = (id: string) => withApiToken(`${API_BASE}/api/v1/jobs/${encodeURIComponent(id)}/download`);
 
 // Generation
 export const generateText2Video = (params: {
@@ -412,7 +435,7 @@ export const getCharacterPortraits = (charName: string) =>
   );
 
 // Download
-export const getDownloadUrl = (jobId: string) => `${API_BASE}/api/v1/jobs/${jobId}/download`;
+export const getDownloadUrl = (jobId: string) => withApiToken(`${API_BASE}/api/v1/jobs/${jobId}/download`);
 
 // Trigger a real file download in the browser, preserving panel state.
 // The native `download` attribute on <a> is ignored cross-origin unless the
@@ -612,7 +635,7 @@ export const filmSetGates = (id: string, gates: Partial<Record<FilmStageKey, boo
 
 export function filmStreamUrl(id: string): string {
   const wsBase = API_BASE.replace(/^http/, "ws");
-  return `${wsBase}/api/v1/films/${encodeURIComponent(id)}/stream`;
+  return withApiToken(`${wsBase}/api/v1/films/${encodeURIComponent(id)}/stream`);
 }
 
 export const FILM_API_BASE = API_BASE;

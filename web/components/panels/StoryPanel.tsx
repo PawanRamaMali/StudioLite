@@ -10,7 +10,7 @@ import {
   UserCircle, Upload, Shield, ImageIcon, X, Copy, Check, Eye,
   Pause, SkipForward, SkipBack, Volume2, FileText, Film,
 } from "lucide-react";
-import { generateStory, getJob, getDownloadUrl, getPortraitUrl, downloadBlob, getSystemStatus, type SystemStatus } from "@/lib/api";
+import { authFetch, generateStory, getJob, getDownloadUrl, getPortraitUrl, downloadBlob, getSystemStatus, type SystemStatus } from "@/lib/api";
 import { Cpu } from "lucide-react";
 
 interface Scene {
@@ -99,7 +99,7 @@ export default function StoryPanel() {
     const fetchEngines = async () => {
       try {
         const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-        const res = await fetch(`${API_BASE}/api/v1/system/engines`);
+        const res = await authFetch(`${API_BASE}/api/v1/system/engines`);
         if (res.ok) {
           const data = await res.json();
           setAvailableEngines(data.video_engines || []);
@@ -118,12 +118,12 @@ export default function StoryPanel() {
     const fetchPortraits = async () => {
       try {
         const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-        const res = await fetch(`${API_BASE}/api/v1/ip-adapter/status`);
+        const res = await authFetch(`${API_BASE}/api/v1/ip-adapter/status`);
         if (res.ok) {
           const data = await res.json();
           if (data.registered_characters) {
             // Also fetch portrait files from disk
-            const pRes = await fetch(`${API_BASE}/api/v1/characters/portraits/_all`);
+            const pRes = await authFetch(`${API_BASE}/api/v1/characters/portraits/_all`);
             if (pRes.ok) {
               const pData = await pRes.json();
               setRegisteredPortraits(pData.portraits || []);
@@ -278,7 +278,7 @@ export default function StoryPanel() {
     setImportingChars(true);
     try {
       const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const res = await fetch(`${API_BASE}/api/v1/characters/list`);
+      const res = await authFetch(`${API_BASE}/api/v1/characters/list`);
       if (!res.ok) throw new Error("Failed to fetch characters");
       const data = await res.json();
       const studioChars = (data.characters || []) as {
@@ -344,7 +344,7 @@ export default function StoryPanel() {
     setAiCharLoading(true);
     try {
       const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const res = await fetch(`${API}/api/v1/generate/script`, {
+      const res = await authFetch(`${API}/api/v1/generate/script`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -384,7 +384,7 @@ export default function StoryPanel() {
       const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       const formData = new FormData();
       formData.append("file", file);
-      const res = await fetch(`${API}/api/v1/ip-adapter/upload-reference?char_id=${charId}`, {
+      const res = await authFetch(`${API}/api/v1/ip-adapter/upload-reference?char_id=${charId}`, {
         method: "POST",
         body: formData,
       });
@@ -415,7 +415,7 @@ export default function StoryPanel() {
 
     try {
       const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const response = await fetch(`${API}/api/v1/generate/script`, {
+      const response = await authFetch(`${API}/api/v1/generate/script`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

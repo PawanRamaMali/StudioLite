@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
+import { authFetch, withApiToken } from "@/lib/api";
 import {
   Mic, MonitorSpeaker, Radio, Square, Download, Loader2, AlertCircle, Languages,
   Copy, Check, Scissors, Trash2,
@@ -408,7 +409,7 @@ export default function LiveTranscribePanel() {
       const params = new URLSearchParams({ session, model });
       if (language) params.set("language", language);
       if (translate) params.set("translate", "1");
-      const wsUrl = `${WS_BASE}/api/v1/transcribe/live?${params.toString()}`;
+      const wsUrl = withApiToken(`${WS_BASE}/api/v1/transcribe/live?${params.toString()}`);
 
       const openWs = () => new Promise<WebSocket>((resolve, reject) => {
         const sock = new WebSocket(wsUrl);
@@ -615,7 +616,7 @@ export default function LiveTranscribePanel() {
 
   const downloadFile = useCallback(async (url: string, filename: string) => {
     try {
-      const res = await fetch(url, { cache: "no-store" });
+      const res = await authFetch(url, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();
       const objectUrl = URL.createObjectURL(blob);

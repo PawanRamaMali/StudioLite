@@ -7,7 +7,7 @@ import {
   Users, Plus, Sparkles, Trash2, Copy, UserCircle, Loader2, Check,
   Upload, ImageIcon, Shield, RefreshCw, Eye, Camera, Palette, Cpu,
 } from "lucide-react";
-import { generateCharacterPortrait, getCharacterPortraits, getJob, getPortraitUrl, getSystemStatus, type SystemStatus } from "@/lib/api";
+import { authFetch, generateCharacterPortrait, getCharacterPortraits, getJob, getPortraitUrl, getSystemStatus, type SystemStatus } from "@/lib/api";
 
 interface Portrait {
   filename: string;
@@ -145,7 +145,7 @@ export default function CharactersPanel() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const res = await fetch(
+      const res = await authFetch(
         `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/ip-adapter/upload-reference?char_id=${charId}`,
         { method: "POST", body: formData }
       );

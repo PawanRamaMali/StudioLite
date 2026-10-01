@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
+import { authFetch } from "@/lib/api";
 import {
   FileVideo, Upload, Loader2, AlertCircle, Languages, Download,
   Copy, Check, Mic, ScanText, X,
@@ -114,7 +115,7 @@ export default function VideoTranscribePanel() {
 
   const fetchText = useCallback(async (url: string): Promise<string> => {
     try {
-      const res = await fetch(url, { cache: "no-store" });
+      const res = await authFetch(url, { cache: "no-store" });
       if (!res.ok) return "";
       return await res.text();
     } catch { return ""; }
@@ -150,7 +151,7 @@ export default function VideoTranscribePanel() {
         confidence: String(confidence),
         drop_garbage: "true",
       });
-      const res = await fetch(`${API_BASE}/api/v1/video/transcribe?${params.toString()}`, {
+      const res = await authFetch(`${API_BASE}/api/v1/video/transcribe?${params.toString()}`, {
         method: "POST",
         body: form,
       });
@@ -165,7 +166,7 @@ export default function VideoTranscribePanel() {
       clearPoll();
       pollRef.current = window.setInterval(async () => {
         try {
-          const r = await fetch(`${API_BASE}/api/v1/jobs/${jobId}`, { cache: "no-store" });
+          const r = await authFetch(`${API_BASE}/api/v1/jobs/${jobId}`, { cache: "no-store" });
           if (!r.ok) return;
           const data: JobResponse = await r.json();
           if (typeof data.progress === "number") setProgress(data.progress);
@@ -224,7 +225,7 @@ export default function VideoTranscribePanel() {
 
   const downloadFile = useCallback(async (url: string, filename: string) => {
     try {
-      const res = await fetch(url, { cache: "no-store" });
+      const res = await authFetch(url, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();
       const objectUrl = URL.createObjectURL(blob);

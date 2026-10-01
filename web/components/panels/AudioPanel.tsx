@@ -10,7 +10,7 @@ import {
 import {
   generateTTS, generateSFX, downloadBlob,
   isolateVoice, normalizeAudio, getAudioVoices,
-  type PersonaInfo, type VoiceInfo, type Job,
+  type PersonaInfo, type VoiceInfo, type Job, authFetch, withApiToken,
 } from "@/lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -48,7 +48,7 @@ interface NormalizeResult {
 async function pollJob(jobId: string, onMsg?: (m: string) => void): Promise<{ status: "completed" | "failed"; result?: Record<string, unknown>; error?: string }> {
   while (true) {
     await new Promise((r) => setTimeout(r, 700));
-    const res = await fetch(`${API_BASE}/api/v1/jobs/${jobId}`);
+    const res = await authFetch(`${API_BASE}/api/v1/jobs/${jobId}`);
     const j = await res.json();
     if (onMsg && j.message) onMsg(j.message);
     if (j.status === "completed") return { status: "completed", result: j.result };
@@ -145,7 +145,7 @@ export default function AudioPanel() {
       if (out.status === "completed") {
         const r = (out.result || {}) as Record<string, unknown>;
         setSfxResult({
-          url: `${API_BASE}/api/v1/jobs/${job.job_id}/download?t=${Date.now()}`,
+          url: withApiToken(`${API_BASE}/api/v1/jobs/${job.job_id}/download?t=${Date.now()}`),
           meta: {
             engine: String(r.engine || "unknown"),
             method: String(r.method || "Procedural synthesis"),
@@ -184,7 +184,7 @@ export default function AudioPanel() {
       if (out.status === "completed") {
         const r = (out.result || {}) as Record<string, unknown>;
         setTtsResult({
-          url: `${API_BASE}/api/v1/jobs/${job.job_id}/download?t=${Date.now()}`,
+          url: withApiToken(`${API_BASE}/api/v1/jobs/${job.job_id}/download?t=${Date.now()}`),
           meta: {
             voice: String(r.voice || "Amy"),
             persona: r.persona ? String(r.persona) : null,

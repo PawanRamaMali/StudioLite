@@ -322,6 +322,7 @@ Copy `config.example.json` to `config.json` (git-ignored) and edit.
 | `CUDA_VISIBLE_DEVICES` | Which GPU(s) to expose |
 | `PYTORCH_CUDA_ALLOC_CONF` | Memory allocator tuning |
 | `STUDIOLITE_AUTH` | `on` or `off` for API bearer auth |
+| `STUDIOLITE_API_TOKEN` | Token the Next.js server hands to the UI; the launchers set it from `.auth` |
 | `STUDIOLITE_LICENSE_FILE` | Custom path for the offline license |
 | `GEMINI_API_KEY`, `GROQ_API_KEY` | Cloud LLM backends (optional) |
 

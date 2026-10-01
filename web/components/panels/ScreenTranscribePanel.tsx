@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
+import { authFetch, withApiToken } from "@/lib/api";
 import {
   MonitorPlay, ScanText, Square, Download, Loader2, AlertCircle,
   Copy, Check, Server, Sparkles, FileText, FileCode2, RefreshCw, Settings2,
@@ -110,7 +111,7 @@ export default function ScreenTranscribePanel() {
   // user toggles to "Local capture".
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_BASE}/api/v1/screen/monitors`)
+    authFetch(`${API_BASE}/api/v1/screen/monitors`)
       .then((r) => r.json())
       .then((data: { monitors: Monitor[] }) => {
         if (cancelled) return;
@@ -131,7 +132,7 @@ export default function ScreenTranscribePanel() {
       ? `${API_BASE}/api/v1/llm/models?host=${encodeURIComponent(targetHost)}`
       : `${API_BASE}/api/v1/llm/models`;
     try {
-      const r = await fetch(url, { cache: "no-store" });
+      const r = await authFetch(url, { cache: "no-store" });
       if (!r.ok) throw new Error(`HTTP ${r.status} - this build may not have the LLM endpoints. Restart the API server.`);
       const data: LLMCatalog = await r.json();
       // Reject responses that don't look like a real catalog (e.g., a 404 body
@@ -170,7 +171,7 @@ export default function ScreenTranscribePanel() {
     setLlmError(null);
     setLlmResult(null);
     try {
-      const res = await fetch(`${API_BASE}/api/v1/screen/restructure`, {
+      const res = await authFetch(`${API_BASE}/api/v1/screen/restructure`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -236,7 +237,7 @@ export default function ScreenTranscribePanel() {
         qp.set("monitor", String(monitor));
         qp.set("fps", String(fps));
       }
-      const ws = new WebSocket(`${WS_BASE}/api/v1/screen/live?${qp.toString()}`);
+      const ws = new WebSocket(withApiToken(`${WS_BASE}/api/v1/screen/live?${qp.toString()}`));
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
 
@@ -393,7 +394,7 @@ export default function ScreenTranscribePanel() {
 
   const downloadFile = useCallback(async (url: string, filename: string) => {
     try {
-      const res = await fetch(API_BASE + url, { cache: "no-store" });
+      const res = await authFetch(API_BASE + url, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();
       const objectUrl = URL.createObjectURL(blob);

@@ -69,6 +69,17 @@ foreach ($p in 8000, 3000) {
     }
 }
 
+# Mint the API token up front (api_server reuses .auth) so the web server
+# can hand the same token to the UI; see web/app/layout.tsx.
+$authFile = Join-Path $root '.auth'
+if (-not "$(if (Test-Path $authFile) { Get-Content -Raw $authFile })".Trim()) {
+    $bytes = New-Object byte[] 32
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $token = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    [System.IO.File]::WriteAllText($authFile, $token)
+}
+$env:STUDIOLITE_API_TOKEN = "$(Get-Content -Raw $authFile)".Trim()
+
 Write-Host 'Starting API server  (uvicorn) on http://localhost:8000 ...'
 $apiProc = Start-Process -FilePath $venvPython `
     -ArgumentList @('-u', '-m', 'uvicorn', 'api_server:app', '--host', '127.0.0.1', '--port', '8000', '--ws-ping-interval', '30', '--ws-ping-timeout', '90') `

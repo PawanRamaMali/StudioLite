@@ -80,6 +80,20 @@ async def require_auth(token: Optional[str] = Depends(_api_key_scheme)) -> None:
                             detail="Missing or invalid X-StudioLite-Token header.")
 
 
+async def _ws_authorized(websocket: WebSocket) -> bool:
+    """Websocket counterpart of the HTTP auth middleware, which never sees
+    ws handshakes. Browsers can't set headers on ws, so the token comes as
+    `?token=`. On failure the handshake is rejected (close before accept)
+    and the handler should return immediately."""
+    if not _AUTH_ENABLED:
+        return True
+    token = websocket.query_params.get("token", "")
+    if token and secrets.compare_digest(token, API_TOKEN):
+        return True
+    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+    return False
+
+
 _default_origins = "http://localhost:3000,http://127.0.0.1:3000"
 _origins = [o.strip() for o in os.environ.get(
     "STUDIOLITE_ALLOWED_ORIGINS", _default_origins).split(",") if o.strip()]
@@ -4457,6 +4471,8 @@ async def live_transcribe_ws(websocket: WebSocket):
     """
     import asyncio
 
+    if not await _ws_authorized(websocket):
+        return
     # Accept before touching `transcriber`: its module-level faster_whisper
     # import takes ~5-10s cold and would block the event loop, so the
     # handshake (and any client retry) missed the UI's 8s connect timeout.
@@ -4746,6 +4762,8 @@ async def live_screen_ws(websocket: WebSocket):
     import asyncio
     from screen_ocr import LiveScreenOCR, capture_local_jpeg
 
+    if not await _ws_authorized(websocket):
+        return
     await websocket.accept()
     qp = websocket.query_params
     session_id = qp.get("session") or str(uuid.uuid4())
@@ -6220,6 +6238,8 @@ async def film_stream(websocket: WebSocket, project_id: str):
     """Push orchestrator events to the panel as they happen."""
     import asyncio
     from filmmaker import projects as _fp, orchestrator as _fo
+    if not await _ws_authorized(websocket):
+        return
     await websocket.accept()
     try:
         proj = _fp.load(OUTPUT_DIR, project_id)

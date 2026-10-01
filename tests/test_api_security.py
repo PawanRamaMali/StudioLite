@@ -83,6 +83,43 @@ class TestAuthMiddleware:
         assert r.status_code != 401
 
 
+class TestWebsocketAuth:
+    """The HTTP middleware never sees ws handshakes, so each ws handler
+    checks `?token=` itself. The film stream route is the probe: with auth
+    passed, an unknown project is accepted and then closed with 4404."""
+
+    _URL = "/api/v1/films/no-such-project/stream"
+
+    def _close_code(self, client, url):
+        from starlette.websockets import WebSocketDisconnect
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(url) as ws:
+                ws.receive_json()
+        return exc.value.code
+
+    def test_ws_rejected_without_token(self, monkeypatch, tmp_path):
+        api, client = _fresh_api(monkeypatch, tmp_path, auth="on")
+        assert self._close_code(client, self._URL) == 1008
+
+    def test_ws_rejected_with_wrong_token(self, monkeypatch, tmp_path):
+        api, client = _fresh_api(monkeypatch, tmp_path, auth="on")
+        assert self._close_code(client, self._URL + "?token=nope") == 1008
+
+    def test_ws_accepts_valid_token(self, monkeypatch, tmp_path):
+        api, client = _fresh_api(monkeypatch, tmp_path, auth="on")
+        token = open(api.AUTH_FILE, encoding="utf-8").read().strip()
+        assert self._close_code(client, f"{self._URL}?token={token}") == 4404
+
+    def test_ws_open_when_auth_off(self, monkeypatch, tmp_path):
+        api, client = _fresh_api(monkeypatch, tmp_path, auth="off")
+        assert self._close_code(client, self._URL) == 4404
+
+    @pytest.mark.parametrize("path", ["/api/v1/transcribe/live", "/api/v1/screen/live"])
+    def test_live_ws_routes_reject_without_token(self, monkeypatch, tmp_path, path):
+        api, client = _fresh_api(monkeypatch, tmp_path, auth="on")
+        assert self._close_code(client, path) == 1008
+
+
 class TestUploadHardening:
     def test_upload_rejects_wrong_extension(self, monkeypatch, tmp_path):
         api, client = _fresh_api(monkeypatch, tmp_path, auth="off")

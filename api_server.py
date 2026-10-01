@@ -4455,8 +4455,10 @@ async def live_transcribe_ws(websocket: WebSocket):
             {"type":"error","message":..}
     """
     import asyncio
-    from transcriber import LiveTranscriber
 
+    # Accept before touching `transcriber`: its module-level faster_whisper
+    # import takes ~5-10s cold and would block the event loop, so the
+    # handshake (and any client retry) missed the UI's 8s connect timeout.
     await websocket.accept()
     qp = websocket.query_params
     session_id = qp.get("session") or str(uuid.uuid4())
@@ -4533,14 +4535,18 @@ async def live_transcribe_ws(websocket: WebSocket):
                 break
             transcriber.feed_pcm16(extra)
 
-    try:
-        transcriber = LiveTranscriber(
+    def _make_transcriber() -> "LiveTranscriber":
+        from transcriber import LiveTranscriber
+        return LiveTranscriber(
             session_id=session_id,
             transcripts_dir=TRANSCRIPTS_DIR,
             model_size=model_size,
             language=language,
             translate_to_english=translate,
         )
+
+    try:
+        transcriber = await asyncio.to_thread(_make_transcriber)
         await websocket.send_json({"type": "ready", "session": session_id, "device": transcriber.device})
         await websocket.send_json({"type": "status", "stage": "loading_model", "model": model_size})
 

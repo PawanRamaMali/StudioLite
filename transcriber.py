@@ -144,8 +144,6 @@ class Transcriber:
             return result
 
         try:
-            from faster_whisper import WhisperModel
-
             device = get_device()
             compute_type = self.config.compute_type
 
@@ -157,12 +155,8 @@ class Transcriber:
             if progress_callback:
                 progress_callback("Loading model...")
 
-            # Load model
-            self._model = WhisperModel(
-                self.config.model_size,
-                device=device,
-                compute_type=compute_type
-            )
+            # Load model (shared with live sessions, so one copy per config)
+            self._model = _get_whisper_model(self.config.model_size, device, compute_type)
 
             if progress_callback:
                 progress_callback("Transcribing...")
@@ -315,18 +309,18 @@ LIVE_TAIL_SECONDS = 4.0           # last N seconds of buffer treated as unstable
 LIVE_DECODE_INTERVAL_SECONDS = 2.5  # re-decode after this much new audio
 LIVE_MIN_DECODE_SECONDS = 1.5     # don't decode buffers shorter than this
 
-# Process-wide model cache so connections share weights
-_LIVE_MODEL_CACHE: Dict[tuple, Any] = {}
+# Process-wide model cache shared by file and live transcription
+_WHISPER_MODEL_CACHE: Dict[tuple, Any] = {}
 
 
-def _get_live_model(model_size: str, device: str, compute_type: str):
+def _get_whisper_model(model_size: str, device: str, compute_type: str):
     """Lazy-load and cache a faster-whisper model keyed by (size, device, compute)."""
     from faster_whisper import WhisperModel
     key = (model_size, device, compute_type)
-    if key not in _LIVE_MODEL_CACHE:
-        logger.info(f"Loading live whisper model: {key}")
-        _LIVE_MODEL_CACHE[key] = WhisperModel(model_size, device=device, compute_type=compute_type)
-    return _LIVE_MODEL_CACHE[key]
+    if key not in _WHISPER_MODEL_CACHE:
+        logger.info(f"Loading whisper model: {key}")
+        _WHISPER_MODEL_CACHE[key] = WhisperModel(model_size, device=device, compute_type=compute_type)
+    return _WHISPER_MODEL_CACHE[key]
 
 
 class LiveTranscriber:
@@ -389,7 +383,7 @@ class LiveTranscriber:
 
     def _ensure_model(self):
         if self._model is None:
-            self._model = _get_live_model(self.model_size, self.device, self.compute_type)
+            self._model = _get_whisper_model(self.model_size, self.device, self.compute_type)
 
     def maybe_decode(self) -> Optional[Dict[str, Any]]:
         """

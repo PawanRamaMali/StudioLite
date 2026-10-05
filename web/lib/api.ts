@@ -969,6 +969,101 @@ export const librarySearchTranscripts = (query: string, limit = 24) =>
     { method: "POST", body: JSON.stringify({ query, limit }) },
   );
 
+// ---- Faces: detect + cluster into persons --------------------------------
+
+export interface LibraryFacesSettings {
+  enabled: boolean;
+  models_present: boolean;
+  model: string;
+  dim: number;
+}
+
+export interface LibraryPerson {
+  id: number;
+  name: string | null;
+  face_count: number;
+  cover_face_id: number | null;
+  cover_thumb: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface LibraryPersonFace {
+  id: number;
+  video_id: number;
+  t_sec: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  det_score: number;
+  thumb_path: string | null;
+  abs_path: string;
+  duration_sec: number | null;
+}
+
+export interface LibraryPersonDetail {
+  id: number;
+  name: string | null;
+  face_count: number;
+  cover_face_id: number | null;
+  created_at: number;
+  updated_at: number;
+  faces: LibraryPersonFace[];
+}
+
+export const libraryFacesSettings = () =>
+  apiFetch<LibraryFacesSettings>("/api/v1/library/faces/settings");
+
+export const libraryFacesSettingsUpdate = (enabled: boolean) =>
+  apiFetch<{ enabled: boolean }>(
+    "/api/v1/library/faces/settings",
+    { method: "PUT", body: JSON.stringify({ enabled }) },
+  );
+
+export const libraryFacesIndex = () =>
+  apiFetch<{ job_id: string }>(
+    "/api/v1/library/faces/index", { method: "POST" },
+  );
+
+export const libraryFacesRecluster = () =>
+  apiFetch<{ persons_before: number; persons_after: number; faces: number; kept_names: number }>(
+    "/api/v1/library/faces/recluster", { method: "POST" },
+  );
+
+export const libraryListPersons = () =>
+  apiFetch<{ persons: LibraryPerson[] }>("/api/v1/library/persons");
+
+export const libraryGetPerson = (id: number, limit = 60) =>
+  apiFetch<LibraryPersonDetail>(
+    `/api/v1/library/persons/${id}?limit_faces=${limit}`,
+  );
+
+export const libraryRenamePerson = (id: number, name: string | null) =>
+  apiFetch<{ renamed: number; name: string | null }>(
+    `/api/v1/library/persons/${id}/name`,
+    { method: "PATCH", body: JSON.stringify({ name }) },
+  );
+
+export const libraryForgetPerson = (id: number, remember_as_forgotten = false) =>
+  apiFetch<{ faces_removed: number; thumbs_removed: number }>(
+    `/api/v1/library/persons/${id}/forget?remember_as_forgotten=${remember_as_forgotten}`,
+    { method: "DELETE" },
+  );
+
+export const libraryFacesWipeAll = () =>
+  apiFetch<{ faces_removed: number; thumbs_removed: number; persons_removed: number }>(
+    "/api/v1/library/faces", { method: "DELETE" },
+  );
+
+// The face thumbnails are stored under /static/library/face_thumbs by filename.
+export function libraryFaceThumbUrl(thumb_path: string | null): string {
+  if (!thumb_path) return "";
+  const base = thumb_path.split(/[\\/]/).pop() || "";
+  const t = getApiToken();
+  return `${API_BASE}/static/library/face_thumbs/${encodeURIComponent(base)}${t ? `?token=${encodeURIComponent(t)}` : ""}`;
+}
+
 // ---- Batch re-encode of legacy formats ------------------------------------
 
 export type LibraryReencodeTarget = "h264" | "h265";

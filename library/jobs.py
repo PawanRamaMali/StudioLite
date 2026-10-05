@@ -314,3 +314,206 @@ class EmbedJob(threading.Thread):
                            i / max(len(remaining), 1))
 
         self._push("Encoding complete", 1.0, "completed")
+
+
+class FaceIndexJob(threading.Thread):
+    """Walk every video that hasn't been face-indexed, sample ~1 frame/sec
+    (capped), run YuNet + SFace per frame, write per-face thumbnails + a
+    row in `face_detections`, and finally hand the new face ids to
+    `people.assign_or_cluster()` so persons get built up incrementally.
+
+    Honors the global `faces_enabled` toggle — refuses to run if the
+    user has it off.
+    """
+
+    def __init__(self, store: LibraryStore, library_dir: str,
+                 on_update: Callable[[dict], None],
+                 cancel_event: Optional[threading.Event] = None,
+                 fps_sample: float = 1.0,
+                 max_frames_per_video: int = 60,
+                 allow_download: bool = True):
+        super().__init__(daemon=True, name=f"library-faces-{int(time.time())}")
+        self.store = store
+        self.library_dir = library_dir
+        self.on_update = on_update
+        self._cancel = cancel_event or threading.Event()
+        self.fps_sample = fps_sample
+        self.max_frames = max_frames_per_video
+        self.allow_download = allow_download
+        self.counts = {"videos": 0, "done": 0, "faces": 0, "skipped": 0}
+        self._error: Optional[str] = None
+
+    def cancel(self) -> None: self._cancel.set()
+    def _cancelled(self) -> bool: return self._cancel.is_set()
+
+    def _push(self, message: str, progress: float, status: str = "running") -> None:
+        try:
+            self.on_update({
+                "status": "cancelled" if self._cancelled() and status == "running" else status,
+                "progress": max(0.0, min(1.0, progress)),
+                "message": message,
+                "counts": dict(self.counts),
+                "error": self._error,
+            })
+        except Exception:
+            logger.exception("on_update raised; dropping")
+
+    def _needing(self) -> list:
+        """Videos that are missing a face-index for the current model."""
+        if not self.store._ok: return []
+        try:
+            with self.store._connect() as c:
+                rows = c.execute(
+                    "SELECT * FROM videos WHERE media_kind='video' AND missing=0 "
+                    "AND (faces_indexed_at IS NULL OR faces_model IS NULL) "
+                    "ORDER BY size_bytes ASC LIMIT ?", (200_000,),
+                ).fetchall()
+            # _video_from_row is imported locally where it's defined to avoid cycles
+            from .store import _video_from_row
+            return [_video_from_row(r) for r in rows]
+        except Exception:
+            return []
+
+    def run(self) -> None:
+        try:
+            from . import faces as _faces, people as _people
+        except Exception as e:
+            self._error = f"face modules unavailable: {e}"
+            self._push(self._error, 1.0, "failed"); return
+
+        if not _people.faces_enabled(self.store):
+            self._error = "Face recognition is disabled. Toggle it on in Settings."
+            self._push(self._error, 1.0, "failed"); return
+
+        try:
+            _faces.ensure_models(self.library_dir, allow_download=self.allow_download)
+        except _faces.FacesUnavailable as e:
+            self._error = str(e)
+            self._push(self._error, 1.0, "failed"); return
+
+        runtime = _faces.FaceRuntime(self.library_dir, allow_download=self.allow_download)
+        remaining = self._needing()
+        self.counts["videos"] = len(remaining)
+        if not remaining:
+            self._push("All videos are already face-indexed.", 1.0, "completed"); return
+
+        thumbs_root = os.path.join(self.library_dir, "face_thumbs")
+        os.makedirs(thumbs_root, exist_ok=True)
+
+        self._push(f"Loading YuNet + SFace…", 0.02)
+        # Import heavy deps here (cv2) so a disabled flow doesn't pay the import.
+        try:
+            import cv2
+        except Exception as e:
+            self._error = f"opencv-python not usable: {e}"
+            self._push(self._error, 1.0, "failed"); return
+
+        new_face_ids: list = []
+
+        for i, v in enumerate(remaining, 1):
+            if self._cancelled():
+                self._push("Cancelled", i / max(len(remaining), 1), "cancelled"); return
+            if not os.path.isfile(v.abs_path):
+                self.store.mark_missing(v.id)
+                self.counts["skipped"] += 1
+                continue
+
+            # Decide which timestamps to sample. For a short clip, grab 2–3
+            # frames; for a long one, cap at `max_frames` evenly spaced.
+            dur = float(v.duration_sec or 0.0)
+            if dur <= 0:
+                sample_ts = [0.5]
+            else:
+                step = max(1.0 / self.fps_sample, dur / self.max_frames)
+                sample_ts = []
+                t = 0.5
+                while t < dur and len(sample_ts) < self.max_frames:
+                    sample_ts.append(t); t += step
+
+            faces_this_video = 0
+            cap = cv2.VideoCapture(v.abs_path)
+            if not cap.isOpened():
+                self.counts["skipped"] += 1
+                continue
+            try:
+                for t_sec in sample_ts:
+                    if self._cancelled(): break
+                    cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t_sec * 1000))
+                    ok, bgr = cap.read()
+                    if not ok or bgr is None: continue
+                    detections = runtime.detect_and_embed(bgr)
+                    for det in detections:
+                        face_id = self._store_face(v.id, t_sec, det, thumbs_root)
+                        if face_id:
+                            new_face_ids.append(face_id)
+                            faces_this_video += 1
+            finally:
+                cap.release()
+
+            self.store.update_video_metadata(
+                v.id,
+                scanned_at=time.time(),
+            )
+            # Mark the video face-indexed even when zero faces found so we
+            # don't re-scan it endlessly.
+            try:
+                with self.store._lock:
+                    with self.store._connect() as c:
+                        c.execute(
+                            "UPDATE videos SET faces_indexed_at=?, faces_model=? WHERE id=?",
+                            (time.time(), _faces.EMBED_MODEL, v.id),
+                        )
+            except Exception:
+                pass
+
+            self.counts["done"] += 1
+            self.counts["faces"] += faces_this_video
+            if i % 1 == 0:
+                self._push(f"[{i}/{self.counts['videos']}] {os.path.basename(v.abs_path)}: "
+                           f"{faces_this_video} face{'s' if faces_this_video != 1 else ''}",
+                           i / max(len(remaining), 1))
+
+        # Cluster the newly-added faces.
+        if new_face_ids:
+            self._push("Clustering new faces into persons…", 0.98)
+            try:
+                res = _people.assign_or_cluster(self.store, new_face_ids)
+                self._push(
+                    f"Done · {self.counts['faces']} faces · "
+                    f"{res['assigned']} assigned, {res['new_persons']} new people",
+                    1.0, "completed",
+                )
+                return
+            except Exception as e:
+                logger.exception("cluster step failed")
+                self._error = f"Clustering failed: {e}"
+                self._push(self._error, 1.0, "failed"); return
+
+        self._push("Done — no faces detected.", 1.0, "completed")
+
+    def _store_face(self, video_id: int, t_sec: float, det, thumbs_root: str) -> Optional[int]:
+        """Insert one face row + write the thumb jpg. Returns the new id."""
+        try:
+            import cv2
+            from .embeddings import pack_embedding
+            from . import faces as _faces
+            # Write thumbnail first so we know its path for the DB row.
+            tmp_name = f"{video_id}_{int(t_sec*1000)}_{os.getpid()}_{time.time_ns()}.jpg"
+            thumb_path = os.path.join(thumbs_root, tmp_name)
+            cv2.imwrite(thumb_path, det.aligned_bgr)
+            now = time.time()
+            with self.store._lock:
+                with self.store._connect() as c:
+                    cur = c.execute(
+                        "INSERT INTO face_detections(video_id, t_sec, x, y, w, h, "
+                        "det_score, embedding, model, thumb_path, created_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                        (video_id, float(t_sec),
+                         det.bbox[0], det.bbox[1], det.bbox[2], det.bbox[3],
+                         det.det_score, pack_embedding(det.embedding),
+                         _faces.EMBED_MODEL, thumb_path, now),
+                    )
+                    return int(cur.lastrowid or 0)
+        except Exception as e:
+            logger.debug("_store_face failed: %s", e)
+            return None

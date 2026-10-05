@@ -95,6 +95,57 @@ CREATE TABLE IF NOT EXISTS scans (
     skipped      INTEGER DEFAULT 0,
     error        TEXT
 );
+
+-- Face recognition — opt-in, globally gatable via library_settings('faces_enabled').
+-- `persons` holds one row per clustered identity (centroid is a float32[128] blob,
+-- SFace L2-normalized). `face_detections` holds one row per detected face in a
+-- single video frame.
+CREATE TABLE IF NOT EXISTS persons (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT,
+    centroid        BLOB,
+    face_count      INTEGER DEFAULT 0,
+    cover_face_id   INTEGER,
+    hidden          INTEGER DEFAULT 0,
+    created_at      REAL NOT NULL,
+    updated_at      REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS face_detections (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id    INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    t_sec       REAL NOT NULL,
+    x           REAL,
+    y           REAL,
+    w           REAL,
+    h           REAL,
+    det_score   REAL,
+    embedding   BLOB NOT NULL,          -- float32[128]
+    model       TEXT,                   -- e.g. "sface-2021dec"
+    person_id   INTEGER REFERENCES persons(id) ON DELETE SET NULL,
+    thumb_path  TEXT,
+    created_at  REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_faces_video  ON face_detections(video_id);
+CREATE INDEX IF NOT EXISTS idx_faces_person ON face_detections(person_id);
+
+-- Centroids the user asked us to "forget" so a future scan skips re-detecting
+-- the same identity. Opt-in; populated by DELETE /library/persons/{id}/forget
+-- when the user ticks "don't re-detect".
+CREATE TABLE IF NOT EXISTS forgotten_centroids (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    centroid    BLOB NOT NULL,
+    reason      TEXT,
+    created_at  REAL NOT NULL
+);
+
+-- Generic settings keyed by string. Used for the faces_enabled toggle today;
+-- other key/value preferences can land here without a schema change.
+CREATE TABLE IF NOT EXISTS library_settings (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);
 """
 
 
@@ -164,6 +215,8 @@ class LibraryStore:
             ("transcript_json",  "TEXT"),
             ("transcript_model", "TEXT"),
             ("transcribed_at",   "REAL"),
+            ("faces_indexed_at", "REAL"),
+            ("faces_model",      "TEXT"),
         ]
         for name, coltype in needs:
             if name not in cols:

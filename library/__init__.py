@@ -13,6 +13,7 @@ Public surface used by api/routers/library.py:
 """
 
 from . import store, scanner, dedupe, thumbs, probe, phash, hasher, transcribe, reencode  # noqa: F401
+from . import faces, people  # noqa: F401
 from .store import LibraryStore  # noqa: F401
 
 # T2 (content index) and T3 (enhance) are optional-import - they pull in

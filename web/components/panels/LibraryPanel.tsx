@@ -9,6 +9,7 @@ import {
   AlertCircle, Loader2, HardDrive, Folder, Film, Sparkles,
   Search, X, CheckCircle2, Layers, ArrowRight, Wand2, Zap, Grid3x3, Tag,
   Image as ImageIcon, FolderX, Mic, Type as TypeIcon, ArrowRightLeft,
+  Users, User as UserIcon, Pencil,
 } from "lucide-react";
 import {
   libraryAddRoot, libraryAddRootsBatch, libraryBatchDelete, libraryDeleteRoot,
@@ -21,6 +22,10 @@ import {
   libraryCleanupEmptyFolders,
   libraryStartTranscribe, libraryGetTranscript, librarySearchTranscripts,
   libraryLegacyVideos, libraryStartReencode,
+  libraryFacesSettings, libraryFacesSettingsUpdate, libraryFacesIndex,
+  libraryFacesRecluster, libraryListPersons, libraryGetPerson,
+  libraryRenamePerson, libraryForgetPerson, libraryFacesWipeAll,
+  libraryFaceThumbUrl,
   getJob,
   type KeeperStrategy, type LibraryBatchDeleteResult, type LibraryDeletionPlan,
   type LibraryDuplicates, type LibraryRoot, type LibraryStats, type LibraryVideo,
@@ -28,6 +33,7 @@ import {
   type LibraryEnhanceRecommendResponse, type LibraryEnhancePreset,
   type LibraryMediaKind, type LibraryTranscript, type LibraryTranscriptHit,
   type LibraryLegacyVideosResponse, type LibraryReencodeTarget,
+  type LibraryFacesSettings, type LibraryPerson, type LibraryPersonDetail,
   type Job,
 } from "@/lib/api";
 
@@ -56,7 +62,7 @@ function baseName(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
-type ViewMode = "browse" | "duplicates" | "search" | "clusters";
+type ViewMode = "browse" | "duplicates" | "search" | "clusters" | "people";
 
 export default function LibraryPanel() {
   const [stats, setStats] = useState<LibraryStats | null>(null);
@@ -133,6 +139,9 @@ export default function LibraryPanel() {
           <Button variant={view === "clusters" ? "primary" : "secondary"} size="sm" onClick={() => setView("clusters")}>
             <Grid3x3 className="w-3.5 h-3.5 mr-1.5" /> Clusters
           </Button>
+          <Button variant={view === "people" ? "primary" : "secondary"} size="sm" onClick={() => setView("people")}>
+            <Users className="w-3.5 h-3.5 mr-1.5" /> People
+          </Button>
           <Button variant={view === "duplicates" ? "primary" : "secondary"} size="sm" onClick={() => setView("duplicates")}>
             <Copy className="w-3.5 h-3.5 mr-1.5" /> Duplicates
           </Button>
@@ -173,6 +182,7 @@ export default function LibraryPanel() {
           {view === "browse" && <BrowseView onError={setErr} />}
           {view === "search" && <SearchView onError={setErr} />}
           {view === "clusters" && <ClustersView onError={setErr} />}
+          {view === "people" && <PeopleView onError={setErr} />}
           {view === "duplicates" && <DuplicatesView onError={setErr} onChange={refreshStatsAndRoots} />}
         </div>
       </div>
@@ -1912,6 +1922,359 @@ function renderSpeechSnippet(raw: string): React.ReactNode {
     }
     return <span key={i}>{p}</span>;
   });
+}
+
+// ---------------------------------------------------------------------------
+// People view (face recognition — opt-in)
+// ---------------------------------------------------------------------------
+
+function PeopleView({ onError }: { onError: (s: string) => void }) {
+  const [settings, setSettings] = useState<LibraryFacesSettings | null>(null);
+  const [persons, setPersons] = useState<LibraryPerson[] | null>(null);
+  const [selected, setSelected] = useState<LibraryPersonDetail | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [progress, setProgress] = useState<Job | null>(null);
+  const [reclustering, setReclustering] = useState(false);
+
+  const loadAll = useCallback(async () => {
+    try {
+      const [s, p] = await Promise.all([
+        libraryFacesSettings(),
+        libraryListPersons().catch(() => ({ persons: [] })),
+      ]);
+      setSettings(s);
+      setPersons(p.persons);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Failed to load People");
+    }
+  }, [onError]);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadAll();
+  }, [loadAll]);
+
+  // Poll the index job.
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const j = await getJob(jobId);
+        if (cancelled) return;
+        setProgress(j);
+        if (j.status === "completed" || j.status === "failed" || j.status === "cancelled") {
+          loadAll();
+          window.setTimeout(() => setJobId(null), 1500);
+          return;
+        }
+      } catch { /* soft */ }
+      if (!cancelled) window.setTimeout(tick, 1500);
+    };
+    tick();
+    return () => { cancelled = true; };
+  }, [jobId, loadAll]);
+
+  const toggleEnabled = useCallback(async (next: boolean) => {
+    try {
+      await libraryFacesSettingsUpdate(next);
+      await loadAll();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Failed to update settings");
+    }
+  }, [loadAll, onError]);
+
+  const startIndex = useCallback(async () => {
+    try {
+      const r = await libraryFacesIndex();
+      setJobId(r.job_id); setProgress(null);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Could not start face indexing");
+    }
+  }, [onError]);
+
+  const recluster = useCallback(async () => {
+    if (!window.confirm(
+      "Rebuild all person clusters from scratch?\n\n" +
+      "Names are preserved by majority vote per cluster. No face data is deleted."
+    )) return;
+    setReclustering(true);
+    try {
+      await libraryFacesRecluster();
+      await loadAll();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Recluster failed");
+    } finally {
+      setReclustering(false);
+    }
+  }, [loadAll, onError]);
+
+  const wipeAll = useCallback(async () => {
+    if (!window.confirm(
+      "PERMANENTLY delete every detected face, person, and thumbnail?\n\n" +
+      "This cannot be undone. Face indexing stays enabled; the next scan will " +
+      "re-detect everything (unless you also disable face indexing first)."
+    )) return;
+    try {
+      await libraryFacesWipeAll();
+      await loadAll();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Wipe-all failed");
+    }
+  }, [loadAll, onError]);
+
+  const forget = useCallback(async (person: LibraryPerson) => {
+    const remember = window.confirm(
+      `Forget "${person.name || `Person ${person.id}`}"?\n\n` +
+      "Click OK to also remember this identity so a future scan skips re-detecting it.\n" +
+      "Click Cancel to just delete it (future scans may rediscover the same person)."
+    );
+    try {
+      await libraryForgetPerson(person.id, remember);
+      await loadAll();
+      if (selected?.id === person.id) setSelected(null);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Forget failed");
+    }
+  }, [loadAll, onError, selected]);
+
+  const rename = useCallback(async (person: LibraryPerson) => {
+    const next = window.prompt(`Name for Person ${person.id}:`, person.name || "");
+    if (next === null) return;
+    try {
+      await libraryRenamePerson(person.id, next.trim() || null);
+      await loadAll();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Rename failed");
+    }
+  }, [loadAll, onError]);
+
+  const openPerson = useCallback(async (person: LibraryPerson) => {
+    try {
+      setSelected(await libraryGetPerson(person.id));
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Failed to load person");
+    }
+  }, [onError]);
+
+  if (settings === null) {
+    return (
+      <Card className="min-h-[500px] flex items-center justify-center">
+        <Loader2 className="w-5 h-5 text-zinc-500 animate-spin" />
+      </Card>
+    );
+  }
+
+  if (!settings.enabled) {
+    return (
+      <Card className="min-h-[500px]">
+        <CardTitle className="text-sm flex items-center gap-2 mb-3">
+          <Users className="w-4 h-4 text-indigo-400" /> People — face recognition
+        </CardTitle>
+        <div className="border border-amber-500/30 bg-amber-500/5 rounded-lg p-4 text-xs text-amber-200/90 leading-relaxed">
+          <strong className="text-amber-100 block mb-1">Face recognition is off.</strong>
+          Turning this on indexes faces across your watched folders and groups them into
+          per-person clusters. All data stays local; nothing is uploaded. You can rename
+          people, forget individuals, or wipe everything at any time.
+          <p className="mt-2 text-amber-200/70">
+            The first run downloads two Apache-licensed OpenCV Zoo models (~37 MB total)
+            into <code className="text-amber-100">.mp/library/face_models/</code>.
+          </p>
+          <Button className="mt-3" size="sm" onClick={() => toggleEnabled(true)}>
+            <Users className="w-3.5 h-3.5 mr-1.5" /> Enable face recognition
+          </Button>
+        </div>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="min-h-[500px]">
+      <div className="flex items-center gap-2 mb-3 flex-wrap">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Users className="w-4 h-4 text-indigo-400" /> People
+        </CardTitle>
+        <span className="text-[10px] text-zinc-500">
+          {(persons?.length ?? 0)} person{(persons?.length ?? 0) === 1 ? "" : "s"} · {settings.model}
+          {!settings.models_present && <span className="text-amber-400"> · models will download on first index</span>}
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          <Button variant="secondary" size="sm" onClick={startIndex}
+                  disabled={!!jobId && progress?.status === "running"}
+                  title="Scan unindexed videos for faces and update person clusters">
+            <Sparkles className="w-3.5 h-3.5 mr-1.5" /> Index faces
+          </Button>
+          <Button variant="secondary" size="sm" onClick={recluster} disabled={reclustering}
+                  title="Rebuild all person clusters from scratch">
+            {reclustering
+              ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Reclustering…</>
+              : <><RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Recluster</>}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => toggleEnabled(false)}
+                  title="Pause face recognition. Existing data stays on disk; nothing new is indexed.">
+            Pause
+          </Button>
+          <Button variant="danger" size="sm" onClick={wipeAll}
+                  title="Permanently delete every detected face, person, and thumbnail">
+            <Trash2 className="w-3.5 h-3.5 mr-1.5" /> Wipe all
+          </Button>
+        </div>
+      </div>
+
+      {jobId && progress && (
+        <div className="mb-3 p-2 border border-zinc-800 rounded-lg bg-zinc-950/40">
+          <div className="text-[11px] text-zinc-400 flex items-center gap-2 mb-1">
+            {progress.status === "completed"
+              ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
+              : progress.status === "failed"
+              ? <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+              : <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin" />}
+            <span>{progress.message || "…"}</span>
+            <span className="ml-auto font-mono">
+              {Math.round(((progress.progress ?? 0) as number) * 100)}%
+            </span>
+          </div>
+          <div className="h-1 bg-zinc-800 rounded overflow-hidden">
+            <div className={`h-full transition-all ${progress.status === "failed" ? "bg-red-500" : "bg-indigo-500"}`}
+                 style={{ width: `${Math.round(((progress.progress ?? 0) as number) * 100)}%` }} />
+          </div>
+          {progress.error && <p className="text-[10px] text-red-300 mt-1">{progress.error}</p>}
+        </div>
+      )}
+
+      {!persons?.length && (
+        <p className="text-xs text-zinc-500 text-center py-10">
+          No people yet. Click <span className="text-zinc-200">Index faces</span> to run
+          the detector across your videos. Faces that appear at least twice form a cluster.
+        </p>
+      )}
+
+      {!!persons?.length && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+          {persons.map((p) => (
+            <div key={p.id}
+                 className={`group relative bg-zinc-950/40 border rounded-lg overflow-hidden transition-colors ${
+                   selected?.id === p.id ? "border-indigo-500/50" : "border-zinc-800 hover:border-zinc-700"
+                 }`}>
+              <button onClick={() => openPerson(p)} className="block w-full">
+                <div className="relative bg-black aspect-square">
+                  {p.cover_thumb ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={libraryFaceThumbUrl(p.cover_thumb)}
+                         alt={p.name || `Person ${p.id}`}
+                         loading="lazy" className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-zinc-700">
+                      <UserIcon className="w-10 h-10" />
+                    </div>
+                  )}
+                  <div className="absolute bottom-1 right-1 text-[9px] font-mono bg-black/70 text-zinc-200 rounded px-1">
+                    {p.face_count} face{p.face_count === 1 ? "" : "s"}
+                  </div>
+                </div>
+              </button>
+              <div className="p-2 flex items-center gap-1">
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs text-zinc-100 truncate">{p.name || `Person ${p.id}`}</div>
+                </div>
+                <button onClick={() => rename(p)} title="Rename"
+                        className="text-zinc-500 hover:text-zinc-200 flex-shrink-0">
+                  <Pencil className="w-3 h-3" />
+                </button>
+                <button onClick={() => forget(p)} title="Forget this person"
+                        className="text-zinc-500 hover:text-red-400 flex-shrink-0">
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {selected && (
+        <PersonDetailModal
+          person={selected}
+          onClose={() => setSelected(null)}
+          onRename={async () => {
+            if (!selected) return;
+            const name = window.prompt("Name:", selected.name || "");
+            if (name === null) return;
+            await libraryRenamePerson(selected.id, name.trim() || null);
+            setSelected(await libraryGetPerson(selected.id));
+            await loadAll();
+          }}
+        />
+      )}
+    </Card>
+  );
+}
+
+function PersonDetailModal({ person, onClose, onRename }: {
+  person: LibraryPersonDetail;
+  onClose: () => void;
+  onRename: () => void;
+}) {
+  // Group faces by video so a person appearing in 10 clips doesn't flood
+  // the modal with 50 near-identical thumbs.
+  const byVideo = useMemo(() => {
+    const m: Record<number, { abs_path: string; faces: typeof person.faces }> = {};
+    for (const f of person.faces) {
+      if (!m[f.video_id]) m[f.video_id] = { abs_path: f.abs_path, faces: [] };
+      m[f.video_id].faces.push(f);
+    }
+    return m;
+  }, [person.faces]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={onClose}>
+      <div className="bg-zinc-900 border border-zinc-800 rounded-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col"
+           onClick={(e) => e.stopPropagation()}>
+        <div className="p-4 border-b border-zinc-800 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold text-zinc-100 flex items-center gap-2">
+              <UserIcon className="w-4 h-4 text-indigo-400" /> {person.name || `Person ${person.id}`}
+            </h2>
+            <p className="text-[11px] text-zinc-500 mt-0.5">
+              {person.face_count} face{person.face_count === 1 ? "" : "s"} across {Object.keys(byVideo).length} video{Object.keys(byVideo).length === 1 ? "" : "s"}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={onRename}>
+              <Pencil className="w-3.5 h-3.5 mr-1.5" /> Rename
+            </Button>
+            <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+        <div className="overflow-y-auto flex-1 p-4 space-y-4">
+          {Object.entries(byVideo).map(([vid, grp]) => (
+            <div key={vid}>
+              <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-2 font-mono truncate" title={grp.abs_path}>
+                {baseName(grp.abs_path)}
+              </div>
+              <div className="grid grid-cols-6 sm:grid-cols-8 md:grid-cols-10 gap-1.5">
+                {grp.faces.map((f) => (
+                  <div key={f.id} className="relative" title={`t=${f.t_sec.toFixed(1)}s · score=${f.det_score.toFixed(2)}`}>
+                    {f.thumb_path ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={libraryFaceThumbUrl(f.thumb_path)}
+                           alt="" loading="lazy"
+                           className="w-full aspect-square object-cover rounded border border-zinc-800" />
+                    ) : (
+                      <div className="w-full aspect-square rounded border border-zinc-800 bg-zinc-950" />
+                    )}
+                    <div className="absolute bottom-0 right-0 text-[8px] font-mono bg-black/70 text-zinc-300 rounded px-0.5">
+                      {f.t_sec.toFixed(1)}s
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------

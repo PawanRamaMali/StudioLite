@@ -5219,10 +5219,11 @@ app.mount("/static/library/thumbs", StaticFiles(directory=os.path.join(LIBRARY_D
           name="library_thumbs")
 
 from library import LibraryStore
-from library.jobs import ScanJob, EmbedJob
+from library.jobs import ScanJob, EmbedJob, FaceIndexJob
 from library.transcribe import TranscribeJob
 from library.reencode import ReencodeJob, TARGET_CODECS, LEGACY_CODECS
 from library import dedupe as _lib_dedupe, thumbs as _lib_thumbs
+from library import people as _lib_people, faces as _lib_faces
 
 _library_store = LibraryStore(os.path.join(LIBRARY_DIR, "library.sqlite3"))
 # job_id -> ScanJob thread, so we can cancel individually
@@ -5686,6 +5687,120 @@ async def library_search_transcripts(req: LibrarySearchTranscriptsRequest):
     short highlighted snippet and the video metadata."""
     hits = _library_store.search_transcripts(req.query, limit=max(1, min(100, req.limit)))
     return {"query": req.query, "hits": hits}
+
+
+# ---------- Faces: detect + cluster into persons (opt-in) -----------------
+
+_FACES_THUMB_DIR = os.path.join(LIBRARY_DIR, "face_thumbs")
+os.makedirs(_FACES_THUMB_DIR, exist_ok=True)
+app.mount("/static/library/face_thumbs", StaticFiles(directory=_FACES_THUMB_DIR),
+          name="library_face_thumbs")
+
+
+class LibraryFacesSettingsRequest(BaseModel):
+    enabled: bool
+
+
+class LibraryPersonRenameRequest(BaseModel):
+    name: Optional[str] = None
+
+
+class LibraryForgetPersonRequest(BaseModel):
+    remember_as_forgotten: bool = False
+
+
+@app.get("/api/v1/library/faces/settings")
+async def library_faces_settings():
+    enabled = _lib_people.faces_enabled(_library_store)
+    return {
+        "enabled": enabled,
+        "models_present": _lib_faces.models_present(LIBRARY_DIR),
+        "model": _lib_faces.EMBED_MODEL,
+        "dim": _lib_faces.EMBED_DIM,
+    }
+
+
+@app.put("/api/v1/library/faces/settings")
+async def library_faces_settings_update(req: LibraryFacesSettingsRequest):
+    _lib_people.set_faces_enabled(_library_store, req.enabled)
+    return {"enabled": req.enabled}
+
+
+@app.post("/api/v1/library/faces/index")
+async def library_faces_index():
+    """Kick off a background face-detection + clustering pass over every
+    un-indexed video. Refuses to run if the global faces toggle is off."""
+    if not _lib_people.faces_enabled(_library_store):
+        raise HTTPException(400, "Face recognition is disabled. "
+                                  "Enable it under Library → Faces settings.")
+    job_id = _create_job("library_faces_index", {})
+
+    def _on_update(payload: dict) -> None:
+        _update_job(
+            job_id,
+            status=payload.get("status") or "running",
+            progress=float(payload.get("progress") or 0.0),
+            message=payload.get("message") or "",
+            result={"counts": payload.get("counts")},
+            error=payload.get("error"),
+        )
+
+    thread = FaceIndexJob(
+        _library_store, LIBRARY_DIR,
+        on_update=_on_update, cancel_event=_cancel_events.get(job_id),
+    )
+    _library_scans[job_id] = thread
+    _update_job(job_id, status="running")
+    thread.start()
+    return {"job_id": job_id}
+
+
+@app.post("/api/v1/library/faces/recluster")
+async def library_faces_recluster():
+    """One-shot full re-cluster of every face. Preserves `name` by majority
+    vote mapping old→new cluster ids."""
+    if not _lib_people.faces_enabled(_library_store):
+        raise HTTPException(400, "Face recognition is disabled.")
+    return _lib_people.recluster_all(_library_store)
+
+
+@app.get("/api/v1/library/persons")
+async def library_list_persons():
+    return {"persons": _lib_people.list_persons(_library_store)}
+
+
+@app.get("/api/v1/library/persons/{person_id}")
+async def library_get_person(person_id: int, limit_faces: int = 60):
+    detail = _lib_people.person_detail(_library_store, person_id,
+                                        limit_faces=max(1, min(500, limit_faces)))
+    if detail is None:
+        raise HTTPException(404, "Person not found")
+    return detail
+
+
+@app.patch("/api/v1/library/persons/{person_id}/name")
+async def library_rename_person(person_id: int, req: LibraryPersonRenameRequest):
+    ok = _lib_people.rename_person(_library_store, person_id, req.name)
+    if not ok:
+        raise HTTPException(404, "Person not found")
+    return {"renamed": person_id, "name": req.name}
+
+
+@app.delete("/api/v1/library/persons/{person_id}/forget")
+async def library_forget_person(person_id: int, remember_as_forgotten: bool = False):
+    """Hard-delete every face + thumb for one cluster. Optionally stash
+    the centroid so a future scan skips re-detecting the identity."""
+    return _lib_people.forget_person(
+        _library_store, person_id,
+        remember_as_forgotten=remember_as_forgotten,
+    )
+
+
+@app.delete("/api/v1/library/faces")
+async def library_faces_wipe_all():
+    """Full privacy wipe — drops every face + person + thumb. Does NOT
+    touch the forgotten-centroids barrier."""
+    return _lib_people.wipe_all(_library_store)
 
 
 # ---------- Batch re-encode of legacy formats -----------------------------

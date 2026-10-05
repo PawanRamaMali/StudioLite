@@ -930,6 +930,16 @@ function ArtifactView({
         <ShotsGallery projectId={projectId} artifact={artifact} />
       )}
 
+      {stage.key === "breakdown" && artifact && !editing && (
+        <BreakdownView artifact={artifact} />
+      )}
+      {stage.key === "storyboard" && artifact && !editing && (
+        <StoryboardView artifact={artifact} />
+      )}
+      {stage.key === "cinematographer" && artifact && !editing && (
+        <CinematographyView artifact={artifact} />
+      )}
+
       {stage.key === "voice_cast" && artifact && !editing && (
         <VoiceCastView artifact={artifact} />
       )}
@@ -953,6 +963,7 @@ function ArtifactView({
       {/* Fallback: raw JSON viewer for everything else */}
       {editing || (artifact && ![
         "producer","screenwriter","story_editor","shots","editor",
+        "breakdown","storyboard","cinematographer",
         "voice_cast","character_portraits","voice_actor","motion_shots",
         "ambient","composer","mixer","colorist","titles","upscale",
       ].includes(stage.key)) ? (
@@ -1076,6 +1087,225 @@ function fmtClock(seconds: number): string {
   return h > 0
     ? `${h}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`
     : `${m}:${String(r).padStart(2, "0")}`;
+}
+
+// ---------------------------------------------------------------------------
+// Breakdown / Storyboard / Cinematographer viewers
+// ---------------------------------------------------------------------------
+
+type BreakdownScene = {
+  id: string;
+  heading?: string;
+  summary?: string;
+  location?: string;
+  interior?: boolean;
+  time_of_day?: string;
+  characters?: string[];
+  mood?: string;
+  estimated_seconds?: number;
+};
+
+function BreakdownView({ artifact }: { artifact: Record<string, unknown> }) {
+  const scenes = (artifact.scenes as BreakdownScene[]) || [];
+  if (scenes.length === 0) {
+    return <p className="text-xs text-zinc-500">No scenes parsed yet.</p>;
+  }
+  const totalSec = scenes.reduce((s, c) => s + (c.estimated_seconds || 0), 0);
+  return (
+    <div className="space-y-2">
+      <p className="text-[11px] text-zinc-500">
+        {scenes.length} scene{scenes.length === 1 ? "" : "s"} · estimated {fmtClock(totalSec)}
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-[10px] uppercase tracking-wide text-zinc-500 text-left">
+              <th className="py-1 pr-2">#</th>
+              <th className="py-1 pr-2">Scene</th>
+              <th className="py-1 pr-2">Location</th>
+              <th className="py-1 pr-2">Time</th>
+              <th className="py-1 pr-2">Characters</th>
+              <th className="py-1 pr-2">Mood</th>
+              <th className="py-1 pr-2 text-right">Est.</th>
+            </tr>
+          </thead>
+          <tbody>
+            {scenes.map((s, i) => (
+              <tr key={s.id} className="border-t border-zinc-800 align-top">
+                <td className="py-1.5 pr-2 font-mono text-zinc-500">{s.id || `s${i + 1}`}</td>
+                <td className="py-1.5 pr-2">
+                  <div className="font-mono text-[10px] text-zinc-500">{s.heading || "—"}</div>
+                  <div className="text-zinc-200">{s.summary || ""}</div>
+                </td>
+                <td className="py-1.5 pr-2 text-zinc-300">
+                  <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1 align-middle ${s.interior ? "bg-amber-400" : "bg-sky-400"}`}
+                        title={s.interior ? "Interior" : "Exterior"} />
+                  {s.location || "—"}
+                </td>
+                <td className="py-1.5 pr-2 text-zinc-400 lowercase">{s.time_of_day || "—"}</td>
+                <td className="py-1.5 pr-2">
+                  <div className="flex flex-wrap gap-1">
+                    {(s.characters || []).length === 0
+                      ? <span className="text-zinc-600">—</span>
+                      : (s.characters || []).map((c) =>
+                          <Badge key={c} className="text-[9px]">{c}</Badge>)}
+                  </div>
+                </td>
+                <td className="py-1.5 pr-2 text-zinc-400 italic">{s.mood || ""}</td>
+                <td className="py-1.5 pr-2 text-right font-mono text-zinc-400">
+                  {s.estimated_seconds ? fmtClock(s.estimated_seconds) : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+type StoryboardShot = {
+  id: string;
+  description?: string;
+  subject?: string;
+  action?: string;
+  dialogue?: string;
+};
+
+function StoryboardView({ artifact }: { artifact: Record<string, unknown> }) {
+  const sceneShots = (artifact.scenes as Record<string, StoryboardShot[]>) || {};
+  const sceneIds = Object.keys(sceneShots);
+  if (sceneIds.length === 0) {
+    return <p className="text-xs text-zinc-500">No shots laid out yet.</p>;
+  }
+  const totalShots = sceneIds.reduce((s, k) => s + (sceneShots[k]?.length || 0), 0);
+  const dialogueShots = sceneIds.reduce((s, k) =>
+    s + (sceneShots[k] || []).filter((sh) => sh.dialogue && sh.dialogue.trim()).length, 0);
+  return (
+    <div className="space-y-3">
+      <p className="text-[11px] text-zinc-500">
+        {totalShots} shot{totalShots === 1 ? "" : "s"} across {sceneIds.length} scene{sceneIds.length === 1 ? "" : "s"} · {dialogueShots} with dialogue
+      </p>
+      {sceneIds.map((sid) => {
+        const shots = sceneShots[sid] || [];
+        return (
+          <div key={sid} className="border border-zinc-800 rounded-lg overflow-hidden">
+            <div className="bg-zinc-950/40 px-3 py-1.5 flex items-center gap-2">
+              <span className="text-xs font-mono text-zinc-500">{sid}</span>
+              <span className="text-[10px] text-zinc-500">· {shots.length} shot{shots.length === 1 ? "" : "s"}</span>
+            </div>
+            <div className="divide-y divide-zinc-800">
+              {shots.map((sh) => (
+                <div key={sh.id} className="px-3 py-2 text-xs">
+                  <div className="flex items-start gap-2">
+                    <span className="font-mono text-[10px] text-zinc-500 w-10 flex-shrink-0 pt-0.5">{sh.id}</span>
+                    <div className="min-w-0 flex-1 space-y-0.5">
+                      <div className="text-zinc-100">{sh.description || sh.action || ""}</div>
+                      {sh.subject && (
+                        <div className="text-[10px] text-zinc-500">
+                          <span className="uppercase mr-1">subject:</span>{sh.subject}
+                        </div>
+                      )}
+                      {sh.action && sh.action !== sh.description && (
+                        <div className="text-[10px] text-zinc-500">
+                          <span className="uppercase mr-1">action:</span>{sh.action}
+                        </div>
+                      )}
+                      {sh.dialogue && sh.dialogue.trim() && (
+                        <div className="text-[11px] text-indigo-300 border-l-2 border-indigo-500/40 pl-2 mt-1 italic">
+                          &quot;{sh.dialogue}&quot;
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+type CinemaShot = {
+  framing?: string;
+  lens_mm?: number;
+  camera_move?: string;
+  lighting?: string;
+  palette?: string;
+  duration_sec?: number;
+};
+
+function CinematographyView({ artifact }: { artifact: Record<string, unknown> }) {
+  const sceneSpecs = (artifact.scenes as Record<string, Record<string, CinemaShot>>) || {};
+  const sceneIds = Object.keys(sceneSpecs);
+  if (sceneIds.length === 0) {
+    return <p className="text-xs text-zinc-500">No shot specs assigned yet.</p>;
+  }
+  // Aggregate durations for a filmwide total.
+  let totalShots = 0, totalDur = 0;
+  for (const sid of sceneIds) {
+    const shots = sceneSpecs[sid] || {};
+    for (const key in shots) {
+      totalShots += 1;
+      totalDur += shots[key]?.duration_sec || 0;
+    }
+  }
+  return (
+    <div className="space-y-3">
+      <p className="text-[11px] text-zinc-500">
+        {totalShots} shot spec{totalShots === 1 ? "" : "s"} · total runtime {fmtClock(totalDur)}
+      </p>
+      {sceneIds.map((sid) => {
+        const shots = sceneSpecs[sid] || {};
+        const shotKeys = Object.keys(shots);
+        return (
+          <div key={sid} className="border border-zinc-800 rounded-lg overflow-hidden">
+            <div className="bg-zinc-950/40 px-3 py-1.5 flex items-center gap-2">
+              <span className="text-xs font-mono text-zinc-500">{sid}</span>
+              <span className="text-[10px] text-zinc-500">· {shotKeys.length} shot{shotKeys.length === 1 ? "" : "s"}</span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-[10px] uppercase tracking-wide text-zinc-500 text-left">
+                    <th className="py-1 pl-3 pr-2">Shot</th>
+                    <th className="py-1 pr-2">Framing</th>
+                    <th className="py-1 pr-2">Lens</th>
+                    <th className="py-1 pr-2">Move</th>
+                    <th className="py-1 pr-2">Lighting</th>
+                    <th className="py-1 pr-2">Palette</th>
+                    <th className="py-1 pr-3 text-right">Dur</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shotKeys.map((sk) => {
+                    const sh = shots[sk] || {};
+                    return (
+                      <tr key={sk} className="border-t border-zinc-800">
+                        <td className="py-1.5 pl-3 pr-2 font-mono text-zinc-500">{sk}</td>
+                        <td className="py-1.5 pr-2">
+                          <Badge className="text-[9px] font-mono">{sh.framing || "—"}</Badge>
+                        </td>
+                        <td className="py-1.5 pr-2 font-mono text-zinc-300">{sh.lens_mm ? `${sh.lens_mm}mm` : "—"}</td>
+                        <td className="py-1.5 pr-2 text-zinc-400 lowercase">{sh.camera_move || "static"}</td>
+                        <td className="py-1.5 pr-2 text-zinc-400">{sh.lighting || "—"}</td>
+                        <td className="py-1.5 pr-2 text-zinc-400">{sh.palette || "—"}</td>
+                        <td className="py-1.5 pr-3 text-right font-mono text-zinc-400">
+                          {sh.duration_sec ? `${sh.duration_sec}s` : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 type CastVoice = { voice?: string; gender?: string; why?: string };

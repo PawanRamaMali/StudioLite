@@ -21,6 +21,8 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
+from library.gpu_lane import interactive
+
 from .project import Project
 from .registry import get_runner, get_verifier
 from .stages import STAGES, StageKey, StageSpec
@@ -173,7 +175,13 @@ class RunManager:
             report = None
             attempts = _MAX_VERIFY_ATTEMPTS if verifier is not None else 1
             for attempt in range(1, attempts + 1):
-                data = await asyncio.to_thread(runner, project)
+                # Hold the GPU lane while the stage runs so library jobs
+                # (embed/transcribe/face-index/re-encode) pause instead of
+                # fighting us for VRAM. The context manager is reference-
+                # counted, so two concurrent film pipelines both block
+                # library work until both finish.
+                with interactive():
+                    data = await asyncio.to_thread(runner, project)
                 if verifier is None:
                     break
                 report = verifier(project, data)

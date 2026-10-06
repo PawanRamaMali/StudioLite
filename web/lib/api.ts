@@ -158,6 +158,45 @@ export const deleteModel = (modelKey: string) =>
     { method: "DELETE" }
   );
 
+// Unified cross-backend model registry (CLIP, Whisper, YuNet/SFace, SDXL,
+// Wan, MusicGen, AudioLDM, Real-ESRGAN, Piper, …). Pure disk-check: no
+// download is triggered by hitting /registry or /open-folder.
+export type ModelRegistryKind =
+  | "text" | "image" | "video" | "audio" | "face" | "other";
+
+export interface ModelRegistryRow {
+  id: string;
+  name: string;
+  kind: ModelRegistryKind;
+  description: string;
+  backend_tag: string;
+  min_size_bytes: number;
+  source_url: string;
+  notes: string;
+  expected_path: string;
+  present: boolean;
+  size_bytes: number;
+  matched_path: string | null;
+}
+
+export interface ModelRegistrySummary {
+  total: number;
+  present: number;
+  missing: number;
+  bytes_on_disk: number;
+}
+
+export const getModelRegistry = () =>
+  apiFetch<{ models: ModelRegistryRow[]; summary: ModelRegistrySummary }>(
+    "/api/v1/models/registry"
+  );
+
+export const openModelFolder = (modelId: string) =>
+  apiFetch<{ model_id: string; expected_path: string; folder: string; exists: boolean }>(
+    `/api/v1/models/${encodeURIComponent(modelId)}/open-folder`,
+    { method: "POST" }
+  );
+
 // Jobs
 export interface JobListEntry {
   job_id: string;

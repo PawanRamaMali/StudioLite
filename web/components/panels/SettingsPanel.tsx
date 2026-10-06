@@ -6,11 +6,13 @@ import { Badge } from "@/components/ui/Badge";
 import {
   Settings, Cpu, HardDrive, Wifi, Check, X, Activity,
   Key, Plus, Trash2, Save, RefreshCw, FileText, AlertTriangle,
-  Loader2, Download, XCircle,
+  Loader2, Download, XCircle, FolderOpen, ExternalLink, Package,
 } from "lucide-react";
 import {
   getSystemStatus, SystemStatus, getModelInventory, type ModelInventoryItem,
   downloadModel, deleteModel, getJob, cancelJob, type Job, authFetch,
+  getModelRegistry, openModelFolder,
+  type ModelRegistryRow, type ModelRegistryKind, type ModelRegistrySummary,
 } from "@/lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -22,8 +24,18 @@ export default function SettingsPanel() {
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [apiConnected, setApiConnected] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"system" | "env" | "logs">("system");
+  const [activeTab, setActiveTab] = useState<"system" | "models" | "env" | "logs">("system");
   const [models, setModels] = useState<ModelInventoryItem[]>([]);
+  // Cross-backend registry inventory (CLIP, Whisper, YuNet/SFace, SDXL,
+  // Wan, MusicGen, AudioLDM, Real-ESRGAN, Piper, …). Loaded lazily when
+  // the user first opens the Models tab.
+  const [registry, setRegistry] = useState<ModelRegistryRow[]>([]);
+  const [registrySummary, setRegistrySummary] = useState<ModelRegistrySummary | null>(null);
+  const [registryLoading, setRegistryLoading] = useState(false);
+  const [registryError, setRegistryError] = useState<string | null>(null);
+  const [registryLoaded, setRegistryLoaded] = useState(false);
+  // Folder-path reveal: shows the on-disk directory the user should open.
+  const [revealedFolder, setRevealedFolder] = useState<{ id: string; folder: string; exists: boolean } | null>(null);
   // Per-model download state, keyed by model.key.
   // job: the live Job (progress/message/status). error: last error message.
   const [downloadJobs, setDownloadJobs] = useState<Record<string, Job>>({});
@@ -183,6 +195,38 @@ export default function SettingsPanel() {
   useEffect(() => { if (activeTab === "env") fetchEnv(); }, [activeTab, fetchEnv]);
   useEffect(() => { if (activeTab === "logs") fetchLogs(); }, [activeTab, fetchLogs]);
 
+  // Lazy-load the cross-backend registry inventory the first time the
+  // Models tab is opened, then re-probe when the user hits Refresh.
+  const fetchRegistry = useCallback(async () => {
+    setRegistryLoading(true);
+    setRegistryError(null);
+    try {
+      const d = await getModelRegistry();
+      setRegistry(d.models);
+      setRegistrySummary(d.summary);
+      setRegistryLoaded(true);
+    } catch (e) {
+      setRegistryError((e as Error).message || "Failed to load registry");
+    } finally {
+      setRegistryLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "models" && !registryLoaded && !registryLoading) {
+      fetchRegistry();
+    }
+  }, [activeTab, registryLoaded, registryLoading, fetchRegistry]);
+
+  const handleOpenFolder = async (id: string) => {
+    try {
+      const r = await openModelFolder(id);
+      setRevealedFolder({ id, folder: r.folder, exists: r.exists });
+    } catch (e) {
+      setRevealedFolder({ id, folder: (e as Error).message, exists: false });
+    }
+  };
+
   // Auto-refresh logs
   useEffect(() => {
     if (activeTab !== "logs") return;
@@ -228,9 +272,35 @@ export default function SettingsPanel() {
   const gpu = status?.gpu;
   const tabs = [
     { id: "system" as const, label: "System" },
+    { id: "models" as const, label: "Models" },
     { id: "env" as const, label: "Environment" },
     { id: "logs" as const, label: "Logs" },
   ];
+
+  // Pretty-print bytes (null-safe). Shows the expected minimum when the
+  // model is missing, actual on-disk bytes when it's present.
+  const fmtBytes = (n: number): string => {
+    if (!n || n <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let v = n;
+    let u = 0;
+    while (v >= 1024 && u < units.length - 1) { v /= 1024; u += 1; }
+    return `${v.toFixed(v >= 10 || u === 0 ? 0 : 1)} ${units[u]}`;
+  };
+
+  const KIND_LABEL: Record<ModelRegistryKind, string> = {
+    text: "Text", image: "Image", video: "Video",
+    audio: "Audio", face: "Face", other: "Other",
+  };
+  // Stable group ordering - matches the kind column in the registry.
+  const KIND_ORDER: ModelRegistryKind[] = ["text", "image", "video", "audio", "face", "other"];
+  const groupedRegistry: Record<ModelRegistryKind, ModelRegistryRow[]> = {
+    text: [], image: [], video: [], audio: [], face: [], other: [],
+  };
+  for (const row of registry) {
+    const bucket = (groupedRegistry[row.kind as ModelRegistryKind] ??= []);
+    bucket.push(row);
+  }
 
   return (
     <div>
@@ -383,6 +453,141 @@ export default function SettingsPanel() {
                 </tbody>
               </table>
             </div>
+          </Card>
+        </>
+      )}
+
+      {/* MODELS TAB — unified cross-backend inventory */}
+      {activeTab === "models" && (
+        <>
+          <Card className="mb-6">
+            <div className="flex items-center justify-between mb-4">
+              <CardTitle className="flex items-center gap-2">
+                <Package className="w-4 h-4 text-indigo-400" /> Model Inventory
+              </CardTitle>
+              <Button size="sm" variant="ghost" onClick={fetchRegistry} disabled={registryLoading}>
+                {registryLoading ? (
+                  <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-3 h-3 mr-1" />
+                )}
+                Refresh
+              </Button>
+            </div>
+            <p className="text-xs text-zinc-500 mb-4">
+              Every weight StudioLite can load, probed live from disk. Rows marked grey are
+              missing — click <span className="text-indigo-400">Get</span> to open the official
+              source, then drop the file at the expected path shown below.
+            </p>
+
+            {/* Summary banner */}
+            {registrySummary && (
+              <div className="flex items-center gap-2 mb-4 text-xs text-zinc-400">
+                <Badge variant="success" className="text-[10px]">
+                  {registrySummary.present}/{registrySummary.total} models present
+                </Badge>
+                <span className="text-zinc-600">·</span>
+                <span className="tabular-nums">{fmtBytes(registrySummary.bytes_on_disk)} on disk</span>
+                {registrySummary.missing > 0 && (
+                  <>
+                    <span className="text-zinc-600">·</span>
+                    <span className="text-amber-400">{registrySummary.missing} missing</span>
+                  </>
+                )}
+              </div>
+            )}
+
+            {registryError && (
+              <div className="mb-4 flex items-start gap-2 text-xs text-red-400 bg-red-500/5 border border-red-500/20 rounded px-3 py-2">
+                <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                <span>{registryError}</span>
+              </div>
+            )}
+
+            {registryLoading && registry.length === 0 ? (
+              <div className="py-6 text-center text-xs text-zinc-500 flex items-center justify-center gap-2">
+                <Loader2 className="w-3 h-3 animate-spin" /> Probing disk…
+              </div>
+            ) : (
+              KIND_ORDER.filter((k) => groupedRegistry[k].length > 0).map((kind) => (
+                <div key={kind} className="mb-5 last:mb-0">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-2">
+                    {KIND_LABEL[kind]}
+                  </div>
+                  <div className="space-y-1.5">
+                    {groupedRegistry[kind].map((m) => {
+                      const sizeLabel = m.present
+                        ? fmtBytes(m.size_bytes)
+                        : `~${fmtBytes(m.min_size_bytes)} expected`;
+                      const isRevealed = revealedFolder?.id === m.id;
+                      return (
+                        <div
+                          key={m.id}
+                          className="flex flex-col gap-1 border border-zinc-800 bg-zinc-900/40 rounded-lg px-3 py-2"
+                        >
+                          <div className="flex items-center gap-3 flex-wrap">
+                            {m.present ? (
+                              <Check className="w-3.5 h-3.5 text-green-400 flex-shrink-0" aria-label="present" />
+                            ) : (
+                              <X className="w-3.5 h-3.5 text-zinc-600 flex-shrink-0" aria-label="missing" />
+                            )}
+                            <code className="text-xs font-mono text-zinc-300 flex-shrink-0" title={m.description}>
+                              {m.id}
+                            </code>
+                            <span className="text-xs text-zinc-400 truncate flex-1 min-w-[200px]">
+                              {m.name}
+                            </span>
+                            <Badge
+                              variant={m.present ? "success" : "default"}
+                              className="text-[10px] tabular-nums flex-shrink-0"
+                              title={m.present ? "Actual on-disk size" : "Approximate size of a healthy install"}
+                            >
+                              {sizeLabel}
+                            </Badge>
+                            <a
+                              href={m.source_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[10px] text-indigo-400 hover:text-indigo-300 inline-flex items-center gap-1 flex-shrink-0"
+                              title={`Open ${m.source_url}`}
+                            >
+                              <ExternalLink className="w-3 h-3" /> Get
+                            </a>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => handleOpenFolder(m.id)}
+                              title="Show the parent directory you should drop the weight into"
+                            >
+                              <FolderOpen className="w-3 h-3 mr-1" /> Open folder
+                            </Button>
+                          </div>
+                          <div
+                            className="font-mono text-[10px] text-zinc-500 truncate pl-6"
+                            title={m.expected_path}
+                          >
+                            {m.expected_path}
+                          </div>
+                          {isRevealed && revealedFolder && (
+                            <div className="pl-6 mt-1 text-[10px]">
+                              <span className="text-zinc-500">Folder: </span>
+                              <code
+                                className={`font-mono select-all ${revealedFolder.exists ? "text-emerald-400" : "text-amber-400"}`}
+                              >
+                                {revealedFolder.folder}
+                              </code>
+                              <span className="text-zinc-600 ml-2">
+                                {revealedFolder.exists ? "(exists)" : "(create it)"}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))
+            )}
           </Card>
         </>
       )}

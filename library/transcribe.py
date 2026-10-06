@@ -20,6 +20,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from .gpu_lane import interactive_busy, wait_for_interactive_idle
 from .store import LibraryStore
 
 logger = logging.getLogger("studiolite.library.transcribe")
@@ -100,6 +101,13 @@ class TranscribeJob(threading.Thread):
         self._push(f"Loading {self.model_size}…", 0.02)
 
         for i, v in enumerate(remaining, 1):
+            # Yield the GPU to the filmmaker pipeline if it's running.
+            if interactive_busy.is_set():
+                self._push("Paused - film pipeline running",
+                           i / max(self.counts["total"], 1))
+            if not wait_for_interactive_idle(self._cancel):
+                self._push("Cancelled", i / max(self.counts["total"], 1), "cancelled")
+                return
             if self._cancelled():
                 self._push("Cancelled", i / max(self.counts["total"], 1), "cancelled")
                 return

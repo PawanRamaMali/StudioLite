@@ -11,6 +11,7 @@ import time
 from typing import Callable, Dict, List, Optional
 
 from . import scanner, probe as probe_mod, phash as phash_mod, hasher
+from .gpu_lane import interactive_busy, wait_for_interactive_idle
 from .store import LibraryStore
 
 # T2 imports are lazy so a broken transformers install or missing weights
@@ -278,6 +279,13 @@ class EmbedJob(threading.Thread):
 
         import json as _json
         for i, v in enumerate(remaining, 1):
+            # Yield the GPU to the filmmaker pipeline if it's running.
+            if interactive_busy.is_set():
+                self._push("Paused - film pipeline running",
+                           i / max(len(remaining), 1))
+            if not wait_for_interactive_idle(self._cancel):
+                self._push("Cancelled", i / max(len(remaining), 1), "cancelled")
+                return
             if self._cancelled():
                 self._push("Cancelled", i / max(len(remaining), 1), "cancelled")
                 return
@@ -411,6 +419,12 @@ class FaceIndexJob(threading.Thread):
         new_face_ids: list = []
 
         for i, v in enumerate(remaining, 1):
+            # Yield the GPU to the filmmaker pipeline if it's running.
+            if interactive_busy.is_set():
+                self._push("Paused - film pipeline running",
+                           i / max(len(remaining), 1))
+            if not wait_for_interactive_idle(self._cancel):
+                self._push("Cancelled", i / max(len(remaining), 1), "cancelled"); return
             if self._cancelled():
                 self._push("Cancelled", i / max(len(remaining), 1), "cancelled"); return
             if not os.path.isfile(v.abs_path):

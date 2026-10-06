@@ -18,6 +18,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from .gpu_lane import interactive_busy, wait_for_interactive_idle
 from .store import LibraryStore
 
 logger = logging.getLogger("studiolite.library.reencode")
@@ -117,6 +118,13 @@ class ReencodeJob(threading.Thread):
         os.makedirs(self.output_dir, exist_ok=True)
 
         for i, vid in enumerate(self.video_ids, 1):
+            # Yield the GPU to the filmmaker pipeline if it's running.
+            if interactive_busy.is_set():
+                self._push("Paused - film pipeline running",
+                           i / max(self.counts["total"], 1))
+            if not wait_for_interactive_idle(self._cancel):
+                self._push("Cancelled", i / max(self.counts["total"], 1), "cancelled")
+                return
             if self._cancelled():
                 self._push("Cancelled", i / max(self.counts["total"], 1), "cancelled")
                 return

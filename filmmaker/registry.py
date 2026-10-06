@@ -30,6 +30,7 @@ RUNNERS: Dict[StageKey, StageRunner] = {
     "editor":              agents.run_editor,
     "ambient":             agents.run_ambient,
     "composer":            agents.run_composer,
+    "sound_design":        agents.run_sound_design,
     "mixer":               agents.run_mixer,
     "colorist":            agents.run_colorist,
     "titles":              agents.run_titles,

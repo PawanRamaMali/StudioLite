@@ -17,7 +17,8 @@ import os
 import shutil
 import subprocess
 import time
-from typing import Any, Dict, List, Optional
+import math
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import llm
 from .project import Project
@@ -2949,6 +2950,242 @@ def _crossfade_concat(chunks: List["np.ndarray"], *, sr: int, xfade_sec: float) 
 
 
 # ---------------------------------------------------------------------------
+# Sound Design — per-scene SFX cue list from the LLM, rendered via AudioLDM 2
+# and timed so hard cues land on the frame they belong to without stepping
+# on dialogue. Mixer picks the resulting wavs up and layers them.
+# ---------------------------------------------------------------------------
+
+_SOUND_DESIGN_SYSTEM = """\
+You are a Foley / SFX supervisor working on one scene of a short film.
+
+For the given SCENE and its ordered SHOTS, write a cue list in JSON:
+
+  {
+    "cues": [
+      {
+        "sfx_id": "sfx1",
+        "shot_id": "sh2",          // which shot this hits
+        "prompt":  "heavy wooden door slamming shut, interior reverb",
+        "start_sec": 2.4,          // seconds from the start of the SCENE
+        "duration_sec": 0.9,       // 0.3..3.0 for hard cues, 5..15 for soft
+        "gain_db": -6              // -3..-8 for hard cues, -14..-20 for soft
+      },
+      ...
+    ]
+  }
+
+RULES
+1. Write 2-6 cues per scene. Short scenes (one shot) get 2; busy scenes get up to 6.
+2. One HARD sync cue per concrete action verb in the shot's `action` field
+   (slam, shatter, ring, pour, footsteps, rev, crash, knock, snap). Hard
+   cues are 0.3-3s, gain -3..-8 dB, and placed where the verb happens.
+3. At MOST one SOFT texture cue (rain on glass, distant traffic, wind
+   whistling through boards). Soft cues are 5-15s, gain -14..-20 dB, may
+   overlap dialogue.
+4. Hard cues NEVER overlap the given DIALOGUE WINDOWS. If a hard cue would
+   collide with speech, move it to the nearest gap >= 0.3s or drop it.
+5. Prompts are physical and source-first: "heavy wooden door slamming shut,
+   interior reverb" — never emotional ("tense door") or musical ("stinger").
+6. start_sec + duration_sec must fit inside the scene's duration.
+
+Respond with valid JSON only, no prose, no code fences.
+"""
+
+
+def run_sound_design(project: Project) -> Dict[str, Any]:
+    """Per-scene SFX cue list, rendered via AudioLDM 2 (if available) or a
+    silent-wav fallback. One `cues` list per scene id. Fails open — if
+    the LLM returns nothing or AudioLDM is unavailable, every cue falls
+    back to a silent clip of the right duration so the mixer still has
+    something to drop in."""
+    import json as _json
+    breakdown    = project.read_artifact("breakdown") or {}
+    storyboard   = project.read_artifact("storyboard") or {}
+    voice_art    = project.read_artifact("voice_actor") or {}
+    shots_art    = project.read_artifact("shots") or {}
+    editor_art   = project.read_artifact("editor") or {}
+
+    scenes = breakdown.get("scenes") or []
+    shots_by_scene = storyboard.get("scenes") or {}
+    if not scenes:
+        return {"scenes": {}, "cue_count": 0, "rendered": 0, "skipped": 0}
+
+    # Build each shot's duration from the Shots artifact (same source of
+    # truth the mixer and voice_actor use).
+    shot_dur_ms: Dict[str, int] = {}
+    for s in shots_art.get("shots") or []:
+        key = f"{s['scene_id']}::{s['shot_id']}"
+        shot_dur_ms[key] = max(1, int(s.get("duration_sec", 4) or 4)) * 1000
+
+    # Per-line dialogue windows (scene-relative), so the LLM can keep hard
+    # cues out of speech. Voice-actor rows carry per-shot wavs; we compute
+    # each line's offset within its scene by summing earlier shots in the
+    # scene.
+    def _scene_offsets_ms(scene_id: str) -> Dict[str, int]:
+        off: Dict[str, int] = {}
+        cursor = 0
+        for sh in shots_by_scene.get(scene_id, []) or []:
+            off[sh["id"]] = cursor
+            cursor += shot_dur_ms.get(f"{scene_id}::{sh['id']}", 4000)
+        return off
+
+    dialogue_windows_by_scene: Dict[str, List[Tuple[float, float]]] = {}
+    for line in voice_art.get("lines") or []:
+        sid, shid = line.get("scene_id"), line.get("shot_id")
+        if not sid or not shid: continue
+        off_ms = _scene_offsets_ms(sid).get(shid, 0)
+        dur_s = float(line.get("duration_sec", 0) or 0)
+        if dur_s <= 0: continue
+        start_s = off_ms / 1000.0
+        dialogue_windows_by_scene.setdefault(sid, []).append(
+            (start_s, start_s + dur_s + 0.2),  # +200ms tail pad
+        )
+
+    sfx_root = os.path.join(project.artifacts_dir, "sfx")
+    os.makedirs(sfx_root, exist_ok=True)
+
+    out_scenes: Dict[str, List[Dict[str, Any]]] = {}
+    cue_count = 0; rendered_count = 0; skipped_count = 0
+
+    for scene in scenes:
+        sid = scene["id"]
+        shots = shots_by_scene.get(sid, []) or []
+        if not shots:
+            continue
+        scene_dur_sec = sum(shot_dur_ms.get(f"{sid}::{sh['id']}", 4000)
+                            for sh in shots) / 1000.0
+        if scene_dur_sec <= 0:
+            continue
+
+        # Build a payload for the LLM — scene mood + shot timeline +
+        # dialogue windows.
+        offsets = _scene_offsets_ms(sid)
+        shot_rows = [{
+            "id": sh["id"],
+            "start_sec": round(offsets.get(sh["id"], 0) / 1000.0, 2),
+            "duration_sec": round(shot_dur_ms.get(f"{sid}::{sh['id']}", 4000) / 1000.0, 2),
+            "action": sh.get("action", "") or sh.get("description", ""),
+        } for sh in shots]
+        payload = _json.dumps({
+            "scene_id": sid,
+            "scene_duration_sec": round(scene_dur_sec, 2),
+            "mood": scene.get("mood", ""),
+            "location": scene.get("location", ""),
+            "time_of_day": scene.get("time_of_day", ""),
+            "interior": bool(scene.get("interior", False)),
+            "shots": shot_rows,
+            "dialogue_windows_sec": [
+                [round(a, 2), round(b, 2)]
+                for (a, b) in dialogue_windows_by_scene.get(sid, [])
+            ],
+        }, ensure_ascii=False, indent=2)
+
+        try:
+            raw = _chat(project, "sound_design", _SOUND_DESIGN_SYSTEM, payload,
+                        want_json=True, temperature=0.4, max_tokens=1500)
+            data = llm.parse_json(raw)
+        except Exception as e:
+            logger.warning("sound_design soft-failed on %s (%s); skipping cues", sid, e)
+            out_scenes[sid] = []
+            continue
+
+        cues = data.get("cues") or []
+        normalized: List[Dict[str, Any]] = []
+        for i, c in enumerate(cues):
+            if not isinstance(c, dict): continue
+            try:
+                prompt = str(c.get("prompt", "")).strip()
+                if not prompt: continue
+                start = max(0.0, min(float(c.get("start_sec", 0) or 0), scene_dur_sec - 0.1))
+                dur = max(0.3, min(float(c.get("duration_sec", 1.0) or 1.0), 15.0))
+                # Clamp to scene bounds.
+                if start + dur > scene_dur_sec:
+                    dur = max(0.3, scene_dur_sec - start)
+                gain = float(c.get("gain_db", -6.0) or -6.0)
+                gain = max(-24.0, min(0.0, gain))
+                sfx_id = str(c.get("sfx_id") or f"sfx{i+1}")
+                shot_id = str(c.get("shot_id") or (shots[0]["id"] if shots else ""))
+                # Enforce no-dialogue-overlap on HARD cues (short + loud).
+                is_hard = dur <= 3.0 and gain >= -10.0
+                if is_hard:
+                    moved = _shift_out_of_dialogue(
+                        start, dur, dialogue_windows_by_scene.get(sid, []),
+                        scene_dur_sec,
+                    )
+                    if moved is None:
+                        normalized.append({
+                            "sfx_id": sfx_id, "shot_id": shot_id, "prompt": prompt,
+                            "start_sec": round(start, 3), "duration_sec": round(dur, 3),
+                            "gain_db": gain, "wav": None, "rendered": False,
+                            "error": "overlaps dialogue; no free gap",
+                        })
+                        skipped_count += 1
+                        continue
+                    start = moved
+            except Exception as e:
+                logger.warning("bad cue in %s: %s", sid, e)
+                continue
+            wav_rel = f"sfx/{sid}_{sfx_id}.wav"
+            wav_abs = os.path.join(project.artifacts_dir, wav_rel)
+            # Round the per-cue duration up to an integer second for the
+            # audio generator (AudioLDM is happiest with int seconds).
+            gen_dur = int(math.ceil(dur))
+            ok = False
+            err: Optional[str] = None
+            try:
+                _render_audioldm(prompt, wav_abs, duration_sec=max(1, gen_dur))
+                ok = True
+                rendered_count += 1
+            except Exception as e:
+                logger.info("AudioLDM unavailable for %s/%s (%s); silent cue",
+                            sid, sfx_id, e)
+                err = str(e)
+                _write_silent_wav(wav_abs, max(0.3, dur))
+                skipped_count += 1
+            normalized.append({
+                "sfx_id": sfx_id, "shot_id": shot_id, "prompt": prompt,
+                "start_sec": round(start, 3), "duration_sec": round(dur, 3),
+                "gain_db": gain, "wav": wav_rel.replace(os.sep, "/"),
+                "rendered": ok, "error": err,
+            })
+            cue_count += 1
+        out_scenes[sid] = normalized
+
+    return {
+        "scenes": out_scenes,
+        "cue_count": cue_count,
+        "rendered": rendered_count,
+        "skipped": skipped_count,
+    }
+
+
+def _shift_out_of_dialogue(start: float, dur: float,
+                           windows: List[Tuple[float, float]],
+                           scene_dur: float) -> Optional[float]:
+    """Find the nearest start time such that [start, start+dur] does not
+    overlap any (a, b) in `windows`. Returns the adjusted start, or None
+    if nothing fits inside the scene."""
+    def overlaps(a: float, b: float) -> bool:
+        for wa, wb in windows:
+            if a < wb and b > wa:
+                return True
+        return False
+    if not overlaps(start, start + dur):
+        return start
+    # Try the end of each window + a 300ms gap; pick the first slot that fits.
+    for _, wb in sorted(windows, key=lambda w: w[1]):
+        candidate = wb + 0.3
+        if candidate + dur <= scene_dur and not overlaps(candidate, candidate + dur):
+            return candidate
+    # Try before each window too.
+    for wa, _ in sorted(windows):
+        candidate = max(0.0, wa - dur - 0.3)
+        if candidate >= 0 and not overlaps(candidate, candidate + dur):
+            return candidate
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 12. Mixer - ffmpeg mux: silent cut + dialogue at shot offsets + score with
 #     sidechain ducking under speech.
 # ---------------------------------------------------------------------------
@@ -2957,6 +3194,7 @@ def run_mixer(project: Project) -> Dict[str, Any]:
     editor_art   = project.read_artifact("editor") or {}
     composer_art = project.read_artifact("composer") or {}
     ambient_art  = project.read_artifact("ambient") or {}
+    sound_art    = project.read_artifact("sound_design") or {}
     voice_art    = project.read_artifact("voice_actor") or {}
     shots_art    = project.read_artifact("shots") or {}
 
@@ -3016,6 +3254,37 @@ def run_mixer(project: Project) -> Dict[str, Any]:
     have_ambient = (bool(ambient_abs and os.path.exists(ambient_abs))
                     and ambient_art.get("rendered", True))
 
+    # SFX cues from the Sound Design stage. Each cue stores a scene-relative
+    # start; we add the cumulative scene offset (sum of shot durations in
+    # the scenes before this one) to get the position in the final cut.
+    #
+    # Only `rendered=True` cues come through — silent-placeholder cues
+    # (AudioLDM unavailable) are skipped so the mixer isn't layering dead air.
+    sfx_cues: List[Dict[str, Any]] = []
+    scene_offset_ms: Dict[str, int] = {}
+    cursor_ms = 0
+    # Walk shots in order; group durations by scene to compute scene starts.
+    for s in shots_art.get("shots") or []:
+        sid = s["scene_id"]
+        if sid not in scene_offset_ms:
+            scene_offset_ms[sid] = cursor_ms
+        cursor_ms += max(1, int(s.get("duration_sec", 4) or 4)) * 1000
+    for sid, cues in (sound_art.get("scenes") or {}).items():
+        base_ms = scene_offset_ms.get(sid, 0)
+        for cue in cues or []:
+            wav_rel = cue.get("wav")
+            if not wav_rel or not cue.get("rendered"):
+                continue
+            wav_abs = os.path.join(project.artifacts_dir,
+                                   wav_rel.replace("/", os.sep).lstrip(os.sep))
+            if not os.path.exists(wav_abs):
+                continue
+            sfx_cues.append({
+                "wav": wav_abs,
+                "delay_ms": base_ms + int(float(cue.get("start_sec", 0) or 0) * 1000),
+                "gain_db": float(cue.get("gain_db", -6.0) or -6.0),
+            })
+
     out_abs = os.path.join(project.dir, "final_mixed.mp4")
     total_dur = float(editor_art.get("duration_sec", 0) or 0)
     _run_mixer_ffmpeg(
@@ -3023,6 +3292,7 @@ def run_mixer(project: Project) -> Dict[str, Any]:
         dialogue=dialogue,
         score=score_abs if have_score else None,
         ambient=ambient_abs if have_ambient else None,
+        sfx=sfx_cues or None,
         out_path=out_abs,
         duration_sec=total_dur if total_dur > 0 else None,
     )
@@ -3031,18 +3301,23 @@ def run_mixer(project: Project) -> Dict[str, Any]:
         "has_dialogue": have_speech,
         "has_score":    have_score,
         "has_ambient":  have_ambient,
+        "has_sfx":      bool(sfx_cues),
         "dialogue_lines": len(dialogue),
+        "sfx_cues":    len(sfx_cues),
     }
 
 
 def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
                       score: Optional[str], ambient: Optional[str] = None,
+                      sfx: Optional[List[Dict[str, Any]]] = None,
                       out_path: str, duration_sec: Optional[float] = None) -> None:
-    """Build and run the ffmpeg mux. Four sources: silent video, optional
-    score, optional ambient bed, and 0..N dialogue wavs. Speech ducks the
-    score via sidechain compression. Ambient sits at a low fixed level and
-    is not ducked (it's atmospheric, not focal). Output length is pinned to
-    the video's duration."""
+    """Build and run the ffmpeg mux. Five sources: silent video, optional
+    score, optional ambient bed, 0..N dialogue wavs, and 0..N SFX cues.
+    Speech ducks the score via sidechain compression. Ambient sits at a
+    low fixed level and is not ducked (it's atmosphere, not focal). SFX
+    cues are placed at their `delay_ms` with a per-cue gain and ducked
+    LIGHTLY under speech so hard sync events (slams, shatters) still
+    land. Output length is pinned to the video's duration."""
     inputs: List[str] = ["-i", silent_video]
     input_idx = 1
     score_idx: Optional[int] = None
@@ -3058,6 +3333,10 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
     dlg_start = input_idx
     for d in dialogue:
         inputs += ["-i", d["wav"]]
+    sfx_start = dlg_start + len(dialogue)
+    sfx_cues = sfx or []
+    for s in sfx_cues:
+        inputs += ["-i", s["wav"]]
 
     filter_parts: List[str] = []
 
@@ -3101,6 +3380,40 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
             f"[{ambient_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.35[ambient_bus]"
         )
 
+    # Build the SFX bus. Each cue: delay to its absolute offset, normalize
+    # to stereo 44.1k, apply its per-cue gain in dB. Then amix all cues
+    # (normalize=0 so gains stay honest) and clamp duration so a cue near
+    # the end doesn't extend the output past the pin.
+    sfx_label: Optional[str] = None
+    if sfx_cues:
+        sfx_labels: List[str] = []
+        for i, s in enumerate(sfx_cues):
+            idx = sfx_start + i
+            lbl = f"sfx{i}"
+            delay = int(s["delay_ms"])
+            gain = float(s.get("gain_db", -6.0))
+            filter_parts.append(
+                f"[{idx}:a]adelay={delay}|{delay},"
+                f"aformat=sample_rates=44100:channel_layouts=stereo,"
+                f"volume={gain:.1f}dB[{lbl}]"
+            )
+            sfx_labels.append(f"[{lbl}]")
+        if len(sfx_labels) > 1:
+            filter_parts.append(
+                f"{''.join(sfx_labels)}amix=inputs={len(sfx_labels)}:"
+                f"normalize=0:duration=longest[sfx_bus]"
+            )
+        else:
+            # amix is overkill for one input — alias it.
+            filter_parts.append(f"{sfx_labels[0]}anull[sfx_bus]")
+        sfx_label = "[sfx_bus]"
+
+    # Compose the final audio bus. We build it in two passes:
+    #   1. Mix speech + music (ducked if speech present) + ambient into a
+    #      "pre_sfx" bus using the branching below.
+    #   2. If there are SFX cues, lightly duck them under speech and amix
+    #      with pre_sfx into [audio].
+    pre_sfx_label: Optional[str] = None
     if score is not None:
         filter_parts.append(
             f"[{score_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.45[music_raw]"
@@ -3112,29 +3425,62 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
             )
             if ambient is not None:
                 filter_parts.append(
-                    "[speech][music_ducked][ambient_bus]amix=inputs=3:normalize=0:duration=longest[audio]"
+                    "[speech][music_ducked][ambient_bus]amix=inputs=3:normalize=0:duration=longest[pre_sfx]"
                 )
             else:
                 filter_parts.append(
-                    "[speech][music_ducked]amix=inputs=2:normalize=0:duration=longest[audio]"
+                    "[speech][music_ducked]amix=inputs=2:normalize=0:duration=longest[pre_sfx]"
                 )
         else:
-            # No speech to duck. If we have ambient, mix it under the music.
             if ambient is not None:
                 filter_parts.append(
-                    "[music_raw][ambient_bus]amix=inputs=2:normalize=0:duration=longest[audio]"
+                    "[music_raw][ambient_bus]amix=inputs=2:normalize=0:duration=longest[pre_sfx]"
                 )
             else:
-                filter_parts.append("[music_raw]anull[audio]")
+                filter_parts.append("[music_raw]anull[pre_sfx]")
+        pre_sfx_label = "[pre_sfx]"
     elif dlg_labels:
         if ambient is not None:
             filter_parts.append(
-                "[speech][ambient_bus]amix=inputs=2:normalize=0:duration=longest[audio]"
+                "[speech][ambient_bus]amix=inputs=2:normalize=0:duration=longest[pre_sfx]"
             )
         else:
-            filter_parts.append("[speech]anull[audio]")
+            filter_parts.append("[speech]anull[pre_sfx]")
+        pre_sfx_label = "[pre_sfx]"
     elif ambient is not None:
-        filter_parts.append("[ambient_bus]anull[audio]")
+        filter_parts.append("[ambient_bus]anull[pre_sfx]")
+        pre_sfx_label = "[pre_sfx]"
+
+    # Fold the SFX bus in, if we have one. When dialogue is present we
+    # route SFX through a LIGHT sidechain so slams/shatters don't fight
+    # the voice — ratio 3 (vs 8 for music) keeps the SFX audible under speech.
+    if sfx_label and pre_sfx_label:
+        if dlg_labels:
+            # Need another speech branch for the SFX sidechain since
+            # [speech_side] was already consumed by the music ducker.
+            filter_parts.append(f"{sfx_label}anull[sfx_pre_duck]")
+            # Pad a fresh speech branch to full length so sidechaincompress
+            # doesn't truncate the SFX bus to the speech length.
+            filter_parts.append(
+                f"[speech]asplit=2[_speech_pass][_speech_sfxside];"
+                f"[_speech_sfxside]apad=whole_dur={pad_target}[_speech_sfxside_pad]"
+            )
+            filter_parts.append(
+                "[sfx_pre_duck][_speech_sfxside_pad]sidechaincompress="
+                "threshold=0.05:ratio=3:attack=5:release=200[sfx_ducked]"
+            )
+            filter_parts.append(
+                f"{pre_sfx_label}[sfx_ducked]amix=inputs=2:normalize=0:duration=longest[audio]"
+            )
+        else:
+            filter_parts.append(
+                f"{pre_sfx_label}{sfx_label}amix=inputs=2:normalize=0:duration=longest[audio]"
+            )
+    elif pre_sfx_label:
+        filter_parts.append(f"{pre_sfx_label}anull[audio]")
+    elif sfx_label:
+        # Only SFX — rare but possible on a silent film with cues.
+        filter_parts.append(f"{sfx_label}anull[audio]")
 
     # Pin the output length to the editor's video duration when we know it.
     # Without this, a short dialogue chain (e.g. one line early in the film)

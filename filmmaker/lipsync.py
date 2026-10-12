@@ -484,7 +484,7 @@ class EchoMimicV3Backend:
         # reference pose matches an average posture of the shot.
         ref_frame = os.path.join(work_dir, "ref.png")
         if not _extract_midpoint_frame(input_video, ref_frame,
-                                        timestamp=cfg.get("ref_timestamp", "00:00:01")):
+                                        timestamp=cfg.get("ref_timestamp")):
             return _passthrough(self.name, project, input_video,
                                 BackendStatus(name=self.name, available=False,
                                               reason="could not extract reference frame"))
@@ -696,16 +696,39 @@ def _load_json(path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _extract_midpoint_frame(video_path: str, out_png: str,
-                              timestamp: str = "00:00:01") -> bool:
-    """ffmpeg one-off: grab a single frame from `video_path` at
-    `timestamp` and write it to `out_png`. Returns True on success.
+def _probe_duration_sec(video_path: str) -> Optional[float]:
+    """Return the video's duration in seconds via ffprobe, or None."""
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", video_path],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        logger.warning("ffprobe duration failed: %s", e)
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return float((proc.stdout or "").strip())
+    except ValueError:
+        return None
 
-    Used by holistic backends (EchoMimicV3) that need a reference image
-    rather than a video. We don't bother picking a specific "best"
-    frame - a midpoint-ish timestamp is good enough for the user's
-    first-pass render, and they can tune `ref_timestamp` in config if
-    the chosen frame is a blink or an occluded profile."""
+
+def _extract_midpoint_frame(video_path: str, out_png: str,
+                              timestamp: Optional[str] = None) -> bool:
+    """ffmpeg one-off: grab a single frame from `video_path` and write it
+    to `out_png`. When `timestamp` is None we probe the duration and
+    pick the real midpoint - a fixed early timestamp lands inside the
+    prepended title card. Falls back to 00:00:01 if ffprobe isn't on PATH.
+    Returns True on success."""
+    if timestamp is None:
+        dur = _probe_duration_sec(video_path)
+        if dur and dur > 0:
+            mid = dur / 2.0
+            timestamp = f"{int(mid // 3600):02d}:{int((mid % 3600) // 60):02d}:{mid % 60:06.3f}"
+        else:
+            timestamp = "00:00:01"
     try:
         proc = subprocess.run(
             ["ffmpeg", "-y", "-ss", timestamp, "-i", video_path,

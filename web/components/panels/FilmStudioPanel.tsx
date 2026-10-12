@@ -11,11 +11,11 @@ import {
   Palette, Type as TypeIcon, ArrowUpCircle,
 } from "lucide-react";
 import {
-  FILM_API_BASE, filmCreate, filmDelete, filmEditArtifact, filmGet,
-  filmList, filmListStages, filmPause, filmRewind, filmRun,
-  filmStreamUrl, getLLMBackends,
+  FILM_API_BASE, filmCreate, filmCreateFromTemplate, filmDelete,
+  filmEditArtifact, filmGet, filmList, filmListStages, filmListTemplates,
+  filmPause, filmRewind, filmRun, filmStreamUrl, getLLMBackends,
   type FilmDetail, type FilmListItem, type FilmStageKey, type FilmStageSpec,
-  type FilmStageStatus, type LLMBackendInfo,
+  type FilmStageStatus, type FilmTemplate, type LLMBackendInfo,
 } from "@/lib/api";
 
 type ProjectListRes = { projects: FilmListItem[] };
@@ -173,12 +173,31 @@ function ProjectListView({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [creating, setCreating] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // First-run quickstart: a short catalog of templates so the "new film"
+  // screen can prefill brief + config with one click. Fetched once at mount;
+  // soft-fails to an empty array so the create form still works offline.
+  const [templates, setTemplates] = useState<FilmTemplate[]>([]);
+  const [spawningFromTemplate, setSpawningFromTemplate] = useState<string | null>(null);
 
   useEffect(() => {
     // Probe once so the backend picker can gate cloud options behind
     // "API key configured" without the user having to guess.
     getLLMBackends().then((r) => setLlmBackends(r.backends)).catch(() => { /* soft */ });
+    filmListTemplates().then((r) => setTemplates(r.templates)).catch(() => { /* soft */ });
   }, []);
+
+  const spawnFromTemplate = async (t: FilmTemplate) => {
+    setErr(null);
+    setSpawningFromTemplate(t.id);
+    try {
+      const res = await filmCreateFromTemplate({ template_id: t.id });
+      onCreated(res.project.id);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : `Could not spawn template ${t.name}`);
+    } finally {
+      setSpawningFromTemplate(null);
+    }
+  };
 
   // When the user switches backend, drop the model back to that backend's
   // default so we don't send `llama3.2` to Groq or `gemini-2.5-flash` to Ollama.
@@ -267,6 +286,48 @@ function ProjectListView({
       </div>
 
       <div className="space-y-3">
+        {templates.length > 0 && projects && projects.length === 0 && (
+          <Card className="border-indigo-500/20 bg-indigo-500/[0.03]">
+            <CardTitle className="text-sm mb-1 flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-indigo-400" /> Quickstart
+            </CardTitle>
+            <p className="text-[11px] text-zinc-500 mb-3">
+              Pick a template to spawn a project with a working brief and the config knobs
+              already set. Edit it from the project view once it's created.
+            </p>
+            <div className="space-y-1.5">
+              {templates.slice(0, 4).map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  disabled={spawningFromTemplate !== null}
+                  onClick={() => spawnFromTemplate(t)}
+                  className="w-full text-left bg-zinc-900/40 border border-zinc-800 hover:border-indigo-500/40 rounded px-2.5 py-2 transition-colors disabled:opacity-50"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs text-zinc-200 font-medium flex items-center gap-1.5">
+                        {t.name}
+                        <span className="text-[9px] text-zinc-500 font-normal">
+                          · {t.target_minutes}m · {t.style}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-zinc-500 line-clamp-1 mt-0.5">
+                        {t.description}
+                      </div>
+                    </div>
+                    {spawningFromTemplate === t.id ? (
+                      <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin flex-shrink-0 mt-0.5" />
+                    ) : (
+                      <ChevronRight className="w-3.5 h-3.5 text-zinc-600 flex-shrink-0 mt-0.5" />
+                    )}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </Card>
+        )}
+
         <Card>
           <CardTitle className="text-sm mb-3 flex items-center gap-2">
             <Plus className="w-4 h-4 text-indigo-400" /> New film

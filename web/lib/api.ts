@@ -633,6 +633,39 @@ export const filmListStages = () =>
 export const filmList = () =>
   apiFetch<{ projects: FilmListItem[] }>("/api/v1/films");
 
+// Starter templates for the "new film" screen. Static catalog from the
+// backend — hitting /templates is cheap and the result rarely changes.
+export interface FilmTemplate {
+  id: string;
+  name: string;
+  description: string;
+  category: "narrative" | "explainer" | "promo" | "experimental" | (string & {});
+  target_minutes: number;
+  style: string;
+  quality: string;
+  sdxl_variant: string;
+  motion_backend: string;
+  voice_backend: string;
+  music_backend: string;
+  sample_brief: string;
+  brief_placeholder: string;
+  tags: string[];
+}
+
+export const filmListTemplates = () =>
+  apiFetch<{ templates: FilmTemplate[] }>("/api/v1/films/templates");
+
+export const filmCreateFromTemplate = (params: {
+  template_id: string;
+  title?: string;
+  brief_override?: string;
+  config_override?: Partial<FilmConfig>;
+}) =>
+  apiFetch<{ project: FilmMeta; state: FilmState; template: FilmTemplate }>(
+    "/api/v1/films/from-template",
+    { method: "POST", body: JSON.stringify(params) }
+  );
+
 export const filmCreate = (params: { brief: string; title?: string; config?: Partial<FilmConfig> }) =>
   apiFetch<{ project: FilmMeta; state: FilmState }>("/api/v1/films", {
     method: "POST",

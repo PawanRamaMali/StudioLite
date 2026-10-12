@@ -6039,6 +6039,54 @@ async def film_list_stages():
     return {"stages": _film_stages_dict()}
 
 
+class LipsyncEvalRequest(BaseModel):
+    """Shape for POST /api/v1/lipsync/eval. ``project_id`` is required
+    because the lipsync drivers resolve each backend's user-owned venv
+    config relative to that project's output root. ``corpus`` is a list
+    of (reference, audio) pairs that already live on disk, project-
+    relative; ``backends`` picks which of musetalk/latentsync/
+    echomimicv3 to compare."""
+    project_id: str
+    corpus: List[Dict[str, Optional[str]]]
+    backends: List[str] = ["musetalk", "latentsync", "echomimicv3"]
+
+
+@app.post("/api/v1/lipsync/eval")
+async def lipsync_eval(req: LipsyncEvalRequest):
+    """Run the local lipsync-eval protocol across the chosen backends.
+
+    Returns a MatrixScorecard dict with per-backend aggregate metrics
+    and a per-metric ranking. Heavy metrics (SyncNet, LMD, FID, FVD)
+    only produce verdicts when their adapter env vars are set
+    (LIPSYNC_EVAL_SYNCNET_BIN etc.); the light structural metrics
+    (duration drift, frame-count delta) always run.
+    """
+    from filmmaker import projects as _fp, lipsync_eval as _le
+    from dataclasses import asdict as _asdict
+    try:
+        proj = _fp.load(OUTPUT_DIR, req.project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+
+    import os as _os
+    corpus: List[tuple] = []
+    for pair in req.corpus:
+        ref = pair.get("reference") or ""
+        if not ref:
+            raise HTTPException(422, "corpus item missing 'reference'")
+        ref_abs = _os.path.join(proj.dir, str(ref).replace("/", _os.sep))
+        audio = pair.get("audio")
+        audio_abs = (_os.path.join(proj.dir, str(audio).replace("/", _os.sep))
+                     if audio else None)
+        corpus.append((ref_abs, audio_abs))
+
+    drivers = {name: _le.studiolite_backend_driver(proj, name)
+               for name in req.backends}
+    out_dir = _os.path.join(proj.dir, "artifacts", "lipsync_eval")
+    card = _le.run_matrix(drivers, corpus, out_dir)
+    return _asdict(card)
+
+
 @app.get("/api/v1/backends")
 async def list_backends(stage: Optional[str] = None):
     """Expose the backend registry so the frontend sources VRAM, licence,

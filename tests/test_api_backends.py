@@ -177,3 +177,55 @@ def test_vbench_endpoint_refresh_overrides_stored(monkeypatch, tmp_path):
     finally:
         # Clean up the probe scorer so later tests see a stable registry.
         _vb._SCORERS[:] = [s for s in _vb._SCORERS if s.name != "probe"]
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/lipsync/eval
+
+def test_lipsync_eval_404_for_missing_project(monkeypatch, tmp_path):
+    _api, client = _fresh_api(monkeypatch, tmp_path)
+    r = client.post("/api/v1/lipsync/eval",
+                     json={"project_id": "nope", "corpus": [], "backends": []})
+    assert r.status_code == 404
+
+
+def test_lipsync_eval_422_without_reference(monkeypatch, tmp_path):
+    api, client = _fresh_api(monkeypatch, tmp_path)
+    from filmmaker import projects as _fp
+    api.filmmaker_projects = _fp  # type: ignore[attr-defined]
+    proj = _make_project(api)
+    r = client.post("/api/v1/lipsync/eval", json={
+        "project_id": proj.project_id,
+        "corpus": [{"audio": "a.wav"}],
+        "backends": ["musetalk"],
+    })
+    assert r.status_code == 422
+
+
+def test_lipsync_eval_matrix_shape(monkeypatch, tmp_path):
+    """With all three backends uninstalled (no config.json for any),
+    the matrix still returns a well-shaped scorecard - rendered_count
+    is zero and every heavy metric aggregates to None."""
+    api, client = _fresh_api(monkeypatch, tmp_path)
+    from filmmaker import projects as _fp
+    api.filmmaker_projects = _fp  # type: ignore[attr-defined]
+    proj = _make_project(api)
+    # Reference exists on disk so the matrix can at least call ffprobe.
+    import os as _os
+    ref = _os.path.join(proj.dir, "ref.mp4")
+    with open(ref, "wb") as f:
+        f.write(b"stub")
+
+    r = client.post("/api/v1/lipsync/eval", json={
+        "project_id": proj.project_id,
+        "corpus": [{"reference": "ref.mp4", "audio": None}],
+        "backends": ["musetalk", "latentsync", "echomimicv3"],
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["corpus_count"] == 1
+    names = {row["backend"] for row in body["backends"]}
+    assert names == {"musetalk", "latentsync", "echomimicv3"}
+    for row in body["backends"]:
+        assert row["rendered_count"] == 0
+        assert row["metrics"]["syncnet_confidence"] is None

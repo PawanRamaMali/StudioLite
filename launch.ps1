@@ -60,13 +60,70 @@ function Test-LocalPort([int]$port) {
     } catch { return $false } finally { $c.Close() }
 }
 
-# Refuse to start if ports are already taken (likely a previous launcher).
-foreach ($p in 8000, 3000) {
-    if (Test-LocalPort $p) {
-        Write-Host "Port $p is already in use. Close the existing server (or kill old uvicorn/node) and retry." -ForegroundColor Red
-        Read-Host 'Press Enter to close'
-        exit 1
+function Get-PortHolder([int]$port) {
+    try {
+        $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+        if (-not $conn) { return $null }
+        $pid_ = $conn.OwningProcess
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $pid_" -ErrorAction SilentlyContinue
+        $name = if ($cim -and $cim.Name) { $cim.Name } else { '?' }
+        $cmd  = if ($cim -and $cim.CommandLine) { $cim.CommandLine } else { '' }
+        return [pscustomobject]@{ Pid = $pid_; Name = $name; CommandLine = $cmd }
+    } catch { return $null }
+}
+
+# A port holder is "ours" (a stale StudioLite) when the command line clearly
+# names our server entrypoints. We only auto-reclaim those; a stranger (an
+# unrelated dev server from another project) is left alone and we move to
+# the next free port instead.
+function Test-IsStudioLiteHolder($holder, [string]$kind) {
+    if (-not $holder) { return $false }
+    $cmd = $holder.CommandLine
+    if (-not $cmd) { return $false }
+    if ($kind -eq 'api') {
+        return ($cmd -match 'uvicorn\s+api_server:app' -or $cmd -match 'api_server\.py')
     }
+    if ($kind -eq 'web') {
+        $webDir = (Join-Path $root 'web').Replace('\', '\\')
+        return ($cmd -match "next.*(dev|start)" -and $cmd -match $webDir) `
+            -or ($cmd -match 'next-server')
+    }
+    return $false
+}
+
+function Find-FreePort([int]$start, [int]$maxTries, [string]$kind) {
+    for ($i = 0; $i -lt $maxTries; $i++) {
+        $p = $start + $i
+        if (-not (Test-LocalPort $p)) { return $p }
+        if ($i -eq 0) {
+            $holder = Get-PortHolder $p
+            if (Test-IsStudioLiteHolder $holder $kind) {
+                Write-Host ("  Port {0} held by a stale StudioLite (pid {1}); reclaiming." -f $p, $holder.Pid) -ForegroundColor Yellow
+                try { Stop-Process -Id $holder.Pid -Force -ErrorAction Stop } catch {}
+                Start-Sleep -Milliseconds 400
+                if (-not (Test-LocalPort $p)) { return $p }
+            } elseif ($holder) {
+                Write-Host ("  Port {0} held by {1} (pid {2}); using an alternate port." -f $p, $holder.Name, $holder.Pid) -ForegroundColor Yellow
+            } else {
+                Write-Host ("  Port {0} appears taken; using an alternate port." -f $p) -ForegroundColor Yellow
+            }
+        }
+    }
+    return 0
+}
+
+$apiPort = Find-FreePort 8000 20 'api'
+$webPort = Find-FreePort 3000 20 'web'
+if ($apiPort -eq 0) {
+    Write-Host 'No free API port found in 8000-8019.' -ForegroundColor Red
+    Read-Host 'Press Enter to close'
+    exit 1
+}
+if ($webPort -eq 0) {
+    Write-Host 'No free web port found in 3000-3019.' -ForegroundColor Red
+    Read-Host 'Press Enter to close'
+    exit 1
 }
 
 # Mint the API token up front (api_server reuses .auth) so the web server
@@ -80,19 +137,34 @@ if (-not "$(if (Test-Path $authFile) { Get-Content -Raw $authFile })".Trim()) {
 }
 $env:STUDIOLITE_API_TOKEN = "$(Get-Content -Raw $authFile)".Trim()
 
-Write-Host 'Starting API server  (uvicorn) on http://localhost:8000 ...'
+$apiUrl = "http://localhost:$apiPort"
+$webUrl = "http://localhost:$webPort"
+
+# API's CORS allowlist defaults to :3000; when the launcher moves the web
+# port, teach the API about the new origin before it boots or every browser
+# fetch gets rejected at the CORS preflight.
+$env:STUDIOLITE_ALLOWED_ORIGINS = "http://localhost:$webPort,http://127.0.0.1:$webPort"
+
+Write-Host "Starting API server  (uvicorn) on $apiUrl ..."
 $apiProc = Start-Process -FilePath $venvPython `
-    -ArgumentList @('-u', '-m', 'uvicorn', 'api_server:app', '--host', '127.0.0.1', '--port', '8000', '--ws-ping-interval', '30', '--ws-ping-timeout', '90') `
+    -ArgumentList @('-u', '-m', 'uvicorn', 'api_server:app', '--host', '127.0.0.1', '--port', "$apiPort", '--ws-ping-interval', '30', '--ws-ping-timeout', '90') `
     -WorkingDirectory $root `
     -RedirectStandardOutput $apiOut `
     -RedirectStandardError $apiErr `
     -WindowStyle Hidden `
     -PassThru
 
+# Children of this launcher inherit our environment, so we point the web
+# server at the chosen API port via two env vars: STUDIOLITE_API_URL feeds
+# next.config.ts's rewrite target, NEXT_PUBLIC_API_URL is the direct
+# browser-side base read by web/lib/api.ts.
+$env:STUDIOLITE_API_URL = $apiUrl
+$env:NEXT_PUBLIC_API_URL = $apiUrl
+
 $webMode = if (Test-Path (Join-Path $root '.production')) { 'start' } else { 'dev' }
-Write-Host "Starting Next.js ($webMode) on http://localhost:3000 ..."
+Write-Host "Starting Next.js ($webMode) on $webUrl ..."
 $webProc = Start-Process -FilePath 'cmd.exe' `
-    -ArgumentList @('/c', 'npm', 'run', $webMode, '--', '--hostname', '127.0.0.1') `
+    -ArgumentList @('/c', 'npm', 'run', $webMode, '--', '--hostname', '127.0.0.1', '--port', "$webPort") `
     -WorkingDirectory $webDir `
     -RedirectStandardOutput $webOut `
     -RedirectStandardError $webErr `
@@ -118,8 +190,8 @@ try {
     $deadline = (Get-Date).AddMinutes(3)
     $apiUp = $false; $webUp = $false
     while ((Get-Date) -lt $deadline -and -not ($apiUp -and $webUp)) {
-        if (-not $apiUp) { $apiUp = Test-LocalPort 8000 }
-        if (-not $webUp) { $webUp = Test-LocalPort 3000 }
+        if (-not $apiUp) { $apiUp = Test-LocalPort $apiPort }
+        if (-not $webUp) { $webUp = Test-LocalPort $webPort }
         $apiTag = if ($apiUp) { '[OK]' } else { '[..]' }
         $webTag = if ($webUp) { '[OK]' } else { '[..]' }
         Write-Host ("`r  api {0}   web {1}   " -f $apiTag, $webTag) -NoNewline
@@ -149,15 +221,15 @@ try {
     }
     Write-Host ''
 
-    if (-not $apiUp) { Write-Host "API did not respond on :8000 within 3 min. See $logDir" -ForegroundColor Red; throw 'api timeout' }
-    if (-not $webUp) { Write-Host "Next.js did not respond on :3000 within 3 min. See $logDir" -ForegroundColor Red; throw 'web timeout' }
+    if (-not $apiUp) { Write-Host "API did not respond on :$apiPort within 3 min. See $logDir" -ForegroundColor Red; throw 'api timeout' }
+    if (-not $webUp) { Write-Host "Next.js did not respond on :$webPort within 3 min. See $logDir" -ForegroundColor Red; throw 'web timeout' }
 
     Write-Host ''
     Write-Host '  Both servers are up.' -ForegroundColor Green
-    Write-Host '  Web : http://localhost:3000'
-    Write-Host '  API : http://localhost:8000/docs'
+    Write-Host "  Web : $webUrl"
+    Write-Host "  API : $apiUrl/docs"
     Write-Host ''
-    Start-Process 'http://localhost:3000' | Out-Null
+    Start-Process $webUrl | Out-Null
 
     Write-Host 'Press Ctrl+C to stop both servers.' -ForegroundColor Cyan
     Write-Host '=================================================' -ForegroundColor DarkGray

@@ -1,5 +1,10 @@
 import type { NextConfig } from "next";
 
+// Allow the launcher to retarget the API when :8000 is taken. STUDIOLITE_API_URL
+// is read fresh each time the dev server starts (next reads this file on boot),
+// so the launcher can hand us a different port without rebuilding.
+const apiBase = process.env.STUDIOLITE_API_URL || "http://localhost:8000";
+
 const nextConfig: NextConfig = {
   output: "standalone",
   // Next 15+ blocks HMR websockets from any origin not in this list, which
@@ -10,7 +15,7 @@ const nextConfig: NextConfig = {
     return [
       {
         source: "/api/:path*",
-        destination: "http://localhost:8000/api/:path*",
+        destination: `${apiBase}/api/:path*`,
       },
     ];
   },

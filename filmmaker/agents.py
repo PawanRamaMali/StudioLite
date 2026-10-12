@@ -3963,6 +3963,7 @@ def run_continuity(project: Project) -> Dict[str, Any]:
     colorist_art= project.read_artifact("colorist") or {}
     titles_art  = project.read_artifact("titles") or {}
     upscale_art = project.read_artifact("upscale") or {}
+    lipsync_art = project.read_artifact("lipsync") or {}
 
     scenes = breakdown.get("scenes") or []
     shots_by_scene = storyboard.get("scenes") or {}
@@ -4099,11 +4100,31 @@ def run_continuity(project: Project) -> Dict[str, Any]:
                    f"({'over' if drift > 0 else 'under'} by {drift_pct*100:.0f}%)",
                    fix_hint="Edit the breakdown to shorten scenes, or rerun with a different target_minutes.")
 
+    # ---- Lipsync: flag a configured backend that didn't actually render ----
+    try:
+        cfg_lipsync = project.meta.config.lipsync_backend
+    except AttributeError:
+        cfg_lipsync = "none"
+    if cfg_lipsync and cfg_lipsync != "none":
+        if not lipsync_art.get("rendered"):
+            reason = lipsync_art.get("skipped") or "no artifact"
+            hint = lipsync_art.get("install_hint") or \
+                   "Set lipsync_backend=none or install the backend."
+            _issue("warning", "lipsync",
+                   f"Lip sync backend {cfg_lipsync!r} did not render: {reason}",
+                   fix_hint=hint)
+
     # ---- Final file lands on disk ----
+    # Only count lipsync as the final source when it actually rendered;
+    # a passthrough artifact just points back at the upstream video.
+    chain = []
+    if lipsync_art.get("rendered"):
+        chain.append((lipsync_art, "lipsync"))
+    chain += [(upscale_art, "upscale"), (titles_art, "titles"),
+              (colorist_art, "colorist"), (mixer_art, "mixer"),
+              (editor_art, "editor")]
     final_rel: Optional[str] = None
-    for src_art, src_name in ((upscale_art, "upscale"), (titles_art, "titles"),
-                               (colorist_art, "colorist"), (mixer_art, "mixer"),
-                               (editor_art, "editor")):
+    for src_art, src_name in chain:
         p = src_art.get("output_path")
         if p:
             abs_p = os.path.join(project.dir, p)

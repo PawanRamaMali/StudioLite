@@ -27,8 +27,12 @@ calls.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol
 
@@ -128,11 +132,226 @@ class _StubBackend:
         }
 
 
-class MuseTalkBackend(_StubBackend):
-    name = "musetalk"
-    reason = "MuseTalk 1.5 shim not yet wired"
-    install_hint = ("MuseTalk 1.5 needs its own venv (torch 2.0.1 + mmcv 2.0.1 "
-                    "+ Python 3.10). Shim will be added in a follow-up commit.")
+class MuseTalkBackend:
+    """MuseTalk 1.5 via an isolated venv subprocess.
+
+    MuseTalk hard-pins torch==2.0.1 + mmcv==2.0.1 on Python 3.10 / CUDA
+    11.8, which collides with StudioLite's main torch 2.3+ / Python 3.11
+    stack. We can't install it alongside; we shell out to a separate
+    venv the user set up once.
+
+    Setup is a one-time user action, not something StudioLite does on
+    its own (a bad `pip install` sequence can brick a user's torch
+    install, and MuseTalk's weights are ~2 GB). The user:
+      1. Clones TMElyralab/MuseTalk under any path they like.
+      2. Creates a Python 3.10 venv, pip-installs MuseTalk's pinned
+         requirements, downloads weights per MuseTalk's README.
+      3. Writes `.mp/lipsync-musetalk/config.json` under the StudioLite
+         output dir pointing at that clone + venv + weights.
+
+    `check_installed()` reads that config and verifies every path still
+    exists. `run()` writes a per-shot MuseTalk inference-config YAML,
+    calls MuseTalk's `scripts.inference` module with the venv's python,
+    and moves the result into place."""
+
+    name: BackendName = "musetalk"
+    _CONFIG_SUBDIR = "lipsync-musetalk"
+    _CONFIG_NAME = "config.json"
+
+    def _config_path(self, project: Project) -> str:
+        """Where we expect the user to drop their MuseTalk config.
+
+        Resolved relative to the project's films-root parent so the file
+        is shared across all films, not duplicated per-film."""
+        root = getattr(project, "_root_dir", None) or os.path.dirname(project.dir)
+        # films_root() nests `films/`; the config lives one level above
+        # so it's siblings-with-models, not shared with film projects.
+        base = os.path.dirname(root) if os.path.basename(root) == "films" else root
+        return os.path.join(base, self._CONFIG_SUBDIR, self._CONFIG_NAME)
+
+    def _load_config(self, project: Project) -> Optional[Dict[str, Any]]:
+        path = self._config_path(project)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning("MuseTalk config at %s unreadable: %s", path, e)
+            return None
+
+    def check_installed(self, project: Project) -> BackendStatus:
+        cfg_path = self._config_path(project)
+        cfg = self._load_config(project)
+        if cfg is None:
+            return BackendStatus(
+                name=self.name, available=False,
+                reason=f"no config at {cfg_path}",
+                install_hint=(
+                    "Clone TMElyralab/MuseTalk, make a Python 3.10 venv, pip-install its "
+                    "pinned requirements (torch==2.0.1, mmcv==2.0.1), and drop a "
+                    f"config.json at {cfg_path} with keys: repo_dir, venv_python, "
+                    "unet_model_path, unet_config, version (\"v15\"), ffmpeg_path."
+                ),
+            )
+        required = ("repo_dir", "venv_python", "unet_model_path", "unet_config")
+        missing_keys = [k for k in required if not cfg.get(k)]
+        if missing_keys:
+            return BackendStatus(
+                name=self.name, available=False,
+                reason=f"config missing keys: {', '.join(missing_keys)}",
+                install_hint=f"Add the missing keys to {cfg_path}.",
+            )
+        repo_dir = cfg["repo_dir"]
+        venv_py = cfg["venv_python"]
+        if not os.path.isdir(repo_dir):
+            return BackendStatus(name=self.name, available=False,
+                                 reason=f"repo_dir does not exist: {repo_dir}",
+                                 install_hint="Fix repo_dir in the config.")
+        if not os.path.exists(venv_py):
+            return BackendStatus(name=self.name, available=False,
+                                 reason=f"venv_python does not exist: {venv_py}",
+                                 install_hint="Fix venv_python in the config.")
+        return BackendStatus(name=self.name, available=True)
+
+    def run(self, project: Project, input_video: str,
+            voice_lines: List[Dict[str, Any]],
+            output_video: str) -> Dict[str, Any]:
+        status = self.check_installed(project)
+        if not status.available:
+            return _passthrough(self.name, project, input_video, status)
+
+        cfg = self._load_config(project) or {}
+        audio_rel = self._collect_speech_track(project, voice_lines)
+        if audio_rel is None:
+            return _passthrough(
+                self.name, project, input_video,
+                BackendStatus(name=self.name, available=False,
+                              reason="no dialogue wavs to drive lip sync"),
+            )
+        audio_abs = os.path.join(project.dir, audio_rel.replace("/", os.sep))
+
+        # Write MuseTalk's inference config.
+        work_dir = os.path.join(project.dir, "artifacts", "lipsync-musetalk")
+        os.makedirs(work_dir, exist_ok=True)
+        task_yaml = os.path.join(work_dir, "inference.yaml")
+        bbox_shift = int(cfg.get("bbox_shift", 0))
+        with open(task_yaml, "w", encoding="utf-8") as f:
+            f.write("task_0:\n"
+                    f"  video_path: {_posix(input_video)}\n"
+                    f"  audio_path: {_posix(audio_abs)}\n"
+                    f"  bbox_shift: {bbox_shift}\n")
+
+        result_dir = os.path.join(work_dir, "results")
+        os.makedirs(result_dir, exist_ok=True)
+        cmd = [
+            cfg["venv_python"], "-m", "scripts.inference",
+            "--inference_config", task_yaml,
+            "--result_dir", result_dir,
+            "--unet_model_path", cfg["unet_model_path"],
+            "--unet_config", cfg["unet_config"],
+            "--version", cfg.get("version", "v15"),
+        ]
+        if cfg.get("ffmpeg_path"):
+            cmd += ["--ffmpeg_path", cfg["ffmpeg_path"]]
+        extra = cfg.get("extra_args") or []
+        if isinstance(extra, list):
+            cmd += [str(x) for x in extra]
+
+        logger.info("MuseTalk inference: cd %s && %s", cfg["repo_dir"], " ".join(cmd))
+        try:
+            proc = subprocess.run(cmd, cwd=cfg["repo_dir"], capture_output=True,
+                                   text=True, check=False,
+                                   timeout=int(cfg.get("timeout_sec", 1800)))
+        except subprocess.TimeoutExpired as e:
+            return _passthrough(self.name, project, input_video,
+                                BackendStatus(name=self.name, available=False,
+                                              reason=f"MuseTalk timed out: {e}"))
+        if proc.returncode != 0:
+            # Keep stderr tail so the UI can show why the shim failed.
+            tail = (proc.stderr or "").strip().splitlines()[-6:]
+            return _passthrough(self.name, project, input_video,
+                                BackendStatus(name=self.name, available=False,
+                                              reason=f"MuseTalk exited {proc.returncode}: " + " | ".join(tail)))
+
+        # MuseTalk writes `<result_dir>/task_0.mp4` on the happy path.
+        produced = os.path.join(result_dir, "task_0.mp4")
+        if not os.path.exists(produced):
+            # Fall back to the newest mp4 in result_dir.
+            candidates = sorted(
+                (os.path.join(result_dir, n) for n in os.listdir(result_dir)
+                 if n.lower().endswith(".mp4")),
+                key=lambda p: os.path.getmtime(p),
+                reverse=True,
+            )
+            produced = candidates[0] if candidates else ""
+        if not produced or not os.path.exists(produced):
+            return _passthrough(self.name, project, input_video,
+                                BackendStatus(name=self.name, available=False,
+                                              reason="MuseTalk produced no output file"))
+
+        try:
+            shutil.copy2(produced, output_video)
+        except Exception as e:
+            return _passthrough(self.name, project, input_video,
+                                BackendStatus(name=self.name, available=False,
+                                              reason=f"could not copy MuseTalk output: {e}"))
+
+        return {
+            "backend": self.name,
+            "rendered": True,
+            "input_path": _rel(project, input_video),
+            "output_path": _rel(project, output_video),
+            "audio_path": _rel(project, audio_abs),
+            "line_count": len(voice_lines),
+            "repo_dir": cfg["repo_dir"],
+            "version": cfg.get("version", "v15"),
+        }
+
+    def _collect_speech_track(self, project: Project,
+                               voice_lines: List[Dict[str, Any]]) -> Optional[str]:
+        """Pick the best speech-only audio to drive MuseTalk.
+
+        Preference order:
+          1. The mixer stage's speech-only intermediate, if persisted
+             (artifacts/mixer_speech.wav; mixer stage may write it).
+          2. A concat of per-line voice_actor wavs in scene/shot order.
+
+        Returns a project-relative POSIX path, or None if nothing's
+        available (no dialogue in this film)."""
+        mixer_speech = os.path.join(project.dir, "artifacts", "mixer_speech.wav")
+        if os.path.exists(mixer_speech):
+            return _rel(project, mixer_speech)
+
+        usable = [l for l in voice_lines if l.get("wav") and l.get("synthesized")]
+        if not usable:
+            return None
+        out_rel = "artifacts/lipsync-musetalk/speech.wav"
+        out_abs = os.path.join(project.dir, out_rel.replace("/", os.sep))
+        os.makedirs(os.path.dirname(out_abs), exist_ok=True)
+
+        # ffmpeg concat demuxer: write a listfile referencing each wav.
+        with tempfile.NamedTemporaryFile("w", suffix=".txt",
+                                           delete=False, encoding="utf-8") as lf:
+            for line in usable:
+                wav_rel = str(line["wav"])
+                wav_abs = os.path.join(project.dir, wav_rel.replace("/", os.sep))
+                if os.path.exists(wav_abs):
+                    lf.write(f"file '{wav_abs.replace(chr(92), '/')}'\n")
+            listfile = lf.name
+        try:
+            cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                   "-i", listfile, "-c", "copy", out_abs]
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if proc.returncode != 0 or not os.path.exists(out_abs):
+                logger.warning("ffmpeg concat for MuseTalk speech failed: %s", proc.stderr)
+                return None
+            return out_rel
+        finally:
+            try:
+                os.unlink(listfile)
+            except OSError:
+                pass
 
 
 class LatentSyncBackend(_StubBackend):
@@ -254,3 +473,24 @@ def _rel(project: Project, abs_path: str) -> str:
         return os.path.relpath(abs_path, project.dir).replace(os.sep, "/")
     except ValueError:
         return abs_path
+
+
+def _posix(path: str) -> str:
+    """YAML-safe path: forward slashes, no surprise backslashes."""
+    return path.replace("\\", "/")
+
+
+def _passthrough(backend_name: BackendName, project: Project,
+                  input_video: str, status: BackendStatus) -> Dict[str, Any]:
+    """Shape of a skip-artifact that still points at the untouched final
+    video so continuity and the UI have something to render."""
+    out = {
+        "backend": backend_name,
+        "rendered": False,
+        "skipped": status.reason,
+        "input_path": _rel(project, input_video),
+        "output_path": _rel(project, input_video),
+    }
+    if status.install_hint:
+        out["install_hint"] = status.install_hint
+    return out

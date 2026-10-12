@@ -72,10 +72,10 @@ def test_lipsync_missing_final_video_reports_skip(tmp_path: Path):
     assert "no final video" in result["skipped"]
 
 
-def test_lipsync_musetalk_backend_not_installed_yet(tmp_path: Path):
-    """MuseTalk backend is still stubbed - check_installed should report
-    available=False with a specific install_hint, and run() should return
-    a passthrough artifact citing that hint."""
+def test_lipsync_musetalk_backend_no_config_file(tmp_path: Path):
+    """With musetalk selected but no config.json dropped at the expected
+    path, the backend reports available=False naming the config path, and
+    run() returns a passthrough citing the install hint."""
     from filmmaker.lipsync import run_lipsync, get_backend
     proj = _mkproj(tmp_path, lipsync_backend="musetalk")
     _write_fake_final(proj)
@@ -83,12 +83,13 @@ def test_lipsync_musetalk_backend_not_installed_yet(tmp_path: Path):
     status = get_backend("musetalk").check_installed(proj)
     assert status.name == "musetalk"
     assert status.available is False
-    assert "venv" in status.install_hint.lower()
+    assert "config" in status.reason.lower()
+    assert "lipsync-musetalk" in status.install_hint
 
     result = run_lipsync(proj)
     assert result["backend"] == "musetalk"
     assert result["rendered"] is False
-    assert "not yet wired" in result["skipped"]
+    assert "config" in result["skipped"].lower()
     assert "install_hint" in result
     # Still passes through - final.mp4 isn't lipsync'd but downstream
     # continuity should see output_path pointing at the real file.
@@ -131,6 +132,178 @@ def test_lipsync_prefers_upscale_output_over_titles(tmp_path: Path):
 
     result = run_lipsync(proj)
     assert result["input_path"] == upscale_rel
+
+
+def _write_musetalk_config(tmp_path: Path, project_output_dir: Path,
+                            overrides=None) -> Path:
+    """Drop a `.mp/lipsync-musetalk/config.json` next to the project's
+    films root. The backend resolves it from the project's _root_dir."""
+    import json as _json
+    cfg_dir = project_output_dir / "lipsync-musetalk"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    repo_dir = tmp_path / "musetalk_repo"
+    repo_dir.mkdir()
+    venv_py = tmp_path / "venv_py.exe"
+    venv_py.write_bytes(b"stub")
+    cfg = {
+        "repo_dir": str(repo_dir),
+        "venv_python": str(venv_py),
+        "unet_model_path": "models/musetalkV15/unet.pth",
+        "unet_config": "models/musetalkV15/musetalk.json",
+        "version": "v15",
+        "ffmpeg_path": "ffmpeg",
+    }
+    if overrides:
+        cfg.update(overrides)
+    cfg_path = cfg_dir / "config.json"
+    cfg_path.write_text(_json.dumps(cfg), encoding="utf-8")
+    return cfg_path
+
+
+def test_musetalk_check_installed_missing_config(tmp_path: Path):
+    """No config.json at all → available=False with a clear install_hint
+    naming the expected path, so the UI can tell the user where to drop
+    the file."""
+    from filmmaker.lipsync import MuseTalkBackend
+    proj = _mkproj(tmp_path, lipsync_backend="musetalk")
+    status = MuseTalkBackend().check_installed(proj)
+    assert status.available is False
+    assert "config" in status.reason.lower()
+    assert "lipsync-musetalk" in status.install_hint
+
+
+def test_musetalk_check_installed_bad_repo_dir(tmp_path: Path):
+    """Config exists but points at a repo_dir that isn't on disk →
+    available=False with the actual path in the reason."""
+    from filmmaker.lipsync import MuseTalkBackend
+    proj = _mkproj(tmp_path, lipsync_backend="musetalk")
+    _write_musetalk_config(tmp_path, tmp_path,
+                            overrides={"repo_dir": str(tmp_path / "ghost")})
+    status = MuseTalkBackend().check_installed(proj)
+    assert status.available is False
+    assert "repo_dir" in status.reason
+    assert "ghost" in status.reason
+
+
+def test_musetalk_check_installed_happy(tmp_path: Path):
+    """Config valid + repo + venv_python all on disk → available=True."""
+    from filmmaker.lipsync import MuseTalkBackend
+    proj = _mkproj(tmp_path, lipsync_backend="musetalk")
+    _write_musetalk_config(tmp_path, tmp_path)
+    status = MuseTalkBackend().check_installed(proj)
+    assert status.available is True
+    assert status.reason == ""
+
+
+def test_musetalk_run_no_dialogue_passthrough(tmp_path: Path):
+    """Backend is installed but the film has no voice_actor lines →
+    passthrough with 'no dialogue' reason, no subprocess call."""
+    from filmmaker.lipsync import run_lipsync
+    proj = _mkproj(tmp_path, lipsync_backend="musetalk")
+    _write_musetalk_config(tmp_path, tmp_path)
+    _write_fake_final(proj)
+    result = run_lipsync(proj)
+    assert result["backend"] == "musetalk"
+    assert result["rendered"] is False
+    assert "no dialogue" in result["skipped"].lower()
+
+
+def test_musetalk_run_subprocess_success(tmp_path: Path, monkeypatch):
+    """Happy path: speech track already exists (mixer_speech.wav), the
+    subprocess call succeeds, and MuseTalk's result file is copied to
+    the output path. No real ffmpeg or MuseTalk is invoked."""
+    import subprocess as _sp
+    from filmmaker.lipsync import run_lipsync
+
+    proj = _mkproj(tmp_path, lipsync_backend="musetalk")
+    _write_musetalk_config(tmp_path, tmp_path)
+    final_rel = _write_fake_final(proj)
+
+    # Give the backend a pre-rendered mixer-speech so it skips the
+    # ffmpeg-concat path (that path is covered separately by the
+    # voice_actor branch, and real ffmpeg isn't guaranteed on CI).
+    speech_abs = os.path.join(proj.dir, "artifacts", "mixer_speech.wav")
+    os.makedirs(os.path.dirname(speech_abs), exist_ok=True)
+    with open(speech_abs, "wb") as f:
+        f.write(b"stub-wav")
+
+    # Register one voice_actor line so collect_speech_track has something
+    # to count even though we're using the mixer path.
+    proj.write_artifact("voice_actor", {"lines": [
+        {"scene_id": "s01", "shot_id": "sh1", "speaker": "MORGAN",
+         "text": "Hello.", "wav": "voice/s01_sh1.wav",
+         "synthesized": True, "error": None},
+    ]})
+
+    calls: Dict[str, Any] = {}
+
+    def _fake_run(cmd, cwd=None, capture_output=False, text=False,
+                   check=False, timeout=None):
+        calls["cmd"] = cmd
+        calls["cwd"] = cwd
+        # MuseTalk writes task_0.mp4 under --result_dir.
+        rd_idx = cmd.index("--result_dir") + 1
+        produced = os.path.join(cmd[rd_idx], "task_0.mp4")
+        os.makedirs(cmd[rd_idx], exist_ok=True)
+        with open(produced, "wb") as f:
+            f.write(b"stub-musetalk-output")
+        class _Proc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _Proc()
+
+    monkeypatch.setattr(_sp, "run", _fake_run)
+
+    result = run_lipsync(proj)
+    assert result["backend"] == "musetalk"
+    assert result["rendered"] is True, result
+    assert result["version"] == "v15"
+    assert result["line_count"] == 1
+    # Output lands with the _lipsync suffix next to the final video.
+    assert result["output_path"].endswith("_lipsync.mp4")
+    assert result["output_path"] != result["input_path"]
+    # And the file is actually on disk where the artifact claims.
+    out_abs = os.path.join(proj.dir, result["output_path"].replace("/", os.sep))
+    assert os.path.exists(out_abs)
+    # Verify we called into the MuseTalk inference module.
+    assert calls["cmd"][1:4] == ["-m", "scripts.inference", "--inference_config"]
+
+
+def test_musetalk_run_subprocess_failure_passthrough(tmp_path: Path, monkeypatch):
+    """When MuseTalk exits non-zero, the backend captures the stderr
+    tail and returns a passthrough artifact rather than halting."""
+    import subprocess as _sp
+    from filmmaker.lipsync import run_lipsync
+
+    proj = _mkproj(tmp_path, lipsync_backend="musetalk")
+    _write_musetalk_config(tmp_path, tmp_path)
+    _write_fake_final(proj)
+    speech_abs = os.path.join(proj.dir, "artifacts", "mixer_speech.wav")
+    os.makedirs(os.path.dirname(speech_abs), exist_ok=True)
+    with open(speech_abs, "wb") as f:
+        f.write(b"stub")
+    proj.write_artifact("voice_actor", {"lines": [
+        {"scene_id": "s01", "shot_id": "sh1", "speaker": "M",
+         "text": "Hi.", "wav": "voice/x.wav", "synthesized": True},
+    ]})
+
+    def _fake_run(cmd, **kw):
+        class _Proc:
+            returncode = 2
+            stdout = ""
+            stderr = "ImportError: libtorch_cuda.so.11.8 missing"
+        return _Proc()
+
+    monkeypatch.setattr(_sp, "run", _fake_run)
+
+    result = run_lipsync(proj)
+    assert result["backend"] == "musetalk"
+    assert result["rendered"] is False
+    assert "exited 2" in result["skipped"]
+    assert "libtorch_cuda" in result["skipped"]
+    # Passthrough points at the untouched final.
+    assert result["output_path"] == result["input_path"]
 
 
 def test_lipsync_backend_exception_is_contained(tmp_path: Path, monkeypatch):

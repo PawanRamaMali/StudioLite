@@ -1,4 +1,4 @@
-"""End-to-end integration harness for the 20-stage Film Studio pipeline.
+"""End-to-end integration harness for the 21-stage Film Studio pipeline.
 
 Does NOT exercise real SDXL / Wan / MusicGen / Whisper weights — those
 take minutes per stage and depend on >30 GB of weights. Instead:

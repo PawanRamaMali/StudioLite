@@ -1,14 +1,11 @@
-"""Tests for the lipsync stage scaffold.
+"""Tests for the lipsync stage and its three subprocess backends.
 
 The stage is a thin dispatcher: it picks a backend from
 `config.lipsync_backend`, points it at the best available final video,
 and persists what the backend returns. Backends promise not to raise -
 they emit a skip-artifact when their models aren't installed - so the
 dispatcher's job is to pass arguments correctly and to never halt the
-pipeline.
-
-These tests cover only the scaffold - the actual MuseTalk / LatentSync /
-EchoMimicV3 shims land in follow-up commits and get their own tests."""
+pipeline."""
 from __future__ import annotations
 
 import os
@@ -136,8 +133,9 @@ def test_lipsync_prefers_upscale_output_over_titles(tmp_path: Path):
 
 def _write_musetalk_config(tmp_path: Path, project_output_dir: Path,
                             overrides=None) -> Path:
-    """Drop a `.mp/lipsync-musetalk/config.json` next to the project's
-    films root. The backend resolves it from the project's _root_dir."""
+    """Drop a `<output_dir>/lipsync-musetalk/config.json` next to the
+    project's films root. The backend resolves it from the project's
+    _root_dir."""
     import json as _json
     cfg_dir = project_output_dir / "lipsync-musetalk"
     cfg_dir.mkdir(parents=True, exist_ok=True)

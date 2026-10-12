@@ -11,19 +11,12 @@ Design:
   - Model stacks collide hard with the main `diffusers`/`torch 2.3+` stack
     (MuseTalk pins torch==2.0.1 + mmcv==2.0.1, LatentSync pins its own
     older torch, EchoMimicV3 pins tensorflow==2.15.0), so each backend
-    takes its own isolated venv under ``.mp/lipsync-venv-<name>/`` and
-    runs through a subprocess shim. Nothing in this module imports the
-    heavy deps directly.
+    runs through a subprocess shim into a user-owned venv described by
+    ``<output_dir>/lipsync-<name>/config.json``. Nothing in this module
+    imports the heavy deps directly.
   - The default backend is `none`, which produces a skip-artifact so the
     stage is "done" without touching the final cut. Users opt in by
-    setting ``config.lipsync_backend`` to one of the known names and
-    accepting the one-time venv-bootstrap cost on first run.
-
-This module provides the scaffold: the backend protocol, the `none`
-backend, stubbed `musetalk` / `latentsync` / `echomimicv3` entries that
-report `available=False` until their shim scripts land in follow-up
-commits, and the `run_lipsync(project)` stage entrypoint the registry
-calls.
+    setting ``config.lipsync_backend`` to one of the known names.
 """
 from __future__ import annotations
 
@@ -49,9 +42,9 @@ class BackendStatus:
     """Whether a backend can run right now, and if not, why.
 
     `install_hint` is a short human-readable line the UI can surface
-    verbatim ("Run `python -m filmmaker.lipsync install musetalk` to
-    bootstrap the isolated venv"). The continuity stage will raise this
-    as a warning when a project asked for a backend that isn't available."""
+    verbatim ("Drop a config.json at <output_dir>/lipsync-musetalk/"). The
+    continuity stage surfaces this as a warning when a project asked for
+    a backend that isn't available."""
 
     name: BackendName
     available: bool
@@ -120,8 +113,8 @@ class MuseTalkBackend:
       1. Clones TMElyralab/MuseTalk under any path they like.
       2. Creates a Python 3.10 venv, pip-installs MuseTalk's pinned
          requirements, downloads weights per MuseTalk's README.
-      3. Writes `.mp/lipsync-musetalk/config.json` under the StudioLite
-         output dir pointing at that clone + venv + weights.
+      3. Writes `<output_dir>/lipsync-musetalk/config.json` pointing at
+         that clone + venv + weights.
 
     `check_installed()` reads that config and verifies every path still
     exists. `run()` writes a per-shot MuseTalk inference-config YAML,
@@ -589,9 +582,9 @@ def run_lipsync(project: Project) -> Dict[str, Any]:
     input_rel = _pick_input_video(project)
     if input_rel is None:
         return {
-            "backend": backend_name,
+            "backend": backend.name,
             "rendered": False,
-            "skipped": "no final video found (upscale/titles/mixer all missing)",
+            "skipped": "no final video found (upscale/titles/colorist/mixer all missing)",
             "input_path": None,
             "output_path": None,
         }
@@ -632,8 +625,9 @@ def run_lipsync(project: Project) -> Dict[str, Any]:
 # helpers
 
 # Order matches the stage order: last writer wins. Upscale lands last on
-# the happy path, titles when upscale is "none", mixer when titles failed.
-_INPUT_CANDIDATE_STAGES = ("upscale", "titles", "mixer")
+# the happy path, titles when upscale is "none", colorist when titles
+# failed, mixer when colorist failed.
+_INPUT_CANDIDATE_STAGES = ("upscale", "titles", "colorist", "mixer")
 
 
 def _pick_input_video(project: Project) -> Optional[str]:
@@ -760,7 +754,12 @@ def _collect_speech_track(project: Project,
     try:
         cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
                "-i", listfile, "-c", "copy", out_abs]
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                   check=False, timeout=300)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.warning("ffmpeg concat for speech track failed: %s", e)
+            return None
         if proc.returncode != 0 or not os.path.exists(out_abs):
             logger.warning("ffmpeg concat for speech track failed: %s", proc.stderr)
             return None

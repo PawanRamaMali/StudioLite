@@ -156,29 +156,12 @@ class MuseTalkBackend:
 
     name: BackendName = "musetalk"
     _CONFIG_SUBDIR = "lipsync-musetalk"
-    _CONFIG_NAME = "config.json"
 
     def _config_path(self, project: Project) -> str:
-        """Where we expect the user to drop their MuseTalk config.
-
-        Resolved relative to the project's films-root parent so the file
-        is shared across all films, not duplicated per-film."""
-        root = getattr(project, "_root_dir", None) or os.path.dirname(project.dir)
-        # films_root() nests `films/`; the config lives one level above
-        # so it's siblings-with-models, not shared with film projects.
-        base = os.path.dirname(root) if os.path.basename(root) == "films" else root
-        return os.path.join(base, self._CONFIG_SUBDIR, self._CONFIG_NAME)
+        return _shared_config_path(project, self._CONFIG_SUBDIR)
 
     def _load_config(self, project: Project) -> Optional[Dict[str, Any]]:
-        path = self._config_path(project)
-        if not os.path.exists(path):
-            return None
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning("MuseTalk config at %s unreadable: %s", path, e)
-            return None
+        return _load_json(self._config_path(project))
 
     def check_installed(self, project: Project) -> BackendStatus:
         cfg_path = self._config_path(project)
@@ -310,55 +293,141 @@ class MuseTalkBackend:
 
     def _collect_speech_track(self, project: Project,
                                voice_lines: List[Dict[str, Any]]) -> Optional[str]:
-        """Pick the best speech-only audio to drive MuseTalk.
+        return _collect_speech_track(project, voice_lines,
+                                     subdir="lipsync-musetalk")
 
-        Preference order:
-          1. The mixer stage's speech-only intermediate, if persisted
-             (artifacts/mixer_speech.wav; mixer stage may write it).
-          2. A concat of per-line voice_actor wavs in scene/shot order.
 
-        Returns a project-relative POSIX path, or None if nothing's
-        available (no dialogue in this film)."""
-        mixer_speech = os.path.join(project.dir, "artifacts", "mixer_speech.wav")
-        if os.path.exists(mixer_speech):
-            return _rel(project, mixer_speech)
+class LatentSyncBackend:
+    """LatentSync 1.5 via an isolated venv subprocess.
 
-        usable = [l for l in voice_lines if l.get("wav") and l.get("synthesized")]
-        if not usable:
-            return None
-        out_rel = "artifacts/lipsync-musetalk/speech.wav"
-        out_abs = os.path.join(project.dir, out_rel.replace("/", os.sep))
-        os.makedirs(os.path.dirname(out_abs), exist_ok=True)
+    LatentSync's CLI is simpler than MuseTalk's - direct `--video_path`,
+    `--audio_path`, `--video_out_path` flags, no inference-config YAML -
+    so this class is noticeably shorter than MuseTalkBackend. It still
+    needs its own venv (ByteDance pins its own torch/CUDA combo), so
+    the user drops a config.json at
+    <output_dir>/lipsync-latentsync/config.json just like MuseTalk's."""
 
-        # ffmpeg concat demuxer: write a listfile referencing each wav.
-        with tempfile.NamedTemporaryFile("w", suffix=".txt",
-                                           delete=False, encoding="utf-8") as lf:
-            for line in usable:
-                wav_rel = str(line["wav"])
-                wav_abs = os.path.join(project.dir, wav_rel.replace("/", os.sep))
-                if os.path.exists(wav_abs):
-                    lf.write(f"file '{wav_abs.replace(chr(92), '/')}'\n")
-            listfile = lf.name
+    name: BackendName = "latentsync"
+    _CONFIG_SUBDIR = "lipsync-latentsync"
+
+    def _config_path(self, project: Project) -> str:
+        return _shared_config_path(project, self._CONFIG_SUBDIR)
+
+    def _load_config(self, project: Project) -> Optional[Dict[str, Any]]:
+        return _load_json(self._config_path(project))
+
+    def check_installed(self, project: Project) -> BackendStatus:
+        cfg_path = self._config_path(project)
+        cfg = self._load_config(project)
+        if cfg is None:
+            return BackendStatus(
+                name=self.name, available=False,
+                reason=f"no config at {cfg_path}",
+                install_hint=(
+                    "Clone bytedance/LatentSync, make a venv with ~8 GB VRAM floor, "
+                    "pip-install its requirements, and drop a config.json at "
+                    f"{cfg_path} with keys: repo_dir, venv_python, "
+                    "unet_config_path (configs/unet/stage2.yaml), "
+                    "inference_ckpt_path (checkpoints/latentsync_unet.pt)."
+                ),
+            )
+        required = ("repo_dir", "venv_python",
+                    "unet_config_path", "inference_ckpt_path")
+        missing_keys = [k for k in required if not cfg.get(k)]
+        if missing_keys:
+            return BackendStatus(
+                name=self.name, available=False,
+                reason=f"config missing keys: {', '.join(missing_keys)}",
+                install_hint=f"Add the missing keys to {cfg_path}.",
+            )
+        if not os.path.isdir(cfg["repo_dir"]):
+            return BackendStatus(name=self.name, available=False,
+                                 reason=f"repo_dir does not exist: {cfg['repo_dir']}",
+                                 install_hint="Fix repo_dir in the config.")
+        if not os.path.exists(cfg["venv_python"]):
+            return BackendStatus(name=self.name, available=False,
+                                 reason=f"venv_python does not exist: {cfg['venv_python']}",
+                                 install_hint="Fix venv_python in the config.")
+        return BackendStatus(name=self.name, available=True)
+
+    def run(self, project: Project, input_video: str,
+            voice_lines: List[Dict[str, Any]],
+            output_video: str) -> Dict[str, Any]:
+        status = self.check_installed(project)
+        if not status.available:
+            return _passthrough(self.name, project, input_video, status)
+
+        cfg = self._load_config(project) or {}
+        audio_rel = _collect_speech_track(project, voice_lines,
+                                           subdir=self._CONFIG_SUBDIR)
+        if audio_rel is None:
+            return _passthrough(
+                self.name, project, input_video,
+                BackendStatus(name=self.name, available=False,
+                              reason="no dialogue wavs to drive lip sync"),
+            )
+        audio_abs = os.path.join(project.dir, audio_rel.replace("/", os.sep))
+
+        work_dir = os.path.join(project.dir, "artifacts", self._CONFIG_SUBDIR)
+        os.makedirs(work_dir, exist_ok=True)
+        # LatentSync writes directly to --video_out_path, no result_dir.
+        latentsync_out = os.path.join(work_dir, "lipsync.mp4")
+
+        cmd = [
+            cfg["venv_python"], "-m", "scripts.inference",
+            "--unet_config_path", cfg["unet_config_path"],
+            "--inference_ckpt_path", cfg["inference_ckpt_path"],
+            "--video_path", _posix(input_video),
+            "--audio_path", _posix(audio_abs),
+            "--video_out_path", _posix(latentsync_out),
+            "--inference_steps", str(cfg.get("inference_steps", 20)),
+            "--guidance_scale", str(cfg.get("guidance_scale", 2.0)),
+        ]
+        if cfg.get("seed") is not None:
+            cmd += ["--seed", str(cfg["seed"])]
+        extra = cfg.get("extra_args") or []
+        if isinstance(extra, list):
+            cmd += [str(x) for x in extra]
+
+        logger.info("LatentSync inference: cd %s && %s",
+                    cfg["repo_dir"], " ".join(cmd))
         try:
-            cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                   "-i", listfile, "-c", "copy", out_abs]
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if proc.returncode != 0 or not os.path.exists(out_abs):
-                logger.warning("ffmpeg concat for MuseTalk speech failed: %s", proc.stderr)
-                return None
-            return out_rel
-        finally:
-            try:
-                os.unlink(listfile)
-            except OSError:
-                pass
+            proc = subprocess.run(cmd, cwd=cfg["repo_dir"], capture_output=True,
+                                   text=True, check=False,
+                                   timeout=int(cfg.get("timeout_sec", 1800)))
+        except subprocess.TimeoutExpired as e:
+            return _passthrough(self.name, project, input_video,
+                                BackendStatus(name=self.name, available=False,
+                                              reason=f"LatentSync timed out: {e}"))
+        if proc.returncode != 0:
+            tail = (proc.stderr or "").strip().splitlines()[-6:]
+            return _passthrough(self.name, project, input_video,
+                                BackendStatus(name=self.name, available=False,
+                                              reason=f"LatentSync exited {proc.returncode}: " + " | ".join(tail)))
 
+        if not os.path.exists(latentsync_out):
+            return _passthrough(self.name, project, input_video,
+                                BackendStatus(name=self.name, available=False,
+                                              reason="LatentSync produced no output file"))
 
-class LatentSyncBackend(_StubBackend):
-    name = "latentsync"
-    reason = "LatentSync 1.5 shim not yet wired"
-    install_hint = ("LatentSync 1.5 needs its own venv (8 GB VRAM floor). "
-                    "Shim will be added in a follow-up commit.")
+        try:
+            shutil.copy2(latentsync_out, output_video)
+        except Exception as e:
+            return _passthrough(self.name, project, input_video,
+                                BackendStatus(name=self.name, available=False,
+                                              reason=f"could not copy LatentSync output: {e}"))
+
+        return {
+            "backend": self.name,
+            "rendered": True,
+            "input_path": _rel(project, input_video),
+            "output_path": _rel(project, output_video),
+            "audio_path": _rel(project, audio_abs),
+            "line_count": len(voice_lines),
+            "repo_dir": cfg["repo_dir"],
+            "inference_steps": int(cfg.get("inference_steps", 20)),
+            "guidance_scale": float(cfg.get("guidance_scale", 2.0)),
+        }
 
 
 class EchoMimicV3Backend(_StubBackend):
@@ -494,3 +563,72 @@ def _passthrough(backend_name: BackendName, project: Project,
     if status.install_hint:
         out["install_hint"] = status.install_hint
     return out
+
+
+def _shared_config_path(project: Project, subdir: str) -> str:
+    """Where each backend expects the user to drop their venv config.
+
+    One directory per backend, siblings of the `films/` tree so the
+    config survives when a specific film is deleted."""
+    root = getattr(project, "_root_dir", None) or os.path.dirname(project.dir)
+    base = os.path.dirname(root) if os.path.basename(root) == "films" else root
+    return os.path.join(base, subdir, "config.json")
+
+
+def _load_json(path: str) -> Optional[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning("Config at %s unreadable: %s", path, e)
+        return None
+
+
+def _collect_speech_track(project: Project,
+                           voice_lines: List[Dict[str, Any]],
+                           subdir: str) -> Optional[str]:
+    """Pick the best speech-only audio to drive a lip-sync backend.
+
+    Preference order:
+      1. The mixer stage's speech-only intermediate, if persisted
+         (artifacts/mixer_speech.wav; mixer stage may write it).
+      2. A concat of per-line voice_actor wavs in scene/shot order,
+         written to artifacts/<subdir>/speech.wav.
+
+    Returns a project-relative POSIX path, or None if nothing's
+    available (no dialogue in this film)."""
+    mixer_speech = os.path.join(project.dir, "artifacts", "mixer_speech.wav")
+    if os.path.exists(mixer_speech):
+        return _rel(project, mixer_speech)
+
+    usable = [l for l in voice_lines if l.get("wav") and l.get("synthesized")]
+    if not usable:
+        return None
+    out_rel = f"artifacts/{subdir}/speech.wav"
+    out_abs = os.path.join(project.dir, out_rel.replace("/", os.sep))
+    os.makedirs(os.path.dirname(out_abs), exist_ok=True)
+
+    # ffmpeg concat demuxer: write a listfile referencing each wav.
+    with tempfile.NamedTemporaryFile("w", suffix=".txt",
+                                       delete=False, encoding="utf-8") as lf:
+        for line in usable:
+            wav_rel = str(line["wav"])
+            wav_abs = os.path.join(project.dir, wav_rel.replace("/", os.sep))
+            if os.path.exists(wav_abs):
+                lf.write(f"file '{wav_abs.replace(chr(92), '/')}'\n")
+        listfile = lf.name
+    try:
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+               "-i", listfile, "-c", "copy", out_abs]
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if proc.returncode != 0 or not os.path.exists(out_abs):
+            logger.warning("ffmpeg concat for speech track failed: %s", proc.stderr)
+            return None
+        return out_rel
+    finally:
+        try:
+            os.unlink(listfile)
+        except OSError:
+            pass

@@ -306,6 +306,138 @@ def test_musetalk_run_subprocess_failure_passthrough(tmp_path: Path, monkeypatch
     assert result["output_path"] == result["input_path"]
 
 
+def _write_latentsync_config(tmp_path: Path, project_output_dir: Path,
+                              overrides=None) -> Path:
+    """LatentSync counterpart to _write_musetalk_config. Config lives at
+    <output_dir>/lipsync-latentsync/config.json."""
+    import json as _json
+    cfg_dir = project_output_dir / "lipsync-latentsync"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    repo_dir = tmp_path / "latentsync_repo"
+    repo_dir.mkdir()
+    venv_py = tmp_path / "latentsync_venv_py.exe"
+    venv_py.write_bytes(b"stub")
+    cfg = {
+        "repo_dir": str(repo_dir),
+        "venv_python": str(venv_py),
+        "unet_config_path": "configs/unet/stage2.yaml",
+        "inference_ckpt_path": "checkpoints/latentsync_unet.pt",
+        "inference_steps": 20,
+        "guidance_scale": 2.0,
+    }
+    if overrides:
+        cfg.update(overrides)
+    cfg_path = cfg_dir / "config.json"
+    cfg_path.write_text(_json.dumps(cfg), encoding="utf-8")
+    return cfg_path
+
+
+def test_latentsync_check_installed_missing_config(tmp_path: Path):
+    """LatentSync selected but no config.json → available=False with the
+    config path in the reason and setup steps in the install_hint."""
+    from filmmaker.lipsync import LatentSyncBackend
+    proj = _mkproj(tmp_path, lipsync_backend="latentsync")
+    status = LatentSyncBackend().check_installed(proj)
+    assert status.available is False
+    assert "config" in status.reason.lower()
+    assert "lipsync-latentsync" in status.install_hint
+    assert "bytedance/LatentSync" in status.install_hint
+
+
+def test_latentsync_check_installed_happy(tmp_path: Path):
+    """Config + repo + venv all present → available=True."""
+    from filmmaker.lipsync import LatentSyncBackend
+    proj = _mkproj(tmp_path, lipsync_backend="latentsync")
+    _write_latentsync_config(tmp_path, tmp_path)
+    status = LatentSyncBackend().check_installed(proj)
+    assert status.available is True
+
+
+def test_latentsync_run_subprocess_success(tmp_path: Path, monkeypatch):
+    """Happy path: the subprocess writes to --video_out_path and the
+    backend copies it to output_video with inference_steps / guidance
+    captured in the artifact."""
+    import subprocess as _sp
+    from filmmaker.lipsync import run_lipsync
+
+    proj = _mkproj(tmp_path, lipsync_backend="latentsync")
+    _write_latentsync_config(tmp_path, tmp_path,
+                              overrides={"inference_steps": 25,
+                                          "guidance_scale": 1.5})
+    _write_fake_final(proj)
+
+    # Pre-render mixer_speech.wav so collect_speech_track skips ffmpeg.
+    speech_abs = os.path.join(proj.dir, "artifacts", "mixer_speech.wav")
+    os.makedirs(os.path.dirname(speech_abs), exist_ok=True)
+    with open(speech_abs, "wb") as f:
+        f.write(b"stub")
+    proj.write_artifact("voice_actor", {"lines": [
+        {"scene_id": "s01", "shot_id": "sh1", "speaker": "M",
+         "text": "Hi.", "wav": "voice/x.wav", "synthesized": True},
+    ]})
+
+    calls: Dict[str, Any] = {}
+
+    def _fake_run(cmd, cwd=None, **kw):
+        calls["cmd"] = cmd
+        calls["cwd"] = cwd
+        # LatentSync writes directly to the path after --video_out_path.
+        out_idx = cmd.index("--video_out_path") + 1
+        out_path = cmd[out_idx]
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "wb") as f:
+            f.write(b"stub-latentsync-output")
+        class _Proc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _Proc()
+
+    monkeypatch.setattr(_sp, "run", _fake_run)
+
+    result = run_lipsync(proj)
+    assert result["backend"] == "latentsync"
+    assert result["rendered"] is True
+    assert result["inference_steps"] == 25
+    assert result["guidance_scale"] == 1.5
+    # Verify we passed through the configured flags.
+    i = calls["cmd"].index("--inference_steps")
+    assert calls["cmd"][i + 1] == "25"
+    j = calls["cmd"].index("--guidance_scale")
+    assert calls["cmd"][j + 1] == "1.5"
+
+
+def test_latentsync_run_subprocess_failure_passthrough(tmp_path: Path, monkeypatch):
+    """Non-zero exit → passthrough with stderr tail in the reason."""
+    import subprocess as _sp
+    from filmmaker.lipsync import run_lipsync
+
+    proj = _mkproj(tmp_path, lipsync_backend="latentsync")
+    _write_latentsync_config(tmp_path, tmp_path)
+    _write_fake_final(proj)
+    speech_abs = os.path.join(proj.dir, "artifacts", "mixer_speech.wav")
+    os.makedirs(os.path.dirname(speech_abs), exist_ok=True)
+    with open(speech_abs, "wb") as f:
+        f.write(b"stub")
+    proj.write_artifact("voice_actor", {"lines": [
+        {"scene_id": "s01", "shot_id": "sh1", "speaker": "M",
+         "text": "Hi.", "wav": "voice/x.wav", "synthesized": True},
+    ]})
+
+    def _fake_run(cmd, **kw):
+        class _Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "CUDA out of memory"
+        return _Proc()
+
+    monkeypatch.setattr(_sp, "run", _fake_run)
+    result = run_lipsync(proj)
+    assert result["rendered"] is False
+    assert "exited 1" in result["skipped"]
+    assert "CUDA out of memory" in result["skipped"]
+
+
 def test_lipsync_backend_exception_is_contained(tmp_path: Path, monkeypatch):
     """A buggy backend that raises mid-run shouldn't halt the pipeline
     either - the dispatcher wraps the call and returns a skip-artifact

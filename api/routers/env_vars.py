@@ -75,6 +75,10 @@ async def set_env_var(key: str, value: str) -> Dict[str, Any]:
     k = key.strip()
     if not k:
         raise HTTPException(status_code=422, detail="Key cannot be empty")
+    if "=" in k or any(c.isspace() for c in k):
+        raise HTTPException(status_code=422, detail="Key may not contain '=' or whitespace")
+    if "\n" in value or "\r" in value:
+        raise HTTPException(status_code=422, detail="Value may not contain newlines")
     if not _is_managed(k):
         raise HTTPException(
             status_code=403,

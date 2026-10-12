@@ -34,12 +34,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import patch
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None,
+    reason="ffmpeg not on PATH",
+)
 
 
 # ---------------------------------------------------------------------------

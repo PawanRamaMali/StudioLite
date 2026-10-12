@@ -116,7 +116,7 @@ jobs:
           set -e
           python -m pip install --upgrade pip
           python -m pip install \
-            pytest httpx fastapi pydantic uvicorn python-multipart \
+            pytest pytest-timeout httpx fastapi pydantic uvicorn python-multipart \
             requests cryptography Pillow numpy imagehash
 
       - name: Run pytest

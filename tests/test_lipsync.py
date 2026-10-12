@@ -39,6 +39,22 @@ def _write_fake_final(proj) -> str:
     return rel
 
 
+def _rig_speech(proj, line_count: int = 1) -> None:
+    """Pre-rig the artifacts so the backend's _collect_speech_track takes
+    the mixer_speech.wav fast path. Covers test_lipsync's whole MuseTalk /
+    LatentSync / EchoMimicV3 happy-path family."""
+    speech_abs = os.path.join(proj.dir, "artifacts", "mixer_speech.wav")
+    os.makedirs(os.path.dirname(speech_abs), exist_ok=True)
+    with open(speech_abs, "wb") as f:
+        f.write(b"stub-wav")
+    proj.write_artifact("voice_actor", {"lines": [
+        {"scene_id": "s01", "shot_id": f"sh{i}", "speaker": "MORGAN",
+         "text": "Hello.", "wav": f"voice/s01_sh{i}.wav",
+         "synthesized": True, "error": None}
+        for i in range(1, line_count + 1)
+    ]})
+
+
 def test_lipsync_none_backend_skips_cleanly(tmp_path: Path):
     """Default `lipsync_backend=none` must return a skip artifact, point
     output_path at the untouched input, and never raise."""
@@ -216,22 +232,7 @@ def test_musetalk_run_subprocess_success(tmp_path: Path, monkeypatch):
     proj = _mkproj(tmp_path, lipsync_backend="musetalk")
     _write_musetalk_config(tmp_path, tmp_path)
     final_rel = _write_fake_final(proj)
-
-    # Give the backend a pre-rendered mixer-speech so it skips the
-    # ffmpeg-concat path (that path is covered separately by the
-    # voice_actor branch, and real ffmpeg isn't guaranteed on CI).
-    speech_abs = os.path.join(proj.dir, "artifacts", "mixer_speech.wav")
-    os.makedirs(os.path.dirname(speech_abs), exist_ok=True)
-    with open(speech_abs, "wb") as f:
-        f.write(b"stub-wav")
-
-    # Register one voice_actor line so collect_speech_track has something
-    # to count even though we're using the mixer path.
-    proj.write_artifact("voice_actor", {"lines": [
-        {"scene_id": "s01", "shot_id": "sh1", "speaker": "MORGAN",
-         "text": "Hello.", "wav": "voice/s01_sh1.wav",
-         "synthesized": True, "error": None},
-    ]})
+    _rig_speech(proj)
 
     calls: Dict[str, Any] = {}
 
@@ -279,14 +280,7 @@ def test_musetalk_run_subprocess_failure_passthrough(tmp_path: Path, monkeypatch
     proj = _mkproj(tmp_path, lipsync_backend="musetalk")
     _write_musetalk_config(tmp_path, tmp_path)
     _write_fake_final(proj)
-    speech_abs = os.path.join(proj.dir, "artifacts", "mixer_speech.wav")
-    os.makedirs(os.path.dirname(speech_abs), exist_ok=True)
-    with open(speech_abs, "wb") as f:
-        f.write(b"stub")
-    proj.write_artifact("voice_actor", {"lines": [
-        {"scene_id": "s01", "shot_id": "sh1", "speaker": "M",
-         "text": "Hi.", "wav": "voice/x.wav", "synthesized": True},
-    ]})
+    _rig_speech(proj)
 
     def _fake_run(cmd, **kw):
         class _Proc:
@@ -366,15 +360,7 @@ def test_latentsync_run_subprocess_success(tmp_path: Path, monkeypatch):
                                           "guidance_scale": 1.5})
     _write_fake_final(proj)
 
-    # Pre-render mixer_speech.wav so collect_speech_track skips ffmpeg.
-    speech_abs = os.path.join(proj.dir, "artifacts", "mixer_speech.wav")
-    os.makedirs(os.path.dirname(speech_abs), exist_ok=True)
-    with open(speech_abs, "wb") as f:
-        f.write(b"stub")
-    proj.write_artifact("voice_actor", {"lines": [
-        {"scene_id": "s01", "shot_id": "sh1", "speaker": "M",
-         "text": "Hi.", "wav": "voice/x.wav", "synthesized": True},
-    ]})
+    _rig_speech(proj)
 
     calls: Dict[str, Any] = {}
 
@@ -415,14 +401,7 @@ def test_latentsync_run_subprocess_failure_passthrough(tmp_path: Path, monkeypat
     proj = _mkproj(tmp_path, lipsync_backend="latentsync")
     _write_latentsync_config(tmp_path, tmp_path)
     _write_fake_final(proj)
-    speech_abs = os.path.join(proj.dir, "artifacts", "mixer_speech.wav")
-    os.makedirs(os.path.dirname(speech_abs), exist_ok=True)
-    with open(speech_abs, "wb") as f:
-        f.write(b"stub")
-    proj.write_artifact("voice_actor", {"lines": [
-        {"scene_id": "s01", "shot_id": "sh1", "speaker": "M",
-         "text": "Hi.", "wav": "voice/x.wav", "synthesized": True},
-    ]})
+    _rig_speech(proj)
 
     def _fake_run(cmd, **kw):
         class _Proc:
@@ -494,14 +473,7 @@ def test_echomimicv3_run_subprocess_success(tmp_path: Path, monkeypatch):
     proj = _mkproj(tmp_path, lipsync_backend="echomimicv3")
     _write_echomimicv3_config(tmp_path, tmp_path)
     _write_fake_final(proj)
-    speech_abs = os.path.join(proj.dir, "artifacts", "mixer_speech.wav")
-    os.makedirs(os.path.dirname(speech_abs), exist_ok=True)
-    with open(speech_abs, "wb") as f:
-        f.write(b"stub")
-    proj.write_artifact("voice_actor", {"lines": [
-        {"scene_id": "s01", "shot_id": "sh1", "speaker": "M",
-         "text": "Hi.", "wav": "voice/x.wav", "synthesized": True},
-    ]})
+    _rig_speech(proj)
 
     def _fake_extract(video_path, out_png, timestamp="00:00:01"):
         with open(out_png, "wb") as f:
@@ -545,14 +517,7 @@ def test_echomimicv3_run_frame_extract_failure(tmp_path: Path, monkeypatch):
     proj = _mkproj(tmp_path, lipsync_backend="echomimicv3")
     _write_echomimicv3_config(tmp_path, tmp_path)
     _write_fake_final(proj)
-    speech_abs = os.path.join(proj.dir, "artifacts", "mixer_speech.wav")
-    os.makedirs(os.path.dirname(speech_abs), exist_ok=True)
-    with open(speech_abs, "wb") as f:
-        f.write(b"stub")
-    proj.write_artifact("voice_actor", {"lines": [
-        {"scene_id": "s01", "shot_id": "sh1", "speaker": "M",
-         "text": "Hi.", "wav": "voice/x.wav", "synthesized": True},
-    ]})
+    _rig_speech(proj)
 
     monkeypatch.setattr(lipsync_mod, "_extract_midpoint_frame",
                          lambda v, o, timestamp="00:00:01": False)

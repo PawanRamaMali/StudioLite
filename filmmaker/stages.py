@@ -56,6 +56,7 @@ StageKey = Literal[
     "colorist",
     "titles",
     "upscale",
+    "lipsync",
     "continuity",
 ]
 
@@ -102,6 +103,7 @@ STAGES: List[StageSpec] = [
     StageSpec("colorist",           "Colorist",           "Applies per-scene color grading LUT via ffmpeg."),
     StageSpec("titles",             "Titles & Credits",   "Prepends title card and appends end credits."),
     StageSpec("upscale",            "Upscale",            "Optional neural upscale of the final cut to 1440p via Real-ESRGAN. No-op unless upscale_backend is set."),
+    StageSpec("lipsync",            "Lip Sync",           "Optional post-mixer lip sync (MuseTalk 1.5 / LatentSync 1.5 / EchoMimicV3). No-op unless lipsync_backend is set; backends run in isolated venvs."),
     StageSpec("continuity",         "Continuity & QC",    "Walks every artifact against its upstream requirements. Flags missing renders, silent fallbacks, mis-cast characters, timing drift.", gated_by_default=True),
 ]
 

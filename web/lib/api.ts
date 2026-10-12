@@ -560,7 +560,7 @@ export type FilmStageKey =
   | "voice_cast" | "character_portraits" | "voice_actor"
   | "shots" | "motion_shots" | "editor"
   | "ambient" | "composer" | "sound_design" | "mixer"
-  | "colorist" | "titles" | "upscale" | "continuity"
+  | "colorist" | "titles" | "upscale" | "lipsync" | "continuity"
   // Any newer stage added server-side falls through as a plain string.
   | (string & {});
 
@@ -588,6 +588,7 @@ export interface FilmConfig {
   voice_backend?: "piper" | "xtts" | "indextts2" | "qwen3tts" | "chatterbox" | string;
   music_backend?: "musicgen" | "acestep" | string;
   upscale_backend?: "none" | "realesrgan" | string;
+  lipsync_backend?: "none" | "musetalk" | "latentsync" | "echomimicv3" | string;
   per_stage: Record<string, Record<string, unknown>>;
 }
 

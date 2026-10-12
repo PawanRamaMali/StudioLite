@@ -44,4 +44,5 @@ def _config_from_dict(d: Dict[str, Any]) -> ProjectConfig:
         voice_backend=str(d.get("voice_backend", "piper")).lower(),
         music_backend=str(d.get("music_backend", "musicgen")).lower(),
         upscale_backend=str(d.get("upscale_backend", "none")).lower(),
+        lipsync_backend=str(d.get("lipsync_backend", "none")).lower(),
     )

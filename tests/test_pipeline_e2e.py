@@ -291,7 +291,7 @@ def _fake_credits(out_path: str, *, lines, duration: float) -> None:
 
 @pytest.mark.e2e
 def test_pipeline_runs_end_to_end_with_mocked_models(tmp_path: Path):
-    """Run all 20 stages. Verify every stage persists its artifact and the
+    """Run all 21 stages. Verify every stage persists its artifact and the
     orchestrator finishes without raising."""
     from filmmaker import projects, orchestrator, agents, llm
 

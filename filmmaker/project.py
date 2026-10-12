@@ -77,6 +77,13 @@ class ProjectConfig:
     # ai-forever/Real-ESRGAN on HF; loader falls through to no-op if the
     # spandrel package or the weights file isn't available.
     upscale_backend: str = "none"
+    # Optional lip-sync post-processing on the final cut. "none" (default)
+    # skips the stage. Known backends: "musetalk" (MuseTalk 1.5 via isolated
+    # venv), "latentsync" (ByteDance LatentSync 1.5 via isolated venv),
+    # "echomimicv3" (Ant Group EchoMimicV3, Apache-2.0, in-process). Each
+    # backend's run_* function returns a skip-artifact when its models
+    # aren't installed, so a misconfigured backend never halts the pipeline.
+    lipsync_backend: str = "none"
 
 
 @dataclass
@@ -411,6 +418,7 @@ def _meta_from_json(d: Dict[str, Any]) -> ProjectMeta:
         voice_backend=str(cfg_raw.get("voice_backend", "piper")).lower(),
         music_backend=str(cfg_raw.get("music_backend", "musicgen")).lower(),
         upscale_backend=str(cfg_raw.get("upscale_backend", "none")).lower(),
+        lipsync_backend=str(cfg_raw.get("lipsync_backend", "none")).lower(),
     )
     return ProjectMeta(
         id=d["id"],

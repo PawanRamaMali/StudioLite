@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Callable, Dict, Optional
 
-from . import agents
+from . import agents, lipsync
 from .project import Project
 from .stages import QualityReport, StageKey
 
@@ -35,6 +35,7 @@ RUNNERS: Dict[StageKey, StageRunner] = {
     "colorist":            agents.run_colorist,
     "titles":              agents.run_titles,
     "upscale":             agents.run_upscale,
+    "lipsync":             lipsync.run_lipsync,
     "continuity":          agents.run_continuity,
 }
 

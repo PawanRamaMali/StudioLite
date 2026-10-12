@@ -170,6 +170,7 @@ function ProjectListView({
   const [voiceBackend, setVoiceBackend] = useState("piper");
   const [musicBackend, setMusicBackend] = useState("musicgen");
   const [upscaleBackend, setUpscaleBackend] = useState("none");
+  const [lipsyncBackend, setLipsyncBackend] = useState("none");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [creating, setCreating] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -228,6 +229,7 @@ function ProjectListView({
           voice_backend: voiceBackend,
           music_backend: musicBackend,
           upscale_backend: upscaleBackend,
+          lipsync_backend: lipsyncBackend,
         },
       });
       onCreated(res.project.id);
@@ -486,13 +488,25 @@ function ProjectListView({
                     </select>
                   </div>
                 </div>
-                <div>
-                  <label className="text-[10px] uppercase tracking-wide text-zinc-500">Final upscale</label>
-                  <select value={upscaleBackend} onChange={(e) => setUpscaleBackend(e.target.value)}
-                          className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
-                    <option value="none">Off (finish at Editor / Titles)</option>
-                    <option value="realesrgan">Real-ESRGAN to ~1440p</option>
-                  </select>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wide text-zinc-500">Final upscale</label>
+                    <select value={upscaleBackend} onChange={(e) => setUpscaleBackend(e.target.value)}
+                            className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
+                      <option value="none">Off (finish at Editor / Titles)</option>
+                      <option value="realesrgan">Real-ESRGAN to ~1440p</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wide text-zinc-500">Lip sync</label>
+                    <select value={lipsyncBackend} onChange={(e) => setLipsyncBackend(e.target.value)}
+                            className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
+                      <option value="none">Off (mouths stay as rendered)</option>
+                      <option value="musetalk">MuseTalk 1.5 (isolated venv)</option>
+                      <option value="latentsync">LatentSync 1.5 (isolated venv)</option>
+                      <option value="echomimicv3">EchoMimicV3 (in-process, Apache-2.0)</option>
+                    </select>
+                  </div>
                 </div>
                 <p className="text-[10px] text-zinc-500">
                   Unavailable backends fall through to defaults automatically - nothing you pick here breaks the run.
@@ -1020,6 +1034,9 @@ function ArtifactView({
         <SingleVideoView projectId={projectId} artifact={artifact}
                          stageKey={stage.key as "mixer" | "colorist" | "titles" | "upscale" | "editor"} />
       )}
+      {stage.key === "lipsync" && artifact && !editing && (
+        <LipSyncView projectId={projectId} artifact={artifact} />
+      )}
       {stage.key === "continuity" && artifact && !editing && (
         <ContinuityView artifact={artifact} />
       )}
@@ -1030,7 +1047,7 @@ function ArtifactView({
         "breakdown","storyboard","cinematographer",
         "voice_cast","character_portraits","voice_actor","motion_shots",
         "ambient","composer","mixer","colorist","titles","upscale",
-        "continuity",
+        "lipsync","continuity",
       ].includes(stage.key)) ? (
         <>
           {editing && (
@@ -1658,6 +1675,71 @@ function SingleVideoView({ projectId, artifact, stageKey }: {
     </div>
   );
 }
+
+function LipSyncView({ projectId, artifact }: {
+  projectId: string;
+  artifact: Record<string, unknown>;
+}) {
+  const a = artifact as {
+    backend?: string;
+    rendered?: boolean;
+    skipped?: string;
+    install_hint?: string;
+    input_path?: string;
+    output_path?: string;
+    duration_sec?: number;
+    line_count?: number;
+  };
+  const backend = a.backend || "none";
+  const rendered = Boolean(a.rendered);
+  // When the backend is a passthrough (none, not installed, or soft-fail),
+  // output_path equals input_path - show the untouched video so the user
+  // still sees the final cut in context.
+  const videoPath = a.output_path || a.input_path;
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <Mic className="w-4 h-4 text-indigo-400" />
+        <span className="text-xs text-zinc-100 font-medium">Lip sync</span>
+        <Badge className="text-[10px] uppercase">{backend}</Badge>
+        {rendered ? (
+          <Badge className="text-[10px] bg-green-500/10 text-green-300 border-green-500/30">rendered</Badge>
+        ) : (
+          <Badge className="text-[10px] bg-amber-500/10 text-amber-300 border-amber-500/30">passthrough</Badge>
+        )}
+      </div>
+      {!rendered && a.skipped && (
+        <div className="text-xs text-amber-200/90 border border-amber-500/30 bg-amber-500/5 rounded px-3 py-2">
+          <div className="font-medium">Skipped: {a.skipped}</div>
+          {a.install_hint && (
+            <div className="text-[11px] text-amber-200/70 mt-1 italic">{a.install_hint}</div>
+          )}
+        </div>
+      )}
+      {videoPath && (
+        <video src={filmStatic(projectId, videoPath)} controls preload="metadata"
+               className="w-full max-h-[55vh] bg-black rounded-lg" />
+      )}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+        <Meta label="Backend" value={backend} />
+        <Meta label="Status" value={rendered ? "rendered" : "passthrough"}
+              tone={rendered ? "ok" : "dim"} />
+        {a.duration_sec !== undefined && (
+          <Meta label="Duration" value={fmtClock(a.duration_sec)} />
+        )}
+        {a.line_count !== undefined && (
+          <Meta label="Lines synced" value={String(a.line_count)} />
+        )}
+      </div>
+      {a.input_path && a.output_path && a.input_path !== a.output_path && (
+        <div className="text-[10px] text-zinc-600 font-mono truncate">
+          {a.input_path} → {a.output_path}
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 function ContinuityView({ artifact }: { artifact: Record<string, unknown> }) {
   const ok = Boolean(artifact.ok);

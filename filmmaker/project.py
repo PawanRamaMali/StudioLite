@@ -221,6 +221,7 @@ class Project:
                     "created_at": meta.get("created_at", 0),
                     "updated_at": meta.get("updated_at", 0),
                     "brief": meta.get("brief", ""),
+                    "config": meta.get("config") or {},
                 })
             except Exception:
                 continue

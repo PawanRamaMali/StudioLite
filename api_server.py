@@ -5998,6 +5998,8 @@ def _film_meta_dict(project) -> Dict:
             "motion_backend": m.config.motion_backend,
             "voice_backend": m.config.voice_backend,
             "music_backend": m.config.music_backend,
+            "upscale_backend": m.config.upscale_backend,
+            "lipsync_backend": m.config.lipsync_backend,
             "per_stage": m.config.per_stage,
         },
     }

@@ -3296,8 +3296,23 @@ def run_mixer(project: Project) -> Dict[str, Any]:
         out_path=out_abs,
         duration_sec=total_dur if total_dur > 0 else None,
     )
+
+    # Persist a speech-only track with the same per-line adelay the mixer
+    # applies, so downstream stages (notably lipsync) can drive from the
+    # correctly-timed speech instead of back-to-back concatenating wavs.
+    speech_rel = None
+    if dialogue:
+        speech_abs = os.path.join(project.artifacts_dir, "mixer_speech.wav")
+        try:
+            _write_speech_bus(dialogue, speech_abs,
+                               duration_sec=total_dur if total_dur > 0 else None)
+            speech_rel = os.path.relpath(speech_abs, project.dir).replace(os.sep, "/")
+        except Exception as e:
+            logger.warning("Could not persist speech bus: %s", e)
+
     return {
         "output_path":  os.path.relpath(out_abs, project.dir).replace(os.sep, "/"),
+        "speech_path": speech_rel,
         "has_dialogue": have_speech,
         "has_score":    have_score,
         "has_ambient":  have_ambient,
@@ -3305,6 +3320,38 @@ def run_mixer(project: Project) -> Dict[str, Any]:
         "dialogue_lines": len(dialogue),
         "sfx_cues":    len(sfx_cues),
     }
+
+
+def _write_speech_bus(dialogue: List[Dict[str, Any]], out_path: str,
+                       *, duration_sec: Optional[float] = None) -> None:
+    """Write a WAV with each dialogue clip placed at its mixer-time offset.
+    Mirrors the mixer's [speech] bus: per-line adelay then amix, so timing
+    matches the final cut's dialogue."""
+    inputs: List[str] = []
+    for d in dialogue:
+        inputs += ["-i", d["wav"]]
+    parts: List[str] = []
+    labels: List[str] = []
+    for i, d in enumerate(dialogue):
+        delay = int(d["delay_ms"])
+        lbl = f"d{i}"
+        parts.append(
+            f"[{i}:a]adelay={delay}|{delay},"
+            f"aformat=sample_rates=44100:channel_layouts=stereo[{lbl}]"
+        )
+        labels.append(f"[{lbl}]")
+    if len(labels) > 1:
+        parts.append(f"{''.join(labels)}amix=inputs={len(labels)}:normalize=0[speech]")
+    else:
+        parts.append(f"{labels[0]}anull[speech]")
+    duration_args = (
+        ["-t", f"{duration_sec:.3f}"] if duration_sec and duration_sec > 0 else []
+    )
+    cmd = ["ffmpeg", "-y"] + inputs + [
+        "-filter_complex", ";".join(parts),
+        "-map", "[speech]",
+    ] + duration_args + [out_path]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
 
 
 def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],

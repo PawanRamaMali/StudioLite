@@ -2838,22 +2838,33 @@ def run_composer(project: Project) -> Dict[str, Any]:
         prompt = f"cinematic underscore, subtle strings and piano, {chosen.get('tone','drama')} mood, 80 bpm"
 
     score_abs = os.path.join(project.artifacts_dir, "score.wav")
+    backend = (project.meta.config.music_backend or "musicgen").lower()
+
+    extra: Dict[str, Any] = {}
     ok = False
     err: Optional[str] = None
-    try:
-        _render_musicgen(prompt, score_abs, duration_sec=duration)
-        ok = True
-    except Exception as e:
-        logger.warning("MusicGen unavailable/failed (%s); score will be silent", e)
-        err = str(e)
+    if backend == "diffrhythm2":
+        ok, err, extra = _render_diffrhythm2(project, prompt, score_abs,
+                                              duration_sec=duration)
+    else:
+        try:
+            _render_musicgen(prompt, score_abs, duration_sec=duration)
+            ok = True
+        except Exception as e:
+            logger.warning("MusicGen unavailable/failed (%s); score will be silent", e)
+            err = str(e)
+    if not ok and not os.path.exists(score_abs):
         _write_silent_wav(score_abs, float(duration))
-    return {
+    out = {
         "prompt": prompt,
         "path":   os.path.relpath(score_abs, project.dir).replace(os.sep, "/"),
         "duration_sec": duration,
         "rendered": ok,
+        "backend": backend,
         "error": err,
     }
+    out.update(extra)
+    return out
 
 
 def _render_musicgen(prompt: str, out_path: str, *, duration_sec: int) -> None:
@@ -4096,6 +4107,102 @@ def _rel_posix(project_dir: str, abs_path: str) -> str:
         return os.path.relpath(abs_path, project_dir).replace(os.sep, "/")
     except ValueError:
         return abs_path
+
+
+def _render_diffrhythm2(project: Project, prompt: str, out_abs: str,
+                         *, duration_sec: int) -> Tuple[bool, Optional[str],
+                                                        Dict[str, Any]]:
+    """DiffRhythm 2 composer path.
+
+    DiffRhythm 2 (arxiv 2510.22950, Apache 2.0, ASLP Lab + Xiaomi) is a
+    semi-autoregressive block flow-matching music model with a 5 Hz
+    Music VAE. ~1B+170M params; on an RTX 4090 it emits 2 min of music
+    in 25.6 s (RTF 0.213). GPU-only in practice; the lyric-to-vocal
+    alignment is the one thing MusicGen cannot do.
+
+    Local install uses a user-owned venv described by
+    ``<output_dir>/music-diffrhythm2/config.json`` (mirrors SeedVR2's
+    pattern). Falls back to the cloud-burst dispatcher.
+
+    Returns (ok, error_message, extra_fields). The caller writes a
+    silent wav if ok is False.
+    """
+    from . import cloud_burst as _cb
+
+    cfg_path = _diffrhythm2_config_path(project)
+    cfg = _load_json_file(cfg_path)
+    if cfg and _check_diffrhythm2_local(cfg):
+        local_out = _run_diffrhythm2_local(cfg, prompt, out_abs,
+                                            duration_sec=duration_sec)
+        if local_out is not None:
+            return True, None, {"mode": "local", **local_out}
+
+    req = _cb.BurstRequest(
+        stage="composer", backend_name="diffrhythm2",
+        inputs={"prompt": prompt, "duration_sec": duration_sec},
+        output_path=out_abs, deadline_seconds=1200,
+    )
+    burst = _cb.dispatch(req)
+    if burst.rendered and burst.output_path and os.path.exists(burst.output_path):
+        return True, None, {"mode": "cloud", "provider": burst.provider}
+
+    install_hint = (
+        f"DiffRhythm 2 is GPU-only. Install either path: "
+        f"(1) clone ASLP-lab/DiffRhythm2, make a venv, drop config.json at "
+        f"{cfg_path} with keys: repo_dir, venv_python, model_path. "
+        f"(2) Set STUDIOLITE_CLOUD_PROVIDER and the matching token + slug "
+        f"(e.g. REPLICATE_API_TOKEN + REPLICATE_SLUG_DIFFRHYTHM2)."
+    )
+    return False, burst.reason or "DiffRhythm 2 not installed locally and no cloud provider", {
+        "install_hint": install_hint,
+    }
+
+
+def _diffrhythm2_config_path(project: Project) -> str:
+    films_root = os.path.dirname(project.dir)
+    base = (os.path.dirname(films_root)
+            if os.path.basename(films_root) == "films" else films_root)
+    return os.path.join(base, "music-diffrhythm2", "config.json")
+
+
+def _check_diffrhythm2_local(cfg: Dict[str, Any]) -> bool:
+    for key in ("repo_dir", "venv_python", "model_path"):
+        value = cfg.get(key)
+        if not value or not os.path.exists(value):
+            return False
+    return True
+
+
+def _run_diffrhythm2_local(cfg: Dict[str, Any], prompt: str, out_abs: str,
+                            *, duration_sec: int) -> Optional[Dict[str, Any]]:
+    inference_script = cfg.get("inference_script") or "inference.py"
+    cmd = [
+        cfg["venv_python"], inference_script,
+        "--prompt", prompt,
+        "--duration", str(duration_sec),
+        "--output", out_abs,
+        "--model_path", cfg["model_path"],
+    ]
+    if cfg.get("lyrics_path"):
+        cmd += ["--lyrics", str(cfg["lyrics_path"])]
+    extra = cfg.get("extra_args") or []
+    if isinstance(extra, list):
+        cmd += [str(x) for x in extra]
+    try:
+        proc = subprocess.run(
+            cmd, cwd=cfg["repo_dir"], capture_output=True, text=True,
+            check=False, timeout=int(cfg.get("timeout_sec", 1800)),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.warning("DiffRhythm 2 local run failed: %s", exc)
+        return None
+    if proc.returncode != 0:
+        logger.warning("DiffRhythm 2 local run exited %s: %s",
+                        proc.returncode, (proc.stderr or "")[-300:])
+        return None
+    if not (os.path.exists(out_abs) and os.path.getsize(out_abs) > 1024):
+        return None
+    return {"stdout_tail": (proc.stdout or "")[-300:]}
 
 
 # ---------------------------------------------------------------------------

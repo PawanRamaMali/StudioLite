@@ -488,18 +488,18 @@ function ProjectListView({
                     </select>
                   </div>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="text-[10px] uppercase tracking-wide text-zinc-500">Final upscale</label>
-                    <select value={upscaleBackend} onChange={(e) => setUpscaleBackend(e.target.value)}
+                    <label htmlFor="upscale-backend" className="text-[10px] uppercase tracking-wide text-zinc-500">Final upscale</label>
+                    <select id="upscale-backend" value={upscaleBackend} onChange={(e) => setUpscaleBackend(e.target.value)}
                             className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
                       <option value="none">Off (finish at Editor / Titles)</option>
                       <option value="realesrgan">Real-ESRGAN to ~1440p</option>
                     </select>
                   </div>
                   <div>
-                    <label className="text-[10px] uppercase tracking-wide text-zinc-500">Lip sync</label>
-                    <select value={lipsyncBackend} onChange={(e) => setLipsyncBackend(e.target.value)}
+                    <label htmlFor="lipsync-backend" className="text-[10px] uppercase tracking-wide text-zinc-500">Lip sync backend</label>
+                    <select id="lipsync-backend" value={lipsyncBackend} onChange={(e) => setLipsyncBackend(e.target.value)}
                             className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
                       <option value="none">Off (mouths stay as rendered)</option>
                       <option value="musetalk">MuseTalk 1.5 (isolated venv)</option>
@@ -1687,7 +1687,6 @@ function LipSyncView({ projectId, artifact }: {
     install_hint?: string;
     input_path?: string;
     output_path?: string;
-    duration_sec?: number;
     line_count?: number;
   };
   const backend = a.backend || "none";
@@ -1701,11 +1700,11 @@ function LipSyncView({ projectId, artifact }: {
       <div className="flex items-center gap-2">
         <Mic className="w-4 h-4 text-indigo-400" />
         <span className="text-xs text-zinc-100 font-medium">Lip sync</span>
-        <Badge className="text-[10px] uppercase">{backend}</Badge>
+        <Badge aria-label={backend}>{backend}</Badge>
         {rendered ? (
-          <Badge className="text-[10px] bg-green-500/10 text-green-300 border-green-500/30">rendered</Badge>
+          <Badge variant="success">rendered</Badge>
         ) : (
-          <Badge className="text-[10px] bg-amber-500/10 text-amber-300 border-amber-500/30">passthrough</Badge>
+          <Badge variant="warning">passthrough</Badge>
         )}
       </div>
       {!rendered && a.skipped && (
@@ -1720,26 +1719,25 @@ function LipSyncView({ projectId, artifact }: {
         <video src={filmStatic(projectId, videoPath)} controls preload="metadata"
                className="w-full max-h-[55vh] bg-black rounded-lg" />
       )}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
-        <Meta label="Backend" value={backend} />
-        <Meta label="Status" value={rendered ? "rendered" : "passthrough"}
-              tone={rendered ? "ok" : "dim"} />
-        {a.duration_sec !== undefined && (
-          <Meta label="Duration" value={fmtClock(a.duration_sec)} />
-        )}
-        {a.line_count !== undefined && (
+      {a.line_count !== undefined && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
           <Meta label="Lines synced" value={String(a.line_count)} />
-        )}
-      </div>
+        </div>
+      )}
       {a.input_path && a.output_path && a.input_path !== a.output_path && (
         <div className="text-[10px] text-zinc-600 font-mono truncate">
           {a.input_path} → {a.output_path}
         </div>
       )}
+      {rendered && a.output_path && (
+        <a href={filmStatic(projectId, a.output_path)} target="_blank" rel="noreferrer"
+           className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300">
+          Open MP4 <Download className="w-3 h-3" />
+        </a>
+      )}
     </div>
   );
 }
-
 
 function ContinuityView({ artifact }: { artifact: Record<string, unknown> }) {
   const ok = Boolean(artifact.ok);

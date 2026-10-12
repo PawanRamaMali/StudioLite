@@ -3912,6 +3912,8 @@ def run_upscale(project: Project) -> Dict[str, Any]:
     if not os.path.exists(src_abs):
         return {"backend": backend, "skipped": "final.mp4 not found",
                 "output_path": None}
+    if backend == "seedvr2":
+        return _run_upscale_seedvr2(project, src_abs)
     scale = 2 if backend == "realesrgan_x2" else 4 if backend == "realesrgan_x4" else 0
     if scale == 0:
         return {"backend": backend, "skipped": f"unknown backend {backend}",
@@ -3957,6 +3959,143 @@ def run_upscale(project: Project) -> Dict[str, Any]:
         "scale": model.scale,
         "output_path": os.path.relpath(out_abs, project.dir).replace(os.sep, "/"),
     }
+
+
+def _run_upscale_seedvr2(project: Project, src_abs: str) -> Dict[str, Any]:
+    """SeedVR2 upscale path.
+
+    SeedVR2 (ByteDance-Seed, Apache 2.0, CVPR 2025 + ICLR 2026) is a
+    diffusion-transformer video restorer. The 3B / 7B weights need at
+    least 16 GB VRAM at fp16; the GGUF ladder from cmeka/SeedVR2-GGUF
+    runs from 1.55 GB (Q3_K_M) up to 3.66 GB (Q8_0) but requires the
+    ComfyUI-GGUF loader plus the numz/SeedVR2_comfyUI finetune, which
+    is a user-owned install.
+
+    This runner tries, in order:
+      1. A user-provided SeedVR2 install (same config.json pattern the
+         lipsync backends use) at ``<output_dir>/upscale-seedvr2/config.json``.
+      2. The cloud-burst dispatcher - delegates to Replicate/RunPod when
+         STUDIOLITE_CLOUD_PROVIDER (or a token env) is set.
+      3. A skip-artifact pointing at the install instructions.
+    """
+    from . import cloud_burst as _cb
+
+    out_abs = os.path.join(project.dir, "final_upscaled.mp4")
+
+    cfg_path = _seedvr2_config_path(project)
+    cfg = _load_json_file(cfg_path)
+    if cfg and _check_seedvr2_local(cfg):
+        local_result = _run_seedvr2_local(cfg, src_abs, out_abs)
+        if local_result is not None:
+            return {
+                "backend": "seedvr2",
+                "mode": "local",
+                "output_path": os.path.relpath(out_abs, project.dir).replace(os.sep, "/"),
+                "variant": cfg.get("variant", "3b"),
+                **local_result,
+            }
+
+    # Local failed or not installed - try the cloud-burst dispatcher.
+    req = _cb.BurstRequest(
+        stage="upscale", backend_name="seedvr2",
+        inputs={"video": _rel_posix(project.dir, src_abs)},
+        output_path=out_abs, deadline_seconds=1800,
+    )
+    burst = _cb.dispatch(req)
+    if burst.rendered and burst.output_path and os.path.exists(burst.output_path):
+        return {
+            "backend": "seedvr2",
+            "mode": "cloud",
+            "provider": burst.provider,
+            "output_path": os.path.relpath(burst.output_path, project.dir).replace(os.sep, "/"),
+            "details": burst.details,
+        }
+
+    install_hint = (
+        f"SeedVR2 is GPU-only. Install either path: "
+        f"(1) ComfyUI with numz/SeedVR2_comfyUI + cmeka/SeedVR2-GGUF, "
+        f"then drop config.json at {cfg_path} with keys: "
+        f"repo_dir, venv_python, model_path, variant (3b|7b). "
+        f"(2) Set STUDIOLITE_CLOUD_PROVIDER and the matching token + slug "
+        f"(e.g. REPLICATE_API_TOKEN + REPLICATE_SLUG_SEEDVR2)."
+    )
+    return {
+        "backend": "seedvr2",
+        "skipped": burst.reason or "SeedVR2 not installed locally and no cloud provider",
+        "install_hint": install_hint,
+        "output_path": "final.mp4",
+    }
+
+
+def _seedvr2_config_path(project: Project) -> str:
+    """<output_dir>/upscale-seedvr2/config.json, mirroring the lipsync
+    backends. One directory per backend, siblings of the films/ tree so
+    the config survives when a specific film is deleted."""
+    films_root = os.path.dirname(project.dir)
+    base = (os.path.dirname(films_root)
+            if os.path.basename(films_root) == "films" else films_root)
+    return os.path.join(base, "upscale-seedvr2", "config.json")
+
+
+def _check_seedvr2_local(cfg: Dict[str, Any]) -> bool:
+    """True when every path mentioned in a SeedVR2 config exists."""
+    for key in ("repo_dir", "venv_python", "model_path"):
+        value = cfg.get(key)
+        if not value or not os.path.exists(value):
+            return False
+    return True
+
+
+def _run_seedvr2_local(cfg: Dict[str, Any], src_abs: str,
+                        out_abs: str) -> Optional[Dict[str, Any]]:
+    """Shell out to a user-owned SeedVR2 install. Returns a dict on
+    success or None if the subprocess failed - the caller then falls
+    through to cloud-burst."""
+    inference_script = cfg.get("inference_script") or "inference.py"
+    cmd = [
+        cfg["venv_python"],
+        inference_script,
+        "--input", src_abs,
+        "--output", out_abs,
+        "--model_path", cfg["model_path"],
+        "--variant", str(cfg.get("variant", "3b")),
+    ]
+    extra = cfg.get("extra_args") or []
+    if isinstance(extra, list):
+        cmd += [str(x) for x in extra]
+    try:
+        proc = subprocess.run(
+            cmd, cwd=cfg["repo_dir"], capture_output=True, text=True,
+            check=False, timeout=int(cfg.get("timeout_sec", 3600)),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.warning("SeedVR2 local run failed: %s", exc)
+        return None
+    if proc.returncode != 0:
+        logger.warning("SeedVR2 local run exited %s: %s",
+                        proc.returncode, (proc.stderr or "")[-300:])
+        return None
+    if not (os.path.exists(out_abs) and os.path.getsize(out_abs) > 1024):
+        return None
+    return {"stdout_tail": (proc.stdout or "")[-300:]}
+
+
+def _load_json_file(path: str) -> Optional[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:  # defensive - user owns the file
+        logger.warning("SeedVR2 config at %s unreadable: %s", path, exc)
+        return None
+
+
+def _rel_posix(project_dir: str, abs_path: str) -> str:
+    try:
+        return os.path.relpath(abs_path, project_dir).replace(os.sep, "/")
+    except ValueError:
+        return abs_path
 
 
 # ---------------------------------------------------------------------------

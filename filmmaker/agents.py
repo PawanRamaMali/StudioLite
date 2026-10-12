@@ -3350,29 +3350,42 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
         )
         dlg_labels.append(f"[{lbl}]")
 
-    # Build the speech bus. When there's also a score to duck under, we need
-    # it in two branches (sidechain input AND the final amix), so asplit=2
-    # duplicates it - ffmpeg filter labels are single-use. And pad the
-    # sidechain branch to the requested duration (or a generous ceiling) so
-    # sidechaincompress doesn't stop emitting audio when the last dialogue
-    # line ends - sidechaincompress output length matches the shorter of its
-    # two inputs, so a short speech bus would silently truncate the whole mix.
+    # Build the speech bus. ffmpeg filter labels are single-use, so every
+    # consumer of the speech signal needs its own branch produced up front
+    # by one asplit. The sidechain branches additionally need padding to
+    # the requested duration (or a generous ceiling) because sidechain-
+    # compress output length matches the SHORTER of its two inputs, and a
+    # short speech bus would silently truncate the whole mix.
     pad_target = duration_sec if duration_sec and duration_sec > 0 else 3600.0
     if dlg_labels:
         mix_expr = (f"{''.join(dlg_labels)}amix=inputs={len(dlg_labels)}:normalize=0"
                     if len(dlg_labels) > 1 else dlg_labels[0])
-        # `mix_expr` is either a filter chain (needs `,` before next filter)
-        # or a bare label like "[d0]" (next filter follows directly).
         sep = "," if len(dlg_labels) > 1 else ""
-        if score is not None:
-            filter_parts.append(
-                f"{mix_expr}{sep}asplit=2[speech][speech_pre_pad];"
-                f"[speech_pre_pad]apad=whole_dur={pad_target}[speech_side]"
-            )
+        # Count consumers of [speech]: the final amix always takes one;
+        # the music ducker's sidechain needs one when there's a score;
+        # the SFX ducker's sidechain needs one when there are SFX cues.
+        needs_music_side = score is not None
+        needs_sfx_side   = bool(sfx or [])
+        n_branches = 1 + int(needs_music_side) + int(needs_sfx_side)
+        if n_branches == 1:
+            filter_parts.append(f"{mix_expr}{sep}anull[speech]")
         else:
-            filter_parts.append(f"{mix_expr}{sep}anull[speech]"
-                                if not sep
-                                else f"{mix_expr}{sep}anull[speech]")
+            branch_labels = ["speech"]
+            if needs_music_side:
+                branch_labels.append("speech_music_pre")
+            if needs_sfx_side:
+                branch_labels.append("speech_sfx_pre")
+            split_outs = "".join(f"[{l}]" for l in branch_labels)
+            parts = [f"{mix_expr}{sep}asplit={n_branches}{split_outs}"]
+            if needs_music_side:
+                parts.append(
+                    f"[speech_music_pre]apad=whole_dur={pad_target}[speech_side]"
+                )
+            if needs_sfx_side:
+                parts.append(
+                    f"[speech_sfx_pre]apad=whole_dur={pad_target}[speech_sfx_side]"
+                )
+            filter_parts.append(";".join(parts))
 
     # Ambient sits low, no ducking (it's atmosphere), stereo-normalised.
     if ambient is not None:
@@ -3453,20 +3466,13 @@ def _run_mixer_ffmpeg(*, silent_video: str, dialogue: List[Dict[str, Any]],
 
     # Fold the SFX bus in, if we have one. When dialogue is present we
     # route SFX through a LIGHT sidechain so slams/shatters don't fight
-    # the voice — ratio 3 (vs 8 for music) keeps the SFX audible under speech.
+    # the voice — ratio 3 (vs 8 for music) keeps the SFX audible under
+    # speech. The sidechain input is [speech_sfx_side], a dedicated branch
+    # produced by the initial asplit above.
     if sfx_label and pre_sfx_label:
         if dlg_labels:
-            # Need another speech branch for the SFX sidechain since
-            # [speech_side] was already consumed by the music ducker.
-            filter_parts.append(f"{sfx_label}anull[sfx_pre_duck]")
-            # Pad a fresh speech branch to full length so sidechaincompress
-            # doesn't truncate the SFX bus to the speech length.
             filter_parts.append(
-                f"[speech]asplit=2[_speech_pass][_speech_sfxside];"
-                f"[_speech_sfxside]apad=whole_dur={pad_target}[_speech_sfxside_pad]"
-            )
-            filter_parts.append(
-                "[sfx_pre_duck][_speech_sfxside_pad]sidechaincompress="
+                f"{sfx_label}[speech_sfx_side]sidechaincompress="
                 "threshold=0.05:ratio=3:attack=5:release=200[sfx_ducked]"
             )
             filter_parts.append(

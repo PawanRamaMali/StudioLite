@@ -157,6 +157,15 @@ def _mock_llm_chat(system: str, user: str, **kwargs):
     if "film composer" in s or "musicgen" in s:
         return json.dumps({"prompt": "sparse strings, low cellos, slow 60bpm, contemplative"})
 
+    # Sound Design — opens with "You are a Foley / SFX supervisor"
+    if "foley" in s or "sfx supervisor" in s:
+        return json.dumps({"cues": [
+            {"sfx_id": "sfx1", "shot_id": "sh1", "prompt": "paper rustle",
+             "start_sec": 0.5, "duration_sec": 0.6, "gain_db": -6},
+            {"sfx_id": "sfx2", "shot_id": "sh2", "prompt": "wax seal snaps",
+             "start_sec": 1.0, "duration_sec": 0.4, "gain_db": -5},
+        ]})
+
     # Titles — anything mentioning title card / credits
     if "title" in s and ("card" in s or "credits" in s or "crawl" in s):
         return json.dumps({
@@ -204,6 +213,78 @@ def _fake_sdxl_batch_renderer():
     return _r
 
 
+def _write_silent_wav_std(path: str, duration_sec: float, rate: int = 22050) -> None:
+    """Standalone silent-wav writer — mirrors agents._write_silent_wav so
+    patched model-renderers don't have to reach into the module under test."""
+    import wave, struct
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    n = max(1, int(duration_sec * rate))
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+        w.writeframes(struct.pack("<" + "h" * n, *([0] * n)))
+
+
+class _FakePiperTTS:
+    """Stand-in for mpv2.classes.PiperTts.PiperTTS. Real Piper downloads a
+    voice model on first construction (~10 MB per voice) and loads an ONNX
+    runtime — minutes on a cold machine. The test needs a wav on disk and
+    nothing more, so .synthesize() just writes silence."""
+    def __init__(self, *_, voice_name: str = "", **__):
+        self.voice_name = voice_name
+    def synthesize(self, text: str, out_path: str) -> None:
+        # Duration roughly proportional to text length so downstream shot-fit
+        # logic sees non-zero per-line durations.
+        dur = max(0.4, 0.07 * max(1, len(text.split())))
+        _write_silent_wav_std(out_path, dur)
+
+
+def _fake_audioldm(prompt: str, out_path: str, *, duration_sec: int) -> None:
+    _write_silent_wav_std(out_path, max(0.5, float(duration_sec)))
+
+
+def _fake_musicgen(prompt: str, out_path: str, *, duration_sec: int) -> None:
+    _write_silent_wav_std(out_path, max(0.5, float(duration_sec)))
+
+
+def _write_tiny_mp4(out_path: str, duration_sec: float) -> None:
+    """Produce a valid 160x90 silent H.264 mp4 from the color testsrc source.
+    The real Ken Burns path upscales to 3840x2160 first and takes ~15s per
+    clip — way too slow for a test that fires it on every shot. This path
+    uses a 160x90 solid-color synth so each clip renders in ~0.5s."""
+    import subprocess as _sp
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi",
+        "-i", f"color=c=black:s=160x90:d={max(0.5, float(duration_sec))}:r=30",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "32",
+        "-pix_fmt", "yuv420p",
+        "-fps_mode", "cfr",
+        out_path,
+    ]
+    _sp.run(cmd, check=True, capture_output=True)
+
+
+def _fake_kenburns_clip(img: str, out_path: str, duration_sec, camera_move: str = "static") -> None:
+    _write_tiny_mp4(out_path, int(duration_sec))
+
+
+def _fake_static_clip(img: str, out_path: str, duration_sec) -> None:
+    _write_tiny_mp4(out_path, int(duration_sec))
+
+
+def _fake_standardize_motion_clip(src: str, dst: str, duration_sec) -> None:
+    _write_tiny_mp4(dst, int(duration_sec))
+
+
+def _fake_title_card(out_path: str, *, title: str, subtitle: str, duration: float) -> None:
+    _write_tiny_mp4(out_path, float(duration))
+
+
+def _fake_credits(out_path: str, *, lines, duration: float) -> None:
+    _write_tiny_mp4(out_path, float(duration))
+
+
 # ---------------------------------------------------------------------------
 # The test — drives the full orchestrator from Producer → Upscale
 # ---------------------------------------------------------------------------
@@ -245,6 +326,20 @@ def test_pipeline_runs_end_to_end_with_mocked_models(tmp_path: Path):
         state.gates[s.key] = False
     proj.save_state(state)
 
+    # Install a stub Piper module BEFORE the patch stack enters, so the
+    # agent's inline `from mpv2.classes.PiperTts import PiperTTS` picks up
+    # the stub instead of touching the real Piper (which would download the
+    # voice onnx on first use and block the test for minutes).
+    import sys as _sys, types as _types
+    mpv2_mod   = _sys.modules.setdefault("mpv2", _types.ModuleType("mpv2"))
+    classes    = _sys.modules.setdefault("mpv2.classes",
+                                         _types.ModuleType("mpv2.classes"))
+    pipertts   = _sys.modules.setdefault("mpv2.classes.PiperTts",
+                                         _types.ModuleType("mpv2.classes.PiperTts"))
+    pipertts.PiperTTS = _FakePiperTTS
+    mpv2_mod.classes = classes
+    classes.PiperTts = pipertts
+
     stack: List[Any] = [
         # Mock the LLM everywhere
         patch.object(llm, "chat", side_effect=_mock_llm_chat),
@@ -252,6 +347,22 @@ def test_pipeline_runs_end_to_end_with_mocked_models(tmp_path: Path):
         patch.object(agents, "_load_sdxl_renderer", return_value=_fake_sdxl_renderer()),
         patch.object(agents, "_load_sdxl_batch_renderer",
                      return_value=_fake_sdxl_batch_renderer()),
+        # Mock the audio-model entry points — AudioLDM 2 for ambient + SFX,
+        # MusicGen for the score. Each writes a silent wav of the requested
+        # duration so the mixer has a real file to layer in.
+        patch.object(agents, "_render_audioldm", side_effect=_fake_audioldm),
+        patch.object(agents, "_render_musicgen", side_effect=_fake_musicgen),
+        # Mock the Ken Burns + static clip builders. The real ones upscale
+        # the still to 3840×2160 first — ~15s per clip — and the editor
+        # stage runs them for every shot. The test only needs valid mp4s
+        # on disk; a 160×90 synth from testsrc produces one in ~0.5s.
+        patch.object(agents, "_render_kenburns_clip", side_effect=_fake_kenburns_clip),
+        patch.object(agents, "_render_static_clip", side_effect=_fake_static_clip),
+        patch.object(agents, "_standardize_motion_clip", side_effect=_fake_standardize_motion_clip),
+        # Titles & credits also run their own ffmpeg synths — same speed-up
+        # motivation: ~5s each on the real path, instant here.
+        patch.object(agents, "_render_title_card", side_effect=_fake_title_card),
+        patch.object(agents, "_render_credits", side_effect=_fake_credits),
     ]
     # Enter all patches, run the orchestrator to completion, exit cleanly.
     for p in stack:
@@ -263,7 +374,20 @@ def test_pipeline_runs_end_to_end_with_mocked_models(tmp_path: Path):
             started = await orchestrator.manager.start(proj)
             assert started, "orchestrator refused to start"
             handle = orchestrator.manager._runs[proj.project_id]
-            await asyncio.wait_for(handle.task, timeout=120)
+            # Live progress — print each orchestrator event so a slow or
+            # stuck stage is obvious from the test output.
+            import sys as _sys
+            def _tap(ev):
+                et = ev.get("type", "?")
+                stg = ev.get("stage", "")
+                extra = ""
+                if "score" in ev:
+                    extra = f" score={ev['score']} accepted={ev.get('accepted')}"
+                elif "error" in ev:
+                    extra = f" ERROR={ev['error'][:120]}"
+                print(f"[e2e] {et} {stg}{extra}", flush=True)
+            handle.listeners.append(_tap)
+            await asyncio.wait_for(handle.task, timeout=600)
         asyncio.run(_drive())
     finally:
         for p in reversed(stack):

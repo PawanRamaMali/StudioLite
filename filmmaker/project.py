@@ -451,8 +451,13 @@ def _state_to_json(state: ProjectState) -> Dict[str, Any]:
 
 
 def _state_from_json(d: Dict[str, Any]) -> ProjectState:
+    raw_status = dict(d.get("stage_status") or {})
+    stage_status = {k: raw_status.get(k, "pending") for k in STAGE_KEYS}
+    for k, v in raw_status.items():
+        if k not in stage_status:
+            stage_status[k] = v
     return ProjectState(
-        stage_status=dict(d.get("stage_status") or {}),
+        stage_status=stage_status,
         current_stage=d.get("current_stage"),
         is_paused=bool(d.get("is_paused", False)),
         pause_requested=bool(d.get("pause_requested", False)),

@@ -677,16 +677,173 @@ def load_prompt_corpus(corpus_dir: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
+# Regression comparison.
+#
+# The harness exists so a developer can tell whether a code or model
+# change moved VBench-2.0 scores. ``compare_scorecards`` takes a baseline
+# and candidate ``DirScorecard`` (or their dict forms, as persisted by
+# ``score_project``) and emits per-dimension deltas plus a verdict for
+# regression detection in CI.
+
+
+# A sub-capability or dimension needs to drop by more than this before we
+# flag it as a regression. VBench-2.0 scores are inherently noisy per
+# clip; the paper itself averages across hundreds of prompts. For a
+# per-project smoke test we want to catch large structural drops without
+# tripping on normal clip-level jitter.
+DEFAULT_REGRESSION_THRESHOLD = 0.05
+
+
+@dataclass
+class DimensionDelta:
+    dimension: str
+    baseline: Optional[float]
+    candidate: Optional[float]
+    delta: Optional[float]       # candidate - baseline (positive = improvement)
+    regressed: bool              # True iff delta < -threshold
+
+
+@dataclass
+class ScorecardDiff:
+    threshold: float
+    overall_baseline: Optional[float]
+    overall_candidate: Optional[float]
+    overall_delta: Optional[float]
+    overall_regressed: bool
+    dimensions: List[DimensionDelta]
+    regressed_dimensions: List[str]  # names of dimensions that regressed
+
+
+def _coerce_scorecard(card: Any) -> Dict[str, Any]:
+    """Accept either a DirScorecard, a ClipScorecard, or a dict already
+    produced by :func:`scorecard_to_dict`. Normalising here keeps the diff
+    API tolerant of both the in-memory and the persisted form."""
+    if isinstance(card, (DirScorecard, ClipScorecard)):
+        return scorecard_to_dict(card)
+    if isinstance(card, dict):
+        return card
+    raise TypeError(f"not a scorecard: {type(card).__name__}")
+
+
+def _dimension_scores(card: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    """Pull {dimension: score} from either a DirScorecard (``aggregate``) or
+    a ClipScorecard (``dimensions``). Missing dimensions map to None so
+    callers can diff across cards with different scorer coverage."""
+    rows = card.get("aggregate") or card.get("dimensions") or []
+    out: Dict[str, Optional[float]] = {d: None for d in DIMENSIONS}
+    for row in rows:
+        dim = row.get("dimension")
+        if dim in out:
+            score = row.get("score")
+            out[dim] = None if score is None else float(score)
+    return out
+
+
+def _subtract(a: Optional[float], b: Optional[float]) -> Optional[float]:
+    """None - anything, anything - None -> None. Keeps the diff from
+    inventing a score where either side had no opinion."""
+    if a is None or b is None:
+        return None
+    return a - b
+
+
+def compare_scorecards(baseline: Any, candidate: Any, *,
+                        threshold: float = DEFAULT_REGRESSION_THRESHOLD
+                        ) -> ScorecardDiff:
+    """Compare a candidate scorecard against a baseline.
+
+    ``baseline`` and ``candidate`` may be either live dataclass scorecards
+    or the dict form that :func:`scorecard_to_dict` emits (i.e. what the
+    API endpoint persists). ``threshold`` is the minimum negative delta
+    that counts as a regression; the default of 0.05 is picked to match
+    the noise floor of our lightweight ffprobe scorers.
+
+    The returned :class:`ScorecardDiff` carries every dimension's baseline,
+    candidate, and delta, plus a boolean regression flag that CI can gate
+    on. If either side has no overall opinion, ``overall_regressed`` is
+    False - we never raise a regression on a 'no opinion' input, since
+    that is almost always a scorer-coverage change rather than a quality
+    regression.
+    """
+    if threshold < 0:
+        raise ValueError("threshold must be non-negative")
+    base = _coerce_scorecard(baseline)
+    cand = _coerce_scorecard(candidate)
+    base_dims = _dimension_scores(base)
+    cand_dims = _dimension_scores(cand)
+
+    deltas: List[DimensionDelta] = []
+    regressed_names: List[str] = []
+    for dim in DIMENSIONS:
+        b = base_dims.get(dim)
+        c = cand_dims.get(dim)
+        d = _subtract(c, b)
+        reg = d is not None and d < -threshold
+        if reg:
+            regressed_names.append(dim)
+        deltas.append(DimensionDelta(dimension=dim, baseline=b, candidate=c,
+                                      delta=d, regressed=reg))
+
+    overall_b = base.get("overall")
+    overall_c = cand.get("overall")
+    try:
+        overall_b = None if overall_b is None else float(overall_b)
+        overall_c = None if overall_c is None else float(overall_c)
+    except (TypeError, ValueError):
+        overall_b = overall_c = None
+    overall_d = _subtract(overall_c, overall_b)
+    overall_reg = overall_d is not None and overall_d < -threshold
+
+    return ScorecardDiff(
+        threshold=threshold,
+        overall_baseline=overall_b,
+        overall_candidate=overall_c,
+        overall_delta=overall_d,
+        overall_regressed=overall_reg,
+        dimensions=deltas,
+        regressed_dimensions=regressed_names,
+    )
+
+
+def diff_to_dict(diff: ScorecardDiff) -> Dict[str, Any]:
+    """Stable JSON shape for the diff. Separate from ``asdict`` so we can
+    evolve the on-disk shape without touching callers."""
+    return asdict(diff)
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 
 def _main(argv: List[str]) -> int:
-    if len(argv) < 2 or argv[0] != "score":
-        print("usage: python -m filmmaker.vbench2 score <clip-dir> [--suffix .mp4]",
-              flush=True)
+    if not argv:
+        _print_usage()
         return 2
-    clip_dir = argv[1]
+    cmd = argv[0]
+    if cmd == "score":
+        return _cli_score(argv[1:])
+    if cmd == "diff":
+        return _cli_diff(argv[1:])
+    _print_usage()
+    return 2
+
+
+def _print_usage() -> None:
+    print(
+        "usage:\n"
+        "  python -m filmmaker.vbench2 score <clip-dir> [--suffix .mp4]\n"
+        "  python -m filmmaker.vbench2 diff  <baseline.json> <candidate.json>"
+        "  [--threshold 0.05]",
+        flush=True,
+    )
+
+
+def _cli_score(argv: List[str]) -> int:
+    if not argv:
+        _print_usage()
+        return 2
+    clip_dir = argv[0]
     suffix = ".mp4"
-    i = 2
+    i = 1
     while i < len(argv):
         if argv[i] == "--suffix" and i + 1 < len(argv):
             suffix = argv[i + 1]
@@ -697,6 +854,38 @@ def _main(argv: List[str]) -> int:
     card = score_dir(clip_dir, suffix=suffix)
     print(json.dumps(scorecard_to_dict(card), indent=2))
     return 0
+
+
+def _cli_diff(argv: List[str]) -> int:
+    if len(argv) < 2:
+        _print_usage()
+        return 2
+    baseline_path, candidate_path = argv[0], argv[1]
+    threshold = DEFAULT_REGRESSION_THRESHOLD
+    i = 2
+    while i < len(argv):
+        if argv[i] == "--threshold" and i + 1 < len(argv):
+            try:
+                threshold = float(argv[i + 1])
+            except ValueError:
+                print(f"not a number: {argv[i + 1]}", flush=True)
+                return 2
+            i += 2
+            continue
+        print(f"unknown argument: {argv[i]}", flush=True)
+        return 2
+    try:
+        with open(baseline_path, "r", encoding="utf-8") as f:
+            baseline = json.load(f)
+        with open(candidate_path, "r", encoding="utf-8") as f:
+            candidate = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"could not read scorecard: {exc}", flush=True)
+        return 2
+    diff = compare_scorecards(baseline, candidate, threshold=threshold)
+    print(json.dumps(diff_to_dict(diff), indent=2))
+    # Exit non-zero on regression so CI can gate on this.
+    return 1 if diff.overall_regressed or diff.regressed_dimensions else 0
 
 
 if __name__ == "__main__":

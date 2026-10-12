@@ -440,3 +440,133 @@ def test_duration_sanity_scorer_bands(monkeypatch):
     assert vbench2._duration_sanity_scorer("x.mp4") == pytest.approx(0.0)
     monkeypatch.setattr(vbench2, "_ffprobe_json", lambda _p: None)
     assert vbench2._duration_sanity_scorer("x.mp4") is None
+
+
+# ---------------------------------------------------------------------------
+# Regression comparison
+
+def _dir_card(overall, dim_scores):
+    """Build the dict-shape of a DirScorecard with the given per-dimension
+    aggregate scores. Only the fields compare_scorecards reads are set."""
+    return {
+        "clip_count": 1,
+        "per_clip": [],
+        "aggregate": [{"dimension": d, "score": s}
+                      for d, s in dim_scores.items()],
+        "overall": overall,
+    }
+
+
+def test_compare_scorecards_flags_dimension_regression():
+    """A dimension dropping by more than the threshold is flagged; one
+    dropping less is not. Overall drop is flagged separately."""
+    baseline = _dir_card(0.80, {"physics": 0.80, "commonsense": 0.70})
+    candidate = _dir_card(0.50, {"physics": 0.40, "commonsense": 0.69})
+    diff = vbench2.compare_scorecards(baseline, candidate, threshold=0.05)
+    phys = next(d for d in diff.dimensions if d.dimension == "physics")
+    cs = next(d for d in diff.dimensions if d.dimension == "commonsense")
+    assert phys.regressed is True
+    assert phys.delta == pytest.approx(-0.4)
+    assert cs.regressed is False
+    assert cs.delta == pytest.approx(-0.01)
+    assert diff.overall_regressed is True
+    assert "physics" in diff.regressed_dimensions
+    assert "commonsense" not in diff.regressed_dimensions
+
+
+def test_compare_scorecards_improvement_is_not_regression():
+    """A positive delta is not a regression, however large."""
+    baseline = _dir_card(0.30, {"physics": 0.30})
+    candidate = _dir_card(0.90, {"physics": 0.90})
+    diff = vbench2.compare_scorecards(baseline, candidate)
+    assert diff.overall_regressed is False
+    assert diff.regressed_dimensions == []
+    phys = next(d for d in diff.dimensions if d.dimension == "physics")
+    assert phys.delta == pytest.approx(0.6)
+    assert phys.regressed is False
+
+
+def test_compare_scorecards_none_side_is_no_regression():
+    """When either side has no opinion on a dimension, that dimension's
+    delta is None and it never counts as a regression - a scorer coverage
+    change should not look like a quality drop."""
+    baseline = _dir_card(None, {"physics": None})
+    candidate = _dir_card(0.40, {"physics": 0.40})
+    diff = vbench2.compare_scorecards(baseline, candidate)
+    phys = next(d for d in diff.dimensions if d.dimension == "physics")
+    assert phys.delta is None
+    assert phys.regressed is False
+    assert diff.overall_regressed is False
+    assert diff.regressed_dimensions == []
+
+
+def test_compare_scorecards_accepts_live_dataclass():
+    """The dict form and the live DirScorecard form must produce the
+    same diff - callers persist dicts but may hold the dataclass."""
+    vbench2.register_scorer(vbench2.ScorerSpec(
+        name="k", dimension="physics", capability="mechanics",
+        fn=lambda _p: 0.9,
+    ))
+    import tempfile, os as _os
+    with tempfile.TemporaryDirectory() as td:
+        _os.makedirs(_os.path.join(td, "a"))
+        with open(_os.path.join(td, "a", "x.mp4"), "wb") as f:
+            f.write(b"stub")
+        live = vbench2.score_dir(_os.path.join(td, "a"))
+    baseline = _dir_card(0.4, {"physics": 0.4})
+    diff_live = vbench2.compare_scorecards(baseline, live)
+    diff_dict = vbench2.compare_scorecards(baseline,
+                                            vbench2.scorecard_to_dict(live))
+    # Both sides should score the physics delta the same way.
+    assert diff_live.overall_delta == pytest.approx(diff_dict.overall_delta)
+    assert diff_live.regressed_dimensions == diff_dict.regressed_dimensions
+
+
+def test_compare_scorecards_rejects_non_scorecard():
+    with pytest.raises(TypeError):
+        vbench2.compare_scorecards(123, {"aggregate": []})
+
+
+def test_compare_scorecards_rejects_negative_threshold():
+    with pytest.raises(ValueError):
+        vbench2.compare_scorecards({"aggregate": []}, {"aggregate": []},
+                                    threshold=-0.01)
+
+
+def test_diff_to_dict_shape():
+    """The persisted shape is stable and names every dimension plus the
+    overall triple."""
+    diff = vbench2.compare_scorecards(
+        _dir_card(0.5, {"physics": 0.5}),
+        _dir_card(0.3, {"physics": 0.3}),
+    )
+    data = vbench2.diff_to_dict(diff)
+    assert set(data) == {
+        "threshold", "overall_baseline", "overall_candidate",
+        "overall_delta", "overall_regressed",
+        "dimensions", "regressed_dimensions",
+    }
+    assert {row["dimension"] for row in data["dimensions"]} == set(vbench2.DIMENSIONS)
+
+
+def test_cli_diff_exits_nonzero_on_regression(tmp_path, capsys):
+    """The CLI returns 1 on regression so CI can gate on exit code."""
+    import json as _json
+    baseline = tmp_path / "base.json"
+    candidate = tmp_path / "cand.json"
+    baseline.write_text(_json.dumps(_dir_card(0.9, {"physics": 0.9})))
+    candidate.write_text(_json.dumps(_dir_card(0.1, {"physics": 0.1})))
+    rc = vbench2._main(["diff", str(baseline), str(candidate)])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert '"regressed_dimensions"' in out
+
+
+def test_cli_diff_exits_zero_on_no_regression(tmp_path, capsys):
+    import json as _json
+    baseline = tmp_path / "base.json"
+    candidate = tmp_path / "cand.json"
+    baseline.write_text(_json.dumps(_dir_card(0.5, {"physics": 0.5})))
+    candidate.write_text(_json.dumps(_dir_card(0.55, {"physics": 0.55})))
+    rc = vbench2._main(["diff", str(baseline), str(candidate)])
+    assert rc == 0

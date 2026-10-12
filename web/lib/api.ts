@@ -559,8 +559,8 @@ export type FilmStageKey =
   | "storyboard" | "cinematographer"
   | "voice_cast" | "character_portraits" | "voice_actor"
   | "shots" | "motion_shots" | "editor"
-  | "ambient" | "composer" | "mixer"
-  | "colorist" | "titles" | "upscale"
+  | "ambient" | "composer" | "sound_design" | "mixer"
+  | "colorist" | "titles" | "upscale" | "continuity"
   // Any newer stage added server-side falls through as a plain string.
   | (string & {});
 

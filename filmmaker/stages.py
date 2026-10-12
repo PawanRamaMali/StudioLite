@@ -56,6 +56,7 @@ StageKey = Literal[
     "colorist",
     "titles",
     "upscale",
+    "continuity",
 ]
 
 StageStatus = Literal[
@@ -101,6 +102,7 @@ STAGES: List[StageSpec] = [
     StageSpec("colorist",           "Colorist",           "Applies per-scene color grading LUT via ffmpeg."),
     StageSpec("titles",             "Titles & Credits",   "Prepends title card and appends end credits."),
     StageSpec("upscale",            "Upscale",            "Optional neural upscale of the final cut to 1440p via Real-ESRGAN. No-op unless upscale_backend is set."),
+    StageSpec("continuity",         "Continuity & QC",    "Walks every artifact against its upstream requirements. Flags missing renders, silent fallbacks, mis-cast characters, timing drift.", gated_by_default=True),
 ]
 
 STAGE_KEYS: List[StageKey] = [s.key for s in STAGES]

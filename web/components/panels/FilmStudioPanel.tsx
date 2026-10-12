@@ -959,6 +959,9 @@ function ArtifactView({
         <SingleVideoView projectId={projectId} artifact={artifact}
                          stageKey={stage.key as "mixer" | "colorist" | "titles" | "upscale" | "editor"} />
       )}
+      {stage.key === "continuity" && artifact && !editing && (
+        <ContinuityView artifact={artifact} />
+      )}
 
       {/* Fallback: raw JSON viewer for everything else */}
       {editing || (artifact && ![
@@ -966,6 +969,7 @@ function ArtifactView({
         "breakdown","storyboard","cinematographer",
         "voice_cast","character_portraits","voice_actor","motion_shots",
         "ambient","composer","mixer","colorist","titles","upscale",
+        "continuity",
       ].includes(stage.key)) ? (
         <>
           {editing && (
@@ -1589,6 +1593,133 @@ function SingleVideoView({ projectId, artifact, stageKey }: {
            className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300">
           Open MP4 <Download className="w-3 h-3" />
         </a>
+      )}
+    </div>
+  );
+}
+
+function ContinuityView({ artifact }: { artifact: Record<string, unknown> }) {
+  const ok = Boolean(artifact.ok);
+  const issues = (artifact.issues as Array<{
+    severity: "error" | "warning";
+    stage: string;
+    message: string;
+    fix_hint?: string;
+    scene_id?: string;
+    shot_id?: string;
+    character?: string;
+  }>) || [];
+  const stats = (artifact.stats as Record<string, unknown>) || {};
+  const errorCount = Number(artifact.error_count ?? 0);
+  const warningCount = Number(artifact.warning_count ?? 0);
+
+  // Sort errors first, then warnings, then stable by stage key.
+  const ordered = [...issues].sort((a, b) => {
+    const sev = (s: string) => (s === "error" ? 0 : 1);
+    return sev(a.severity) - sev(b.severity) || a.stage.localeCompare(b.stage);
+  });
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-3">
+        <div className={`inline-flex items-center gap-1.5 px-2 py-1 rounded border text-xs ${
+          ok
+            ? "bg-green-500/10 text-green-300 border-green-500/30"
+            : "bg-red-500/10 text-red-300 border-red-500/30"
+        }`}>
+          {ok ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}
+          {ok ? "No blocking issues" : `${errorCount} blocker${errorCount === 1 ? "" : "s"}`}
+        </div>
+        {warningCount > 0 && (
+          <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded border text-xs bg-amber-500/10 text-amber-300 border-amber-500/30">
+            <Clock className="w-3.5 h-3.5" />
+            {warningCount} warning{warningCount === 1 ? "" : "s"}
+          </div>
+        )}
+      </div>
+
+      {Object.keys(stats).length > 0 && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-1.5">
+          {stats.scene_count !== undefined && (
+            <Meta label="Scenes" value={String(stats.scene_count)} />
+          )}
+          {stats.shot_count !== undefined && (
+            <Meta label="Shots" value={String(stats.shot_count)} />
+          )}
+          {stats.character_count !== undefined && (
+            <Meta label="Characters" value={String(stats.character_count)} />
+          )}
+          {stats.dialogue_line_count !== undefined && (
+            <Meta label="Dialogue lines" value={String(stats.dialogue_line_count)} />
+          )}
+          {stats.target_duration_sec !== undefined && (
+            <Meta label="Target" value={`${stats.target_duration_sec}s`} />
+          )}
+          {stats.actual_duration_sec !== undefined && (
+            <Meta
+              label="Actual"
+              value={`${stats.actual_duration_sec}s`}
+              tone={
+                Math.abs(
+                  Number(stats.actual_duration_sec) -
+                  Number(stats.target_duration_sec ?? stats.actual_duration_sec)
+                ) < 5
+                  ? "ok"
+                  : undefined
+              }
+            />
+          )}
+          {stats.final_source_stage !== undefined && (
+            <Meta label="Final from" value={String(stats.final_source_stage)} />
+          )}
+        </div>
+      )}
+
+      {ordered.length > 0 ? (
+        <div className="space-y-1.5">
+          {ordered.map((iss, i) => (
+            <div
+              key={i}
+              className={`border rounded px-3 py-2 ${
+                iss.severity === "error"
+                  ? "bg-red-500/5 border-red-500/30"
+                  : "bg-amber-500/5 border-amber-500/20"
+              }`}
+            >
+              <div className="flex items-start gap-2">
+                {iss.severity === "error" ? (
+                  <AlertCircle className="w-3.5 h-3.5 text-red-400 mt-0.5 flex-shrink-0" />
+                ) : (
+                  <Clock className="w-3.5 h-3.5 text-amber-400 mt-0.5 flex-shrink-0" />
+                )}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap mb-0.5">
+                    <Badge variant="default" className="text-[10px] uppercase tracking-wide">
+                      {iss.stage.replace("_", " ")}
+                    </Badge>
+                    {iss.scene_id && (
+                      <span className="text-[10px] text-zinc-500">{iss.scene_id}</span>
+                    )}
+                    {iss.shot_id && (
+                      <span className="text-[10px] text-zinc-500">·{iss.shot_id}</span>
+                    )}
+                    {iss.character && (
+                      <span className="text-[10px] text-zinc-500">·{iss.character}</span>
+                    )}
+                  </div>
+                  <div className="text-xs text-zinc-200">{iss.message}</div>
+                  {iss.fix_hint && (
+                    <div className="text-[11px] text-zinc-500 mt-1 italic">{iss.fix_hint}</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="text-xs text-zinc-500 italic px-3 py-6 text-center border border-zinc-800 rounded">
+          Clean sweep — every upstream artifact is accounted for.
+        </div>
       )}
     </div>
   );

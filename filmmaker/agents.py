@@ -3912,6 +3912,224 @@ def run_upscale(project: Project) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# NEW STAGE - Continuity & QC
+#
+# Walks every upstream artifact and compares it against what the next stage
+# needs. Flags missing content, silent fallbacks, mis-cast characters, and
+# timing drift. Deterministic - no LLM call - so it never adds latency and
+# the output is stable enough for the UI to render a tight checklist.
+# ---------------------------------------------------------------------------
+
+def run_continuity(project: Project) -> Dict[str, Any]:
+    """Produce a QC report for the finished film.
+
+    The report is a list of issues, each with a severity and a stage key
+    so the panel can anchor the issue back to the artifact that caused it.
+    `ok` is True iff no `error`-level issues; `warning` issues are
+    informational (silent fallbacks, timing drift under threshold).
+
+    This stage never raises on bad upstream data - the whole point is to
+    SURFACE those gaps, not propagate them. A completely empty project
+    just produces a long issue list and ok=False."""
+    issues: List[Dict[str, Any]] = []
+    stats: Dict[str, Any] = {}
+
+    def _issue(severity: str, stage: str, message: str,
+               fix_hint: str = "", **extra) -> None:
+        rec = {"severity": severity, "stage": stage, "message": message}
+        if fix_hint:
+            rec["fix_hint"] = fix_hint
+        rec.update(extra)
+        issues.append(rec)
+
+    # ---- Load every artifact once ----
+    producer    = project.read_artifact("producer") or {}
+    screenwriter= project.read_artifact("screenwriter") or {}
+    story_ed    = project.read_artifact("story_editor") or {}
+    breakdown   = project.read_artifact("breakdown") or {}
+    storyboard  = project.read_artifact("storyboard") or {}
+    cinema      = project.read_artifact("cinematographer") or {}
+    voice_cast  = project.read_artifact("voice_cast") or {}
+    portraits   = project.read_artifact("character_portraits") or {}
+    voice_actor = project.read_artifact("voice_actor") or {}
+    shots_art   = project.read_artifact("shots") or {}
+    motion_art  = project.read_artifact("motion_shots") or {}
+    editor_art  = project.read_artifact("editor") or {}
+    ambient_art = project.read_artifact("ambient") or {}
+    composer_art= project.read_artifact("composer") or {}
+    sound_art   = project.read_artifact("sound_design") or {}
+    mixer_art   = project.read_artifact("mixer") or {}
+    colorist_art= project.read_artifact("colorist") or {}
+    titles_art  = project.read_artifact("titles") or {}
+    upscale_art = project.read_artifact("upscale") or {}
+
+    scenes = breakdown.get("scenes") or []
+    shots_by_scene = storyboard.get("scenes") or {}
+    dp_by_scene = cinema.get("scenes") or {}
+    cast = voice_cast.get("cast") or {}
+    portraits_map = portraits.get("portraits") or {}
+    shots = shots_art.get("shots") or []
+    motion_shots = motion_art.get("motion_shots") or []
+    voice_lines = voice_actor.get("lines") or []
+
+    stats["scene_count"] = len(scenes)
+    stats["shot_count"] = sum(len(v) for v in shots_by_scene.values())
+    stats["dialogue_line_count"] = len(voice_lines)
+    stats["character_count"] = len(cast)
+
+    # ---- Scenes have shots and durations ----
+    for sc in scenes:
+        sid = sc.get("id") or ""
+        sh_list = shots_by_scene.get(sid) or []
+        if not sh_list:
+            _issue("error", "storyboard",
+                   f"Scene {sid} ({sc.get('heading', '')!r}) has no shots",
+                   fix_hint="Re-run Storyboard with a reviewer note mentioning this scene.",
+                   scene_id=sid)
+        if not sc.get("heading"):
+            _issue("warning", "breakdown",
+                   f"Scene {sid} has no heading — colorist can't key off time_of_day",
+                   scene_id=sid)
+        est = sc.get("estimated_seconds")
+        if not isinstance(est, (int, float)) or est <= 0:
+            _issue("warning", "breakdown",
+                   f"Scene {sid} missing estimated_seconds — editor timing may drift",
+                   scene_id=sid)
+
+    # ---- Cinematographer covered every shot ----
+    for sid, sh_list in shots_by_scene.items():
+        dp_shots = dp_by_scene.get(sid) or {}
+        for sh in sh_list:
+            shid = sh.get("id") or ""
+            if shid and shid not in dp_shots:
+                _issue("warning", "cinematographer",
+                       f"Shot {sid}/{shid} has no DP assignment — defaulting framing/lens",
+                       scene_id=sid, shot_id=shid)
+
+    # ---- Every speaking character cast and portraited ----
+    cast_upper = {str(k).upper(): v for k, v in cast.items()}
+    speakers_upper = {str(l.get("speaker", "")).upper() for l in voice_lines
+                       if l.get("speaker")}
+    for speaker in sorted(speakers_upper):
+        if speaker not in cast_upper:
+            _issue("warning", "voice_cast",
+                   f"Speaker {speaker!r} has no voice_cast entry — used fallback voice",
+                   fix_hint="Edit voice_cast artifact to add a Piper voice for this character.",
+                   character=speaker)
+    for name in sorted(cast.keys()):
+        if portraits_map and str(name).upper() not in {k.upper() for k in portraits_map}:
+            _issue("warning", "character_portraits",
+                   f"Character {name!r} is cast but has no portrait — SDXL got no identity ref",
+                   character=name)
+
+    # ---- Shots rendered to disk ----
+    render_missing = 0
+    render_fallback = 0
+    for s in shots:
+        sid = s.get("scene_id", ""); shid = s.get("shot_id", "")
+        rel = s.get("path")
+        if not rel:
+            _issue("error", "shots",
+                   f"Shot {sid}/{shid} has no `path` field — nothing to render",
+                   scene_id=sid, shot_id=shid)
+            render_missing += 1
+            continue
+        abs_p = os.path.join(project.dir, rel)
+        if not os.path.exists(abs_p):
+            _issue("error", "shots",
+                   f"Shot {sid}/{shid} path advertised ({rel}) but file missing on disk",
+                   scene_id=sid, shot_id=shid)
+            render_missing += 1
+        if s.get("rendered") is False:
+            _issue("warning", "shots",
+                   f"Shot {sid}/{shid} fell back to placeholder card: {s.get('error') or 'unknown'}",
+                   scene_id=sid, shot_id=shid)
+            render_fallback += 1
+    stats["shots_missing"] = render_missing
+    stats["shots_fallback"] = render_fallback
+
+    # ---- Motion shots match render count ----
+    if motion_shots:
+        rendered_motion = sum(1 for m in motion_shots if m.get("rendered"))
+        stats["motion_rendered"] = rendered_motion
+        stats["motion_total"] = len(motion_shots)
+        if rendered_motion < len(motion_shots):
+            missing = len(motion_shots) - rendered_motion
+            _issue("warning", "motion_shots",
+                   f"{missing} of {len(motion_shots)} motion clips fell back to Ken Burns on stills",
+                   fix_hint="If this looks bad in the cut, re-run motion_shots with a different backend.")
+
+    # ---- Dialogue synthesized ----
+    silent_lines = sum(1 for l in voice_lines if l.get("synthesized") is False)
+    if silent_lines:
+        _issue("warning", "voice_actor",
+               f"{silent_lines} of {len(voice_lines)} dialogue lines are silent "
+               "(Piper/XTTS/IndexTTS all failed)",
+               fix_hint="Check voice weights are present; re-run voice_actor.")
+    stats["dialogue_silent"] = silent_lines
+
+    # ---- Audio stages did or didn't render ----
+    if ambient_art and not ambient_art.get("rendered", True):
+        _issue("warning", "ambient",
+               f"Ambient bed is silent: {ambient_art.get('error') or 'AudioLDM unavailable'}")
+    if composer_art and not composer_art.get("rendered", True):
+        _issue("warning", "composer",
+               f"Score is silent: {composer_art.get('error') or 'MusicGen unavailable'}")
+    if sound_art:
+        sfx_rendered = sound_art.get("rendered", 0)
+        sfx_cues = sound_art.get("cue_count", 0)
+        if sfx_cues and sfx_rendered < sfx_cues:
+            _issue("warning", "sound_design",
+                   f"{sfx_cues - sfx_rendered} of {sfx_cues} SFX cues fell back to silence")
+        stats["sfx_cues"] = sfx_cues
+        stats["sfx_rendered"] = sfx_rendered
+
+    # ---- Timing drift: compare target vs actual duration ----
+    target_sec = (project.meta.config.target_minutes or 0.0) * 60.0
+    actual_sec = float(editor_art.get("duration_sec", 0) or 0)
+    if target_sec > 0 and actual_sec > 0:
+        drift = actual_sec - target_sec
+        drift_pct = abs(drift) / target_sec
+        stats["target_duration_sec"] = round(target_sec, 1)
+        stats["actual_duration_sec"] = round(actual_sec, 1)
+        if drift_pct > 0.5:
+            _issue("warning", "editor",
+                   f"Final cut is {actual_sec:.1f}s but target was {target_sec:.1f}s "
+                   f"({'over' if drift > 0 else 'under'} by {drift_pct*100:.0f}%)",
+                   fix_hint="Edit the breakdown to shorten scenes, or rerun with a different target_minutes.")
+
+    # ---- Final file lands on disk ----
+    final_rel: Optional[str] = None
+    for src_art, src_name in ((upscale_art, "upscale"), (titles_art, "titles"),
+                               (colorist_art, "colorist"), (mixer_art, "mixer"),
+                               (editor_art, "editor")):
+        p = src_art.get("output_path")
+        if p:
+            abs_p = os.path.join(project.dir, p)
+            if os.path.exists(abs_p):
+                final_rel = p
+                stats["final_source_stage"] = src_name
+                break
+    if not final_rel:
+        _issue("error", "titles",
+               "No final film produced on disk — mixer/colorist/titles/upscale all failed",
+               fix_hint="Check Mixer / Colorist / Titles errors and rerun.")
+    stats["final_output_path"] = final_rel
+
+    # ---- Verdict ----
+    errors = [i for i in issues if i["severity"] == "error"]
+    warnings = [i for i in issues if i["severity"] == "warning"]
+    return {
+        "ok": not errors,
+        "issue_count": len(issues),
+        "error_count": len(errors),
+        "warning_count": len(warnings),
+        "issues": issues,
+        "stats": stats,
+    }
+
+
 def _upscale_video_realesrgan(model, src_abs: str, out_abs: str,
                                 *, device: str) -> None:
     """Stream frames from `src_abs` through the model and mux them into

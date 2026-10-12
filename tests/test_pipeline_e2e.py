@@ -1,4 +1,4 @@
-"""End-to-end integration harness for the 18-stage Film Studio pipeline.
+"""End-to-end integration harness for the 20-stage Film Studio pipeline.
 
 Does NOT exercise real SDXL / Wan / MusicGen / Whisper weights — those
 take minutes per stage and depend on >30 GB of weights. Instead:
@@ -291,7 +291,7 @@ def _fake_credits(out_path: str, *, lines, duration: float) -> None:
 
 @pytest.mark.e2e
 def test_pipeline_runs_end_to_end_with_mocked_models(tmp_path: Path):
-    """Run all 18 stages. Verify every stage persists its artifact and the
+    """Run all 20 stages. Verify every stage persists its artifact and the
     orchestrator finishes without raising."""
     from filmmaker import projects, orchestrator, agents, llm
 

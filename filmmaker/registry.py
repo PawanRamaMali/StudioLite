@@ -35,6 +35,7 @@ RUNNERS: Dict[StageKey, StageRunner] = {
     "colorist":            agents.run_colorist,
     "titles":              agents.run_titles,
     "upscale":             agents.run_upscale,
+    "continuity":          agents.run_continuity,
 }
 
 

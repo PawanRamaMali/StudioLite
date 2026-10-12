@@ -6039,6 +6039,33 @@ async def film_list_stages():
     return {"stages": _film_stages_dict()}
 
 
+@app.get("/api/v1/backends")
+async def list_backends(stage: Optional[str] = None):
+    """Expose the backend registry so the frontend sources VRAM, licence,
+    and roadmap flags from one place. Optional ``stage`` filter narrows
+    the response to a single stage's backends (e.g. ``?stage=upscale``).
+
+    Response shape is a flat dict ready for JSON encoding - each backend
+    carries its spec and quant variants verbatim from backend_registry."""
+    from filmmaker import backend_registry as _br
+    from dataclasses import asdict as _asdict
+    specs = _br.for_stage(stage) if stage else _br.all_specs()
+    return {
+        "backends": [_asdict(s) for s in specs],
+        "cloud_providers": _cloud_providers_dict(),
+    }
+
+
+def _cloud_providers_dict() -> Dict[str, bool]:
+    """Soft report of which cloud providers are configured. The UI shows
+    this on the settings page; we never leak the actual tokens."""
+    try:
+        from filmmaker import cloud_burst as _cb
+        return _cb.providers_configured()
+    except Exception:
+        return {}
+
+
 @app.get("/api/v1/films/templates")
 async def film_list_templates():
     """Starter templates for the "new project" screen. Static - the

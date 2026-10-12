@@ -241,10 +241,12 @@ def test_musetalk_run_subprocess_success(tmp_path: Path, monkeypatch):
                    check=False, timeout=None):
         calls["cmd"] = cmd
         calls["cwd"] = cwd
-        # MuseTalk writes task_0.mp4 under --result_dir.
+        # MuseTalk 1.5 writes `<result_dir>/<version>/<video>_<audio>.mp4`.
         rd_idx = cmd.index("--result_dir") + 1
-        produced = os.path.join(cmd[rd_idx], "task_0.mp4")
-        os.makedirs(cmd[rd_idx], exist_ok=True)
+        ver_idx = cmd.index("--version") + 1
+        out_dir = os.path.join(cmd[rd_idx], cmd[ver_idx])
+        os.makedirs(out_dir, exist_ok=True)
+        produced = os.path.join(out_dir, "final_voice.mp4")
         with open(produced, "wb") as f:
             f.write(b"stub-musetalk-output")
         class _Proc:

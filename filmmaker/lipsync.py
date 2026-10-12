@@ -231,17 +231,15 @@ class MuseTalkBackend:
                                 BackendStatus(name=self.name, available=False,
                                               reason=f"MuseTalk exited {proc.returncode}: " + " | ".join(tail)))
 
-        # MuseTalk writes `<result_dir>/task_0.mp4` on the happy path.
-        produced = os.path.join(result_dir, "task_0.mp4")
-        if not os.path.exists(produced):
-            # Fall back to the newest mp4 in result_dir.
-            candidates = sorted(
-                (os.path.join(result_dir, n) for n in os.listdir(result_dir)
-                 if n.lower().endswith(".mp4")),
-                key=lambda p: os.path.getmtime(p),
-                reverse=True,
-            )
-            produced = candidates[0] if candidates else ""
+        # MuseTalk 1.5 writes to `<result_dir>/<version>/<video>_<audio>.mp4`,
+        # not directly into result_dir. Walk the tree and pick the newest mp4.
+        candidates = []
+        for root, _dirs, files in os.walk(result_dir):
+            for n in files:
+                if n.lower().endswith(".mp4"):
+                    candidates.append(os.path.join(root, n))
+        candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        produced = candidates[0] if candidates else ""
         if not produced or not os.path.exists(produced):
             return _passthrough(self.name, project, input_video,
                                 BackendStatus(name=self.name, available=False,

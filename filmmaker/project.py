@@ -399,6 +399,21 @@ class Project:
 
 # ---------- (de)serialization helpers, kept out of the class for clarity ----
 
+def _cfg_str(d: Dict[str, Any], key: str, default: str) -> str:
+    v = d.get(key)
+    return str(v) if v is not None else default
+
+
+def _cfg_float(d: Dict[str, Any], key: str, default: float) -> float:
+    v = d.get(key)
+    if v is None:
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} must be a number, got {v!r}")
+
+
 def _meta_to_json(meta: ProjectMeta) -> Dict[str, Any]:
     d = asdict(meta)
     return d
@@ -408,18 +423,18 @@ def _meta_from_json(d: Dict[str, Any]) -> ProjectMeta:
     cfg_raw = d.get("config") or {}
     cfg = ProjectConfig(
         per_stage=cfg_raw.get("per_stage") or {},
-        llm_backend=cfg_raw.get("llm_backend", "ollama"),
-        llm_model=cfg_raw.get("llm_model", "llama3.2"),
+        llm_backend=_cfg_str(cfg_raw, "llm_backend", "ollama"),
+        llm_model=_cfg_str(cfg_raw, "llm_model", "llama3.2"),
         llm_host=cfg_raw.get("llm_host"),
-        style=cfg_raw.get("style", "stylized"),
-        target_minutes=float(cfg_raw.get("target_minutes", 2.0)),
-        quality=str(cfg_raw.get("quality", "standard")).lower(),
-        sdxl_variant=str(cfg_raw.get("sdxl_variant", "turbo")).lower(),
-        motion_backend=str(cfg_raw.get("motion_backend", "auto")).lower(),
-        voice_backend=str(cfg_raw.get("voice_backend", "piper")).lower(),
-        music_backend=str(cfg_raw.get("music_backend", "musicgen")).lower(),
-        upscale_backend=str(cfg_raw.get("upscale_backend", "none")).lower(),
-        lipsync_backend=str(cfg_raw.get("lipsync_backend", "none")).lower(),
+        style=_cfg_str(cfg_raw, "style", "stylized"),
+        target_minutes=_cfg_float(cfg_raw, "target_minutes", 2.0),
+        quality=_cfg_str(cfg_raw, "quality", "standard").lower(),
+        sdxl_variant=_cfg_str(cfg_raw, "sdxl_variant", "turbo").lower(),
+        motion_backend=_cfg_str(cfg_raw, "motion_backend", "auto").lower(),
+        voice_backend=_cfg_str(cfg_raw, "voice_backend", "piper").lower(),
+        music_backend=_cfg_str(cfg_raw, "music_backend", "musicgen").lower(),
+        upscale_backend=_cfg_str(cfg_raw, "upscale_backend", "none").lower(),
+        lipsync_backend=_cfg_str(cfg_raw, "lipsync_backend", "none").lower(),
     )
     return ProjectMeta(
         id=d["id"],

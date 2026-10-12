@@ -6072,9 +6072,12 @@ async def film_create_from_template(req: FilmFromTemplateRequest):
     config = film_templates.template_config(template.id)
     if req.config_override:
         config.update(req.config_override)
-    proj = _fp.create(OUTPUT_DIR, brief=brief,
-                      title=req.title or template.name,
-                      config_dict=config)
+    try:
+        proj = _fp.create(OUTPUT_DIR, brief=brief,
+                          title=req.title or template.name,
+                          config_dict=config)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     return {
         "project": _film_meta_dict(proj),
         "state": _film_state_dict(proj),
@@ -6091,7 +6094,10 @@ async def film_list():
 @app.post("/api/v1/films")
 async def film_create(req: FilmCreateRequest):
     from filmmaker import projects as _fp
-    proj = _fp.create(OUTPUT_DIR, brief=req.brief, title=req.title, config_dict=req.config)
+    try:
+        proj = _fp.create(OUTPUT_DIR, brief=req.brief, title=req.title, config_dict=req.config)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     return {
         "project": _film_meta_dict(proj),
         "state": _film_state_dict(proj),

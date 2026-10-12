@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, List
+from typing import Any, Optional, Dict, List
 import logging
 import threading
 import uuid
@@ -5975,6 +5975,10 @@ class FilmSetGatesRequest(BaseModel):
     gates: Dict[str, bool]
 
 
+class FilmConfigPatchRequest(BaseModel):
+    patch: Dict[str, Any]
+
+
 class FilmSetChoiceRequest(BaseModel):
     chosen_index: int
 
@@ -6201,6 +6205,34 @@ async def film_rewind(project_id: str, stage_key: str):
     state.is_paused = False
     proj.save_state(state)
     return {"rewound_to": stage_key, "state": _film_state_dict(proj)}
+
+
+@app.patch("/api/v1/films/{project_id}/config")
+async def film_patch_config(project_id: str, req: FilmConfigPatchRequest):
+    """Partially update a project's config (backends, quality, target_minutes).
+    Rejects while running; resets the directly affected stage to pending and
+    cascades downstream so a subsequent run picks up the new backend."""
+    from filmmaker import projects as _fp, orchestrator as _fo
+    try:
+        proj = _fp.load(OUTPUT_DIR, project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+    if _fo.manager.is_running(project_id):
+        raise HTTPException(409, "Pause the run before editing config.")
+    try:
+        affected = _fp.apply_config_patch(proj, req.patch)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    for stage_key in affected:
+        state = proj.state
+        if state.stage_status.get(stage_key) in ("done", "needs_review", "stale", "failed"):
+            proj.set_stage_status(stage_key, "pending")  # type: ignore[arg-type]
+        proj.mark_downstream_stale(stage_key)  # type: ignore[arg-type]
+    return {
+        "project": _film_meta_dict(proj),
+        "state": _film_state_dict(proj),
+        "affected_stages": affected,
+    }
 
 
 @app.put("/api/v1/films/{project_id}/artifact/{stage_key}")

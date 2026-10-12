@@ -700,6 +700,12 @@ export const filmEditArtifact = (id: string, stage: FilmStageKey, data: unknown)
     { method: "PUT", body: JSON.stringify({ data }) }
   );
 
+export const filmPatchConfig = (id: string, patch: Partial<FilmConfig>) =>
+  apiFetch<{ project: FilmMeta; state: FilmState; affected_stages: FilmStageKey[] }>(
+    `/api/v1/films/${encodeURIComponent(id)}/config`,
+    { method: "PATCH", body: JSON.stringify({ patch }) }
+  );
+
 export const filmSetGates = (id: string, gates: Partial<Record<FilmStageKey, boolean>>) =>
   apiFetch<{ gates: Record<string, boolean> }>(
     `/api/v1/films/${encodeURIComponent(id)}/gates`,

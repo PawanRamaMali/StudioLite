@@ -13,8 +13,9 @@ import {
 import {
   FILM_API_BASE, filmCreate, filmCreateFromTemplate, filmDelete,
   filmEditArtifact, filmGet, filmList, filmListStages, filmListTemplates,
-  filmPause, filmRewind, filmRun, filmStreamUrl, getLLMBackends,
-  type FilmDetail, type FilmListItem, type FilmStageKey, type FilmStageSpec,
+  filmPatchConfig, filmPause, filmRewind, filmRun, filmStreamUrl, getLLMBackends,
+  type FilmConfig, type FilmDetail, type FilmListItem, type FilmMeta,
+  type FilmStageKey, type FilmStageSpec,
   type FilmStageStatus, type FilmTemplate, type LLMBackendInfo,
 } from "@/lib/api";
 
@@ -658,6 +659,8 @@ function ProjectView({
           <span className="text-zinc-600">· Updated {fmtRelTime(project.updated_at)}</span>
         </div>
       </div>
+
+      <BackendSettings project={project} isRunning={isRunning} onSaved={refresh} />
 
       {err && (
         <Card className="border-red-500/30 bg-red-500/5">
@@ -1872,6 +1875,145 @@ function Meta({ label, value, tone }: { label: string; value: React.ReactNode; t
       <div className="text-[9px] uppercase tracking-wide text-zinc-500">{label}</div>
       <div className={`text-xs mt-0.5 ${tone === "ok" ? "text-green-400" : tone === "dim" ? "text-zinc-500" : "text-zinc-100"}`}>
         {value}
+      </div>
+    </div>
+  );
+}
+
+// Inline editor for the four swappable backends. Collapsed by default
+// so it does not fight the meta strip for attention. Disabled while a
+// run is in flight — the API rejects config edits mid-run and we would
+// otherwise just surface the 409.
+function BackendSettings({
+  project, isRunning, onSaved,
+}: {
+  project: FilmMeta;
+  isRunning: boolean;
+  onSaved: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [voice, setVoice] = useState<string>(project.config.voice_backend || "piper");
+  const [music, setMusic] = useState<string>(project.config.music_backend || "musicgen");
+  const [lipsync, setLipsync] = useState<string>(project.config.lipsync_backend || "none");
+  const [upscale, setUpscale] = useState<string>(project.config.upscale_backend || "none");
+
+  // When the project refreshes (e.g. after save or external change), reseat
+  // the local form values. Keyed on each backend field so a fresh server
+  // state is reflected without needing to close the editor.
+  useEffect(() => {
+    setVoice(project.config.voice_backend || "piper");
+    setMusic(project.config.music_backend || "musicgen");
+    setLipsync(project.config.lipsync_backend || "none");
+    setUpscale(project.config.upscale_backend || "none");
+  }, [
+    project.config.voice_backend, project.config.music_backend,
+    project.config.lipsync_backend, project.config.upscale_backend,
+  ]);
+
+  if (!editing) {
+    return (
+      <div className="flex items-center gap-2 text-[10px] text-zinc-500">
+        <span>
+          voice <span className="text-zinc-300">{project.config.voice_backend || "piper"}</span>
+          {" · "}music <span className="text-zinc-300">{project.config.music_backend || "musicgen"}</span>
+          {" · "}lip sync <span className="text-zinc-300">{project.config.lipsync_backend || "none"}</span>
+          {" · "}upscale <span className="text-zinc-300">{project.config.upscale_backend || "none"}</span>
+        </span>
+        <button
+          onClick={() => { setErr(null); setEditing(true); }}
+          disabled={isRunning}
+          className="text-indigo-400 hover:text-indigo-300 disabled:opacity-40 disabled:cursor-not-allowed"
+          title={isRunning ? "Pause the run to edit backends" : "Change backends"}
+        >
+          edit
+        </button>
+      </div>
+    );
+  }
+
+  const save = async () => {
+    const patch: Partial<FilmConfig> = {};
+    if (voice !== (project.config.voice_backend || "piper")) patch.voice_backend = voice;
+    if (music !== (project.config.music_backend || "musicgen")) patch.music_backend = music;
+    if (lipsync !== (project.config.lipsync_backend || "none")) patch.lipsync_backend = lipsync;
+    if (upscale !== (project.config.upscale_backend || "none")) patch.upscale_backend = upscale;
+    if (Object.keys(patch).length === 0) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    setErr(null);
+    try {
+      await filmPatchConfig(project.id, patch);
+      setEditing(false);
+      onSaved();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const selectClass = "w-full mt-0.5 bg-zinc-800/50 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200";
+  const labelClass = "text-[10px] uppercase tracking-wide text-zinc-500";
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 space-y-2">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        <div>
+          <label htmlFor="cfg-voice" className={labelClass}>Voice</label>
+          <select id="cfg-voice" value={voice} onChange={(e) => setVoice(e.target.value)}
+                  disabled={saving} className={selectClass}>
+            <option value="piper">Piper</option>
+            <option value="xtts">XTTS v2</option>
+            <option value="indextts2">IndexTTS-2</option>
+            <option value="qwen3tts">Qwen3-TTS</option>
+            <option value="chatterbox">Chatterbox</option>
+          </select>
+        </div>
+        <div>
+          <label htmlFor="cfg-music" className={labelClass}>Music</label>
+          <select id="cfg-music" value={music} onChange={(e) => setMusic(e.target.value)}
+                  disabled={saving} className={selectClass}>
+            <option value="musicgen">MusicGen</option>
+            <option value="acestep">ACE-Step</option>
+          </select>
+        </div>
+        <div>
+          <label htmlFor="cfg-lipsync" className={labelClass}>Lip sync</label>
+          <select id="cfg-lipsync" value={lipsync} onChange={(e) => setLipsync(e.target.value)}
+                  disabled={saving} className={selectClass}>
+            <option value="none">Off</option>
+            <option value="musetalk">MuseTalk 1.5</option>
+            <option value="latentsync">LatentSync 1.5</option>
+            <option value="echomimicv3">EchoMimicV3</option>
+          </select>
+        </div>
+        <div>
+          <label htmlFor="cfg-upscale" className={labelClass}>Upscale</label>
+          <select id="cfg-upscale" value={upscale} onChange={(e) => setUpscale(e.target.value)}
+                  disabled={saving} className={selectClass}>
+            <option value="none">Off</option>
+            <option value="realesrgan">Real-ESRGAN</option>
+          </select>
+        </div>
+      </div>
+      {err && <p className="text-xs text-red-300">{err}</p>}
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[10px] text-zinc-500">
+          Changing a backend rewinds its stage so the next run picks up the swap.
+        </p>
+        <div className="flex items-center gap-2">
+          <button onClick={() => { setErr(null); setEditing(false); }} disabled={saving}
+                  className="text-[11px] text-zinc-500 hover:text-zinc-300">
+            Cancel
+          </button>
+          <Button size="sm" onClick={save} disabled={saving}>
+            {saving ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Saving</> : "Save"}
+          </Button>
+        </div>
       </div>
     </div>
   );

@@ -504,7 +504,7 @@ function ProjectListView({
                       <option value="none">Off (mouths stay as rendered)</option>
                       <option value="musetalk">MuseTalk 1.5 (isolated venv)</option>
                       <option value="latentsync">LatentSync 1.5 (isolated venv)</option>
-                      <option value="echomimicv3">EchoMimicV3 (in-process, Apache-2.0)</option>
+                      <option value="echomimicv3">EchoMimicV3 (holistic, Apache-2.0)</option>
                     </select>
                   </div>
                 </div>

@@ -438,6 +438,130 @@ def test_latentsync_run_subprocess_failure_passthrough(tmp_path: Path, monkeypat
     assert "CUDA out of memory" in result["skipped"]
 
 
+def _write_echomimicv3_config(tmp_path: Path, project_output_dir: Path,
+                                overrides=None) -> Path:
+    """EchoMimicV3 counterpart. Config at
+    <output_dir>/lipsync-echomimicv3/config.json."""
+    import json as _json
+    cfg_dir = project_output_dir / "lipsync-echomimicv3"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    repo_dir = tmp_path / "echomimic_repo"
+    repo_dir.mkdir()
+    venv_py = tmp_path / "echomimic_venv_py.exe"
+    venv_py.write_bytes(b"stub")
+    cfg = {
+        "repo_dir": str(repo_dir),
+        "venv_python": str(venv_py),
+        "inference_script": "scripts/inference.py",
+        "model_path": "checkpoints/echomimicv3.safetensors",
+    }
+    if overrides:
+        cfg.update(overrides)
+    cfg_path = cfg_dir / "config.json"
+    cfg_path.write_text(_json.dumps(cfg), encoding="utf-8")
+    return cfg_path
+
+
+def test_echomimicv3_check_installed_missing_config(tmp_path: Path):
+    """No config.json → available=False with install_hint naming the
+    HF model card and the required keys."""
+    from filmmaker.lipsync import EchoMimicV3Backend
+    proj = _mkproj(tmp_path, lipsync_backend="echomimicv3")
+    status = EchoMimicV3Backend().check_installed(proj)
+    assert status.available is False
+    assert "config" in status.reason.lower()
+    assert "echomimic_v3" in status.install_hint
+    assert "BadToBest/EchoMimicV3" in status.install_hint
+
+
+def test_echomimicv3_check_installed_happy(tmp_path: Path):
+    from filmmaker.lipsync import EchoMimicV3Backend
+    proj = _mkproj(tmp_path, lipsync_backend="echomimicv3")
+    _write_echomimicv3_config(tmp_path, tmp_path)
+    status = EchoMimicV3Backend().check_installed(proj)
+    assert status.available is True
+
+
+def test_echomimicv3_run_subprocess_success(tmp_path: Path, monkeypatch):
+    """Happy path: ffmpeg reference-frame extraction is patched to
+    succeed, EchoMimicV3's subprocess writes animation.mp4, and the
+    backend copies it to the output_video. Artifact carries mode=holistic
+    so the UI can flag that this isn't mouth-only repaint."""
+    import subprocess as _sp
+    from filmmaker import lipsync as lipsync_mod
+    from filmmaker.lipsync import run_lipsync
+
+    proj = _mkproj(tmp_path, lipsync_backend="echomimicv3")
+    _write_echomimicv3_config(tmp_path, tmp_path)
+    _write_fake_final(proj)
+    speech_abs = os.path.join(proj.dir, "artifacts", "mixer_speech.wav")
+    os.makedirs(os.path.dirname(speech_abs), exist_ok=True)
+    with open(speech_abs, "wb") as f:
+        f.write(b"stub")
+    proj.write_artifact("voice_actor", {"lines": [
+        {"scene_id": "s01", "shot_id": "sh1", "speaker": "M",
+         "text": "Hi.", "wav": "voice/x.wav", "synthesized": True},
+    ]})
+
+    def _fake_extract(video_path, out_png, timestamp="00:00:01"):
+        with open(out_png, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n")
+        return True
+
+    monkeypatch.setattr(lipsync_mod, "_extract_midpoint_frame", _fake_extract)
+
+    calls: Dict[str, Any] = {}
+
+    def _fake_run(cmd, cwd=None, **kw):
+        calls["cmd"] = cmd
+        out_idx = cmd.index("--output") + 1
+        out_path = cmd[out_idx]
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "wb") as f:
+            f.write(b"stub-echomimic-output")
+        class _Proc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _Proc()
+
+    monkeypatch.setattr(_sp, "run", _fake_run)
+
+    result = run_lipsync(proj)
+    assert result["backend"] == "echomimicv3"
+    assert result["rendered"] is True
+    assert result["mode"] == "holistic"
+    assert result["ref_frame_path"].endswith("ref.png")
+    assert "--ref_image" in calls["cmd"]
+    assert "--audio" in calls["cmd"]
+
+
+def test_echomimicv3_run_frame_extract_failure(tmp_path: Path, monkeypatch):
+    """When ffmpeg can't pull a reference frame, the backend aborts
+    with a specific reason - no subprocess call is made."""
+    from filmmaker import lipsync as lipsync_mod
+    from filmmaker.lipsync import run_lipsync
+
+    proj = _mkproj(tmp_path, lipsync_backend="echomimicv3")
+    _write_echomimicv3_config(tmp_path, tmp_path)
+    _write_fake_final(proj)
+    speech_abs = os.path.join(proj.dir, "artifacts", "mixer_speech.wav")
+    os.makedirs(os.path.dirname(speech_abs), exist_ok=True)
+    with open(speech_abs, "wb") as f:
+        f.write(b"stub")
+    proj.write_artifact("voice_actor", {"lines": [
+        {"scene_id": "s01", "shot_id": "sh1", "speaker": "M",
+         "text": "Hi.", "wav": "voice/x.wav", "synthesized": True},
+    ]})
+
+    monkeypatch.setattr(lipsync_mod, "_extract_midpoint_frame",
+                         lambda v, o, timestamp="00:00:01": False)
+
+    result = run_lipsync(proj)
+    assert result["rendered"] is False
+    assert "reference frame" in result["skipped"]
+
+
 def test_lipsync_backend_exception_is_contained(tmp_path: Path, monkeypatch):
     """A buggy backend that raises mid-run shouldn't halt the pipeline
     either - the dispatcher wraps the call and returns a skip-artifact

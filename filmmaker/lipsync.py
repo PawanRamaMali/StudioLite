@@ -100,37 +100,11 @@ class NoneBackend:
 
 
 # ---------------------------------------------------------------------------
-# musetalk / latentsync / echomimicv3 - stubs. Each returns
-# `available=False` with a clear install hint until the shim scripts land
-# in follow-up commits. `run()` returns a skip-artifact that keeps the
-# pipeline moving and gives continuity a specific reason to flag.
-
-class _StubBackend:
-    """Shared behavior for backends whose shim isn't wired yet."""
-
-    name: BackendName
-    reason: str
-    install_hint: str
-
-    def check_installed(self, project: Project) -> BackendStatus:
-        return BackendStatus(
-            name=self.name, available=False,
-            reason=self.reason, install_hint=self.install_hint,
-        )
-
-    def run(self, project: Project, input_video: str,
-            voice_lines: List[Dict[str, Any]],
-            output_video: str) -> Dict[str, Any]:
-        status = self.check_installed(project)
-        return {
-            "backend": self.name,
-            "rendered": False,
-            "skipped": status.reason,
-            "install_hint": status.install_hint,
-            "input_path": _rel(project, input_video),
-            "output_path": _rel(project, input_video),  # passthrough
-        }
-
+# musetalk / latentsync / echomimicv3 - subprocess backends. Each
+# shells out to a user-owned isolated venv configured via a config.json
+# dropped at <output_dir>/lipsync-<name>/config.json. check_installed()
+# surfaces missing config, missing keys, or missing paths with specific
+# reasons the UI can render verbatim.
 
 class MuseTalkBackend:
     """MuseTalk 1.5 via an isolated venv subprocess.
@@ -430,11 +404,155 @@ class LatentSyncBackend:
         }
 
 
-class EchoMimicV3Backend(_StubBackend):
-    name = "echomimicv3"
-    reason = "EchoMimicV3 shim not yet wired"
-    install_hint = ("EchoMimicV3 can run in-process (Apache-2.0, torch>=2.1.2). "
-                    "In-process loader will be added in a follow-up commit.")
+class EchoMimicV3Backend:
+    """EchoMimicV3 (Ant Group) via an isolated venv subprocess.
+
+    Research shows EchoMimicV3 is Apache-2.0 with openly downloadable
+    safetensors on HuggingFace and no mmcv pin (torch>=2.1.2, Python
+    3.10/3.11). In principle it could run in-process on the main stack,
+    but its requirements.txt hard-pins tensorflow==2.15.0 and
+    moviepy==2.2.1 - typical collision points - so the safer default is
+    still a user-owned venv.
+
+    Unlike MuseTalk / LatentSync (mouth-only repaint on an existing
+    video), EchoMimicV3 is a HOLISTIC audio-driven portrait animator -
+    it generates whole-head motion from a reference image + audio. To
+    slot into StudioLite's post-mixer stage, we extract a reference
+    frame from the final cut, drive EchoMimicV3 with the speech track,
+    and swap the result in. This means EchoMimicV3 output replaces the
+    original motion for the duration of the speech track, not just the
+    mouth region - a different quality trade-off the UI's label flags."""
+
+    name: BackendName = "echomimicv3"
+    _CONFIG_SUBDIR = "lipsync-echomimicv3"
+
+    def _config_path(self, project: Project) -> str:
+        return _shared_config_path(project, self._CONFIG_SUBDIR)
+
+    def _load_config(self, project: Project) -> Optional[Dict[str, Any]]:
+        return _load_json(self._config_path(project))
+
+    def check_installed(self, project: Project) -> BackendStatus:
+        cfg_path = self._config_path(project)
+        cfg = self._load_config(project)
+        if cfg is None:
+            return BackendStatus(
+                name=self.name, available=False,
+                reason=f"no config at {cfg_path}",
+                install_hint=(
+                    "Clone antgroup/echomimic_v3, make a venv (torch>=2.1.2, "
+                    "Python 3.10/3.11, CUDA>=12.1), pip-install its requirements, "
+                    "download safetensors from BadToBest/EchoMimicV3 on HF, and "
+                    f"drop a config.json at {cfg_path} with keys: repo_dir, "
+                    "venv_python, inference_script (relative to repo_dir), "
+                    "model_path (safetensors)."
+                ),
+            )
+        required = ("repo_dir", "venv_python",
+                    "inference_script", "model_path")
+        missing_keys = [k for k in required if not cfg.get(k)]
+        if missing_keys:
+            return BackendStatus(
+                name=self.name, available=False,
+                reason=f"config missing keys: {', '.join(missing_keys)}",
+                install_hint=f"Add the missing keys to {cfg_path}.",
+            )
+        if not os.path.isdir(cfg["repo_dir"]):
+            return BackendStatus(name=self.name, available=False,
+                                 reason=f"repo_dir does not exist: {cfg['repo_dir']}",
+                                 install_hint="Fix repo_dir in the config.")
+        if not os.path.exists(cfg["venv_python"]):
+            return BackendStatus(name=self.name, available=False,
+                                 reason=f"venv_python does not exist: {cfg['venv_python']}",
+                                 install_hint="Fix venv_python in the config.")
+        return BackendStatus(name=self.name, available=True)
+
+    def run(self, project: Project, input_video: str,
+            voice_lines: List[Dict[str, Any]],
+            output_video: str) -> Dict[str, Any]:
+        status = self.check_installed(project)
+        if not status.available:
+            return _passthrough(self.name, project, input_video, status)
+
+        cfg = self._load_config(project) or {}
+        audio_rel = _collect_speech_track(project, voice_lines,
+                                           subdir=self._CONFIG_SUBDIR)
+        if audio_rel is None:
+            return _passthrough(
+                self.name, project, input_video,
+                BackendStatus(name=self.name, available=False,
+                              reason="no dialogue wavs to drive lip sync"),
+            )
+        audio_abs = os.path.join(project.dir, audio_rel.replace("/", os.sep))
+
+        work_dir = os.path.join(project.dir, "artifacts", self._CONFIG_SUBDIR)
+        os.makedirs(work_dir, exist_ok=True)
+
+        # EchoMimicV3 is holistic - it takes a reference image, not a
+        # video. Extract one frame from the midpoint of the input so the
+        # reference pose matches an average posture of the shot.
+        ref_frame = os.path.join(work_dir, "ref.png")
+        if not _extract_midpoint_frame(input_video, ref_frame,
+                                        timestamp=cfg.get("ref_timestamp", "00:00:01")):
+            return _passthrough(self.name, project, input_video,
+                                BackendStatus(name=self.name, available=False,
+                                              reason="could not extract reference frame"))
+
+        emv3_out = os.path.join(work_dir, "animation.mp4")
+        cmd = [
+            cfg["venv_python"], cfg["inference_script"],
+            "--ref_image", _posix(ref_frame),
+            "--audio", _posix(audio_abs),
+            "--model_path", cfg["model_path"],
+            "--output", _posix(emv3_out),
+        ]
+        if cfg.get("resolution"):
+            cmd += ["--resolution", str(cfg["resolution"])]
+        if cfg.get("seed") is not None:
+            cmd += ["--seed", str(cfg["seed"])]
+        extra = cfg.get("extra_args") or []
+        if isinstance(extra, list):
+            cmd += [str(x) for x in extra]
+
+        logger.info("EchoMimicV3 inference: cd %s && %s",
+                    cfg["repo_dir"], " ".join(cmd))
+        try:
+            proc = subprocess.run(cmd, cwd=cfg["repo_dir"], capture_output=True,
+                                   text=True, check=False,
+                                   timeout=int(cfg.get("timeout_sec", 3600)))
+        except subprocess.TimeoutExpired as e:
+            return _passthrough(self.name, project, input_video,
+                                BackendStatus(name=self.name, available=False,
+                                              reason=f"EchoMimicV3 timed out: {e}"))
+        if proc.returncode != 0:
+            tail = (proc.stderr or "").strip().splitlines()[-6:]
+            return _passthrough(self.name, project, input_video,
+                                BackendStatus(name=self.name, available=False,
+                                              reason=f"EchoMimicV3 exited {proc.returncode}: " + " | ".join(tail)))
+
+        if not os.path.exists(emv3_out):
+            return _passthrough(self.name, project, input_video,
+                                BackendStatus(name=self.name, available=False,
+                                              reason="EchoMimicV3 produced no output file"))
+
+        try:
+            shutil.copy2(emv3_out, output_video)
+        except Exception as e:
+            return _passthrough(self.name, project, input_video,
+                                BackendStatus(name=self.name, available=False,
+                                              reason=f"could not copy EchoMimicV3 output: {e}"))
+
+        return {
+            "backend": self.name,
+            "rendered": True,
+            "mode": "holistic",
+            "input_path": _rel(project, input_video),
+            "output_path": _rel(project, output_video),
+            "audio_path": _rel(project, audio_abs),
+            "ref_frame_path": _rel(project, ref_frame),
+            "line_count": len(voice_lines),
+            "repo_dir": cfg["repo_dir"],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +702,28 @@ def _load_json(path: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.warning("Config at %s unreadable: %s", path, e)
         return None
+
+
+def _extract_midpoint_frame(video_path: str, out_png: str,
+                              timestamp: str = "00:00:01") -> bool:
+    """ffmpeg one-off: grab a single frame from `video_path` at
+    `timestamp` and write it to `out_png`. Returns True on success.
+
+    Used by holistic backends (EchoMimicV3) that need a reference image
+    rather than a video. We don't bother picking a specific "best"
+    frame - a midpoint-ish timestamp is good enough for the user's
+    first-pass render, and they can tune `ref_timestamp` in config if
+    the chosen frame is a blink or an occluded profile."""
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-ss", timestamp, "-i", video_path,
+             "-frames:v", "1", "-q:v", "2", out_png],
+            capture_output=True, text=True, check=False, timeout=60,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        logger.warning("ffmpeg reference-frame extraction failed: %s", e)
+        return False
+    return proc.returncode == 0 and os.path.exists(out_png)
 
 
 def _collect_speech_track(project: Project,

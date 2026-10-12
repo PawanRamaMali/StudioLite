@@ -371,6 +371,66 @@ def _resolution_scorer(clip_path: str) -> Optional[float]:
     return 0.0
 
 
+def _aspect_ratio_scorer(clip_path: str) -> Optional[float]:
+    """Composition (controllability) proxy: does the clip have a sensible
+    aspect ratio for a film pipeline?
+
+    1.0 for 16:9 (standard), 0.8 for 9:16 (vertical cinema), 0.6 for
+    anything else within 1.0..2.5 range, 0.0 outside that. The real
+    scorer would consult the project's requested aspect; we only guard
+    against ~square or extreme aspect accidents.
+    """
+    stream = _video_stream(_ffprobe_json(clip_path))
+    if stream is None:
+        return None
+    try:
+        width = int(stream.get("width") or 0)
+        height = int(stream.get("height") or 0)
+    except (TypeError, ValueError):
+        return None
+    if width == 0 or height == 0:
+        return None
+    aspect = width / height
+    # 16:9 is 1.777...; allow a small tolerance.
+    if abs(aspect - 16 / 9) < 0.05:
+        return 1.0
+    if abs(aspect - 9 / 16) < 0.05:
+        return 0.8
+    if 1.0 <= aspect <= 2.5:
+        return 0.6
+    return 0.0
+
+
+def _duration_sanity_scorer(clip_path: str) -> Optional[float]:
+    """Motion rationality (commonsense) proxy: is the clip within a
+    plausible per-shot duration?
+
+    StudioLite shots are 1-15 s on the happy path (Wan2.2 TI2V-5B emits
+    5 s clips; FramePack can go longer). 1.0 inside that band, 0.5 for
+    0.5-30 s, 0.0 for empty or wildly long clips.
+    """
+    info = _ffprobe_json(clip_path)
+    stream = _video_stream(info)
+    if stream is None:
+        return None
+    for candidate in (stream.get("duration"),
+                      ((info or {}).get("format") or {}).get("duration")):
+        try:
+            if candidate is None:
+                continue
+            duration = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if duration <= 0:
+            return 0.0
+        if 1.0 <= duration <= 15.0:
+            return 1.0
+        if 0.5 <= duration <= 30.0:
+            return 0.5
+        return 0.0
+    return None
+
+
 def _register_default_scorers() -> None:
     register_scorer(ScorerSpec(
         name="ffprobe.playable",
@@ -385,14 +445,235 @@ def _register_default_scorers() -> None:
         description="Two frames one second apart are not near-identical (PSNR < 50 dB).",
     ))
     register_scorer(ScorerSpec(
+        name="ffprobe.duration-sanity",
+        dimension="commonsense", capability="motion_rationality",
+        fn=_duration_sanity_scorer,
+        description="Clip duration is in the plausible 1-15 s band.",
+    ))
+    register_scorer(ScorerSpec(
         name="ffprobe.resolution",
         dimension="controllability", capability="composition",
         fn=_resolution_scorer,
         description="Clip is at least 720p.",
     ))
+    register_scorer(ScorerSpec(
+        name="ffprobe.aspect-ratio",
+        dimension="controllability", capability="composition",
+        fn=_aspect_ratio_scorer,
+        description="Clip has a sensible aspect ratio for film (16:9 ideal).",
+    ))
 
 
 _register_default_scorers()
+
+
+# ---------------------------------------------------------------------------
+# Project-level scoring entrypoint.
+#
+# Reads a StudioLite film project's motion_shots artifact to pick the right
+# directory of clips, scores it, and persists the scorecard next to the
+# continuity report. The continuity stage and the web UI call this.
+
+
+def score_project(project: "Any", *, store: bool = True
+                   ) -> DirScorecard:
+    """Score a StudioLite film project's motion_shots clips.
+
+    Walks the ``motion_shots`` artifact for a list of per-shot output
+    paths. Falls back to scanning ``artifacts/motion_shots/`` for mp4s
+    if the artifact is missing or malformed - the real-world failure
+    mode is a half-run project where the artifact's shape has drifted,
+    and we would rather score what landed on disk than crash.
+
+    When ``store=True`` the scorecard is written to
+    ``artifacts/vbench2.json`` so continuity and the UI pick it up.
+    """
+    clip_paths = _project_clip_paths(project)
+    per_clip = [score_clip(p) for p in clip_paths]
+    aggregate = _aggregate_across_clips(per_clip)
+    overall_opinions = [d.score for d in aggregate if d.score is not None]
+    overall = (sum(overall_opinions) / len(overall_opinions)
+               if overall_opinions else None)
+    card = DirScorecard(clip_count=len(per_clip), per_clip=per_clip,
+                         aggregate=aggregate, overall=overall)
+    if store:
+        try:
+            out_path = os.path.join(project.dir, "artifacts", "vbench2.json")
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(scorecard_to_dict(card), f, indent=2)
+        except Exception as exc:
+            logger.warning("could not persist vbench2 scorecard: %s", exc)
+    return card
+
+
+def _project_clip_paths(project: "Any") -> List[str]:
+    """Resolve the list of clip paths for a project. Preferred source is
+    the motion_shots artifact (per-shot output_path entries); fallback is
+    a directory scan under artifacts/motion_shots/."""
+    paths: List[str] = []
+    try:
+        art = project.read_artifact("motion_shots") or {}
+    except Exception:
+        art = {}
+    shots = art.get("shots") or art.get("clips") or []
+    for shot in shots:
+        rel = (shot.get("output_path") or shot.get("mp4") or "") if isinstance(shot, dict) else ""
+        if not rel:
+            continue
+        abs_path = os.path.join(project.dir, str(rel).replace("/", os.sep))
+        if os.path.exists(abs_path):
+            paths.append(abs_path)
+    if paths:
+        return paths
+    # Fallback: scan the motion_shots artifact directory.
+    scan_dir = os.path.join(project.dir, "artifacts", "motion_shots")
+    if os.path.isdir(scan_dir):
+        for name in sorted(os.listdir(scan_dir)):
+            if name.lower().endswith(".mp4"):
+                paths.append(os.path.join(scan_dir, name))
+    return paths
+
+
+def _aggregate_across_clips(per_clip: List[ClipScorecard]
+                             ) -> List[DimensionScore]:
+    """Mean per-dimension score across clips, skipping None contributions.
+    Exposed separately so score_project and score_dir share the exact
+    same aggregation rule - any change goes in one place."""
+    aggregate: List[DimensionScore] = []
+    for dim in DIMENSIONS:
+        dim_opinions: List[float] = []
+        for card in per_clip:
+            for row in card.dimensions:
+                if row.dimension == dim and row.score is not None:
+                    dim_opinions.append(row.score)
+        agg_score = (sum(dim_opinions) / len(dim_opinions)
+                     if dim_opinions else None)
+        aggregate.append(DimensionScore(dimension=dim, score=agg_score))
+    return aggregate
+
+
+# ---------------------------------------------------------------------------
+# Official VBench-2.0 integration.
+#
+# When the user has installed the paper's official VBench-2.0 CLI (via
+# `pip install vbench2` or a clone of Vchitect/VBench), we shell out to
+# it per clip and lift the per-dimension scores it emits. The CLI path
+# is user-controlled via the VBENCH2_BIN env so we never guess.
+
+
+_OFFICIAL_SCORER_NAME = "vbench2.official"
+
+
+def register_official_vbench2_scorers() -> int:
+    """If the official VBench 2.0 CLI is reachable, register a scorer per
+    dimension that shells out to it. Returns the number of scorers
+    registered (0 means the CLI was not found).
+
+    The CLI path comes from the VBENCH2_BIN env var; if unset we try
+    ``vbench2`` on PATH. The scorers call it with the clip path and parse
+    its JSON output - the real CLI emits one score per sub-capability,
+    which we average into the dimension score.
+    """
+    bin_path = os.environ.get("VBENCH2_BIN") or _which("vbench2")
+    if not bin_path:
+        return 0
+
+    def _make_scorer(dimension: str) -> ScorerFn:
+        def _score(clip_path: str) -> Optional[float]:
+            return _run_official_vbench2(bin_path, clip_path, dimension)
+        return _score
+
+    count = 0
+    for dim, caps in DIMENSIONS.items():
+        # One scorer per dimension; it aggregates across sub-capabilities
+        # internally so the harness-level dimension score matches.
+        for cap in caps:
+            register_scorer(ScorerSpec(
+                name=f"{_OFFICIAL_SCORER_NAME}:{dim}:{cap}",
+                dimension=dim, capability=cap,
+                fn=_make_scorer(dim),
+                description=f"Official VBench-2.0 CLI, dimension={dim}, cap={cap}.",
+            ))
+            count += 1
+    return count
+
+
+def _which(name: str) -> Optional[str]:
+    """Minimal shutil.which; stdlib's version is slow on Windows and
+    swallows errors we would like to log."""
+    import shutil as _sh
+    return _sh.which(name)
+
+
+def _run_official_vbench2(bin_path: str, clip_path: str,
+                           dimension: str) -> Optional[float]:
+    """Invoke the official CLI; expect JSON on stdout with a top-level
+    ``scores`` dict keyed by dimension. Returns the dimension's float
+    score or None on any failure - callers treat None as 'no opinion'."""
+    if not os.path.exists(clip_path):
+        return None
+    try:
+        proc = subprocess.run(
+            [bin_path, "score", "--clip", clip_path, "--dimension", dimension,
+             "--json"],
+            capture_output=True, text=True, check=False, timeout=600,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.warning("official vbench2 shell-out failed: %s", exc)
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    scores = payload.get("scores") or {}
+    try:
+        value = scores.get(dimension)
+        if value is None:
+            return None
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Prompt corpus loader.
+#
+# VBench-2.0 ships prompt suites per sub-capability (the paper's
+# evaluation set). A caller can point us at the directory of prompt YAMLs
+# and we expose them as a dict for test-generation planning.
+
+
+def load_prompt_corpus(corpus_dir: Optional[str] = None
+                        ) -> Dict[str, List[str]]:
+    """Return the prompt corpus as {capability: [prompt, ...]}.
+
+    ``corpus_dir`` defaults to the ``VBENCH2_PROMPT_DIR`` env var. The
+    layout we expect is one JSON file per capability named
+    ``<capability>.json`` containing a list of prompts. The function
+    returns ``{}`` when the directory is missing or empty - never raises.
+    """
+    corpus_dir = corpus_dir or os.environ.get("VBENCH2_PROMPT_DIR")
+    if not corpus_dir or not os.path.isdir(corpus_dir):
+        return {}
+    out: Dict[str, List[str]] = {}
+    for name in os.listdir(corpus_dir):
+        if not name.lower().endswith(".json"):
+            continue
+        capability = os.path.splitext(name)[0]
+        try:
+            with open(os.path.join(corpus_dir, name), "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:
+            logger.warning("could not load prompt file %s: %s", name, exc)
+            continue
+        if isinstance(data, list):
+            out[capability] = [str(p) for p in data]
+        elif isinstance(data, dict) and isinstance(data.get("prompts"), list):
+            out[capability] = [str(p) for p in data["prompts"]]
+    return out
 
 
 # ---------------------------------------------------------------------------

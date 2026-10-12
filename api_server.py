@@ -6262,6 +6262,35 @@ async def film_patch_config(project_id: str, req: FilmConfigPatchRequest):
     }
 
 
+@app.get("/api/v1/films/{project_id}/vbench")
+async def film_vbench_scorecard(project_id: str, refresh: bool = False):
+    """VBench-2.0 scorecard for a project's motion_shots clips.
+
+    By default returns the persisted scorecard (``artifacts/vbench2.json``)
+    if one exists so the UI can show the last-known result without
+    re-running the harness. ``?refresh=true`` rescans and overwrites.
+    """
+    from filmmaker import projects as _fp, vbench2 as _vb
+    from dataclasses import asdict as _asdict
+    try:
+        proj = _fp.load(OUTPUT_DIR, project_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Project not found")
+
+    import os as _os
+    import json as _json
+    stored = _os.path.join(proj.dir, "artifacts", "vbench2.json")
+    if not refresh and _os.path.exists(stored):
+        try:
+            with open(stored, "r", encoding="utf-8") as f:
+                return _json.load(f)
+        except Exception:
+            # Fall through to a fresh run if the stored file is unreadable.
+            pass
+    card = _vb.score_project(proj, store=True)
+    return _asdict(card)
+
+
 @app.put("/api/v1/films/{project_id}/artifact/{stage_key}")
 async def film_edit_artifact(project_id: str, stage_key: str, req: FilmEditArtifactRequest):
     """Write a user-edited artifact and mark downstream stages stale."""

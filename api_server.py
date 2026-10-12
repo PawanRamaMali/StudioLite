@@ -5955,6 +5955,8 @@ async def library_enhance(video_id: int, req: LibraryEnhanceRequest):
 # ---------------------------------------------------------------------------
 
 FILMS_DIR = os.path.join(OUTPUT_DIR, "films")
+EXPORTS_DIR = os.path.join(OUTPUT_DIR, "exports")
+os.makedirs(EXPORTS_DIR, exist_ok=True)
 os.makedirs(FILMS_DIR, exist_ok=True)
 app.mount("/static/films", StaticFiles(directory=FILMS_DIR), name="films")
 
@@ -6247,7 +6249,7 @@ async def film_package_delivery(project_id: str, req: FilmPackageRequest):
          or entitlement.has("watermark_removal"))
     )
 
-    out_dir = os.path.join(FILMS_DIR, project_id)
+    out_dir = os.path.join(EXPORTS_DIR, project_id)
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"delivery-{project_id}.zip")
     result = _pkg.build_delivery_bundle(
@@ -6257,12 +6259,27 @@ async def film_package_delivery(project_id: str, req: FilmPackageRequest):
         watermarked=watermarked,
     )
     return {
-        "download_url": f"/static/films/{project_id}/{os.path.basename(out_path)}",
+        "download_url": f"/api/v1/films/{project_id}/package/download",
         "size_bytes": result.size_bytes,
         "included_files": result.included_files,
         "warning": result.warning,
         "watermarked": watermarked,
     }
+
+
+@app.get("/api/v1/films/{project_id}/package/download")
+async def film_package_download(project_id: str):
+    """Serve the delivery zip through the auth-gated API path instead
+    of /static/films (which is auth-exempt)."""
+    from fastapi.responses import FileResponse
+    out_path = os.path.join(EXPORTS_DIR, project_id, f"delivery-{project_id}.zip")
+    if not os.path.exists(out_path):
+        raise HTTPException(404, "Delivery bundle not built yet")
+    return FileResponse(
+        out_path,
+        media_type="application/zip",
+        filename=os.path.basename(out_path),
+    )
 
 
 @app.get("/api/v1/films/{project_id}/export")
@@ -6277,7 +6294,7 @@ async def film_export(project_id: str):
         proj = _fp.load(OUTPUT_DIR, project_id)
     except FileNotFoundError:
         raise HTTPException(404, "Project not found")
-    out_dir = os.path.join(FILMS_DIR, project_id)
+    out_dir = os.path.join(EXPORTS_DIR, project_id)
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir,
                             f"{project_id}{_pkg.EXPORT_SUFFIX}")

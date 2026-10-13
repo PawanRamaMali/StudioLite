@@ -14,6 +14,7 @@ import {
   FILM_API_BASE, filmCreate, filmCreateFromTemplate, filmDelete,
   filmEditArtifact, filmGet, filmList, filmListStages, filmListTemplates,
   filmPatchConfig, filmPause, filmRewind, filmRun, filmStreamUrl, getLLMBackends,
+  listBackends,
   type FilmConfig, type FilmDetail, type FilmListItem, type FilmMeta,
   type FilmStageKey, type FilmStageSpec,
   type FilmStageStatus, type FilmTemplate, type LLMBackendInfo,
@@ -486,6 +487,7 @@ function ProjectListView({
                             className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
                       <option value="musicgen">MusicGen (CC-BY-NC)</option>
                       <option value="acestep">ACE-Step (MIT)</option>
+                      <option value="diffrhythm2">DiffRhythm 2 (roadmap - needs install or cloud)</option>
                     </select>
                   </div>
                 </div>
@@ -496,6 +498,7 @@ function ProjectListView({
                             className="w-full mt-1 bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200">
                       <option value="none">Off (finish at Editor / Titles)</option>
                       <option value="realesrgan">Real-ESRGAN to ~1440p</option>
+                      <option value="seedvr2">SeedVR2 (roadmap - needs install or cloud)</option>
                     </select>
                   </div>
                   <div>
@@ -1898,6 +1901,22 @@ function BackendSettings({
   const [music, setMusic] = useState<string>(project.config.music_backend || "musicgen");
   const [lipsync, setLipsync] = useState<string>(project.config.lipsync_backend || "none");
   const [upscale, setUpscale] = useState<string>(project.config.upscale_backend || "none");
+  const [cloudReady, setCloudReady] = useState<boolean | null>(null);
+
+  // Fetch cloud-provider status so the "needs install" hint on roadmap
+  // backends (seedvr2, diffrhythm2) can be accurate. One shot; status
+  // only changes when the launcher restarts.
+  useEffect(() => {
+    listBackends()
+      .then((r) => {
+        const cp = r.cloud_providers || {};
+        setCloudReady(!!(cp.replicate || cp.runpod));
+      })
+      .catch(() => setCloudReady(false));
+  }, []);
+  const roadmapHint = cloudReady
+    ? "Roadmap backend. Will route through configured cloud provider."
+    : "Roadmap backend. Needs a local install (config.json) or REPLICATE_API_TOKEN / RUNPOD_API_KEY.";
 
   // When the project refreshes (e.g. after save or external change), reseat
   // the local form values. Keyed on each backend field so a fresh server
@@ -1979,6 +1998,9 @@ function BackendSettings({
                   disabled={saving} className={selectClass}>
             <option value="musicgen">MusicGen</option>
             <option value="acestep">ACE-Step</option>
+            <option value="diffrhythm2" title={roadmapHint}>
+              DiffRhythm 2 {cloudReady ? "" : "(roadmap)"}
+            </option>
           </select>
         </div>
         <div>
@@ -1997,6 +2019,9 @@ function BackendSettings({
                   disabled={saving} className={selectClass}>
             <option value="none">Off</option>
             <option value="realesrgan">Real-ESRGAN</option>
+            <option value="seedvr2" title={roadmapHint}>
+              SeedVR2 {cloudReady ? "" : "(roadmap)"}
+            </option>
           </select>
         </div>
       </div>

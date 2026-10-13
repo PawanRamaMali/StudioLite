@@ -19,6 +19,9 @@ import CharactersPanel from "@/components/panels/CharactersPanel";
 import KeyframesPanel from "@/components/panels/KeyframesPanel";
 import JobsPanel from "@/components/panels/JobsPanel";
 import SettingsPanel from "@/components/panels/SettingsPanel";
+import BackendsPanel from "@/components/panels/BackendsPanel";
+import QualityPanel from "@/components/panels/QualityPanel";
+import LipsyncComparePanel from "@/components/panels/LipsyncComparePanel";
 
 const FIRST_VISIT_KEY = "studiolite:seen-home";
 
@@ -78,6 +81,9 @@ export default function Home() {
       case "characters":        return <CharactersPanel />;
       case "keyframes":         return <KeyframesPanel />;
       case "library":           return <LibraryPanel />;
+      case "backends":          return <BackendsPanel />;
+      case "quality":           return <QualityPanel />;
+      case "lipsync-compare":   return <LipsyncComparePanel />;
       case "jobs":              return <JobsPanel />;
       case "settings":          return <SettingsPanel />;
       default:                  return <GeneratePanel />;

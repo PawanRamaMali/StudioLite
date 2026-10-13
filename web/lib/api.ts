@@ -720,6 +720,119 @@ export function filmStreamUrl(id: string): string {
 export const FILM_API_BASE = API_BASE;
 
 // ---------------------------------------------------------------------------
+// Backend registry (per-stage swappable models)
+// ---------------------------------------------------------------------------
+
+export interface BackendQuantVariant {
+  format: string;
+  vram_gb: number;
+  source_url?: string;
+  notes?: string;
+}
+
+export interface BackendSpec {
+  stage: string;
+  name: string;
+  license: string;
+  available: "shipping" | "roadmap" | (string & {});
+  min_vram_gb_fp16: number | null;
+  cloud_burst: boolean;
+  base_model: string;
+  quant_variants: BackendQuantVariant[];
+  source_url: string;
+  notes: string;
+}
+
+export interface BackendsResponse {
+  backends: BackendSpec[];
+  cloud_providers: Record<string, boolean>;
+}
+
+export const listBackends = (stage?: string) =>
+  apiFetch<BackendsResponse>(
+    `/api/v1/backends${stage ? `?stage=${encodeURIComponent(stage)}` : ""}`,
+  );
+
+// ---------------------------------------------------------------------------
+// VBench 2.0 scorecard
+// ---------------------------------------------------------------------------
+
+export interface VBenchCapability {
+  dimension: string;
+  capability: string;
+  score: number | null;
+  scorer_names: string[];
+  details: Record<string, unknown>;
+}
+
+export interface VBenchDimension {
+  dimension: string;
+  score: number | null;
+  capabilities: VBenchCapability[];
+}
+
+export interface VBenchClip {
+  clip_path: string;
+  dimensions: VBenchDimension[];
+  overall: number | null;
+}
+
+export interface VBenchScorecard {
+  clip_count: number;
+  per_clip: VBenchClip[];
+  aggregate: VBenchDimension[];
+  overall: number | null;
+}
+
+export const filmVbench = (id: string, refresh = false) =>
+  apiFetch<VBenchScorecard>(
+    `/api/v1/films/${encodeURIComponent(id)}/vbench${refresh ? "?refresh=true" : ""}`,
+  );
+
+// ---------------------------------------------------------------------------
+// Local lipsync-eval matrix
+// ---------------------------------------------------------------------------
+
+export interface LipsyncClipMetric {
+  metric: string;
+  value: number | null;
+  higher_is_better: boolean;
+}
+
+export interface LipsyncClipResult {
+  reference_video: string;
+  candidate_video: string;
+  audio: string | null;
+  metrics: LipsyncClipMetric[];
+}
+
+export interface LipsyncBackendRow {
+  backend: string;
+  clip_count: number;
+  rendered_count: number;
+  metrics: Record<string, number | null>;
+  per_clip: LipsyncClipResult[];
+}
+
+export interface LipsyncMatrixScorecard {
+  corpus_count: number;
+  backends: LipsyncBackendRow[];
+  ranking: Record<string, string[]>;
+}
+
+export interface LipsyncEvalRequest {
+  project_id: string;
+  corpus: { reference?: string | null; audio?: string | null }[];
+  backends?: string[];
+}
+
+export const lipsyncEval = (req: LipsyncEvalRequest) =>
+  apiFetch<LipsyncMatrixScorecard>("/api/v1/lipsync/eval", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+
+// ---------------------------------------------------------------------------
 // Library
 // ---------------------------------------------------------------------------
 

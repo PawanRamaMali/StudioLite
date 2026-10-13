@@ -583,8 +583,8 @@ export interface FilmConfig {
   target_minutes: number;
   quality: "draft" | "standard" | "high" | "ultra";
   // Backend picks - every one is optional; the server keeps its own defaults.
-  sdxl_variant?: "turbo" | "base" | "z-image-turbo" | "flux-schnell" | string;
-  motion_backend?: "auto" | "svd" | "animatediff" | "wan" | "wan22" | "framepack" | "ltx" | "kenburns" | string;
+  sdxl_variant?: "turbo" | "base" | "z-image-turbo" | "flux-schnell" | "omnigen2" | string;
+  motion_backend?: "auto" | "svd" | "animatediff" | "wan" | "wan22" | "wan21_flf2v" | "framepack" | "ltx" | "kenburns" | string;
   voice_backend?: "piper" | "xtts" | "indextts2" | "qwen3tts" | "chatterbox" | string;
   music_backend?: "musicgen" | "acestep" | string;
   upscale_backend?: "none" | "realesrgan" | string;

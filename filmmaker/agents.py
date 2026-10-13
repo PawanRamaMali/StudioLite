@@ -1116,6 +1116,49 @@ def run_shots(project: Project) -> Dict[str, Any]:
     total = len(jobs)
     project.append_event({"type": "shots_progress", "done": 0, "total": total})
 
+    # OmniGen2 roadmap branch - when the shots backend is explicitly
+    # omnigen2, dispatch the whole shot list to the OmniGen2 helper
+    # before touching SDXL. Any shot the helper renders is marked done;
+    # any shot it skips falls through to the SDXL batcher below so a
+    # partial render still produces a complete storyboard.
+    if variant == "omnigen2" and jobs:
+        omnigen2_dir = os.path.join(project.shots_dir, "_omnigen2")
+        prompts_payload = [{
+            "scene_id": j["scene_id"], "shot_id": j["shot_id"],
+            "prompt": j["prompt"],
+        } for j in jobs]
+        try:
+            og2 = _render_shots_omnigen2(project, prompts_payload, omnigen2_dir)
+        except Exception as exc:
+            logger.warning("OmniGen2 dispatch raised: %s", exc)
+            og2 = {"mode": "skipped", "shots": []}
+        if og2.get("mode") in ("local", "cloud") and og2.get("shots"):
+            rendered_by_key = {
+                (s["scene_id"], s["shot_id"]): s["path"]
+                for s in og2["shots"]
+            }
+            for j in jobs:
+                key = (j["scene_id"], j["shot_id"])
+                src = rendered_by_key.get(key)
+                if not src:
+                    continue
+                abs_src = (src if os.path.isabs(src)
+                           else os.path.join(project.dir, src))
+                if os.path.exists(abs_src) and os.path.getsize(abs_src) > 1024:
+                    try:
+                        import shutil as _shutil
+                        _shutil.copyfile(abs_src, j["png_path"])
+                        j["rendered"] = True
+                    except OSError as exc:
+                        logger.warning("OmniGen2 copy failed for %s/%s: %s",
+                                        j["scene_id"], j["shot_id"], exc)
+            project.append_event({
+                "type": "shots_omnigen2",
+                "mode": og2.get("mode"),
+                "rendered": sum(1 for j in jobs if j["rendered"]),
+                "total": total,
+            })
+
     # Batch through the work list. On any batch failure, fall back to per-shot
     # for just that batch - a single OOM shouldn't discard the whole render.
     # We split by whether the chunk has any character references - mixed
@@ -4206,6 +4249,276 @@ def _run_diffrhythm2_local(cfg: Dict[str, Any], prompt: str, out_abs: str,
 
 
 # ---------------------------------------------------------------------------
+# Roadmap scaffolds: OmniGen2 character keyframes + Wan2.1-FLF2V transitions
+#
+# Both are registered in backend_registry.py as ``available="roadmap"``. The
+# helpers here follow the same local-config -> cloud-burst -> skip-with-hint
+# pattern as SeedVR2 / DiffRhythm 2 so the stage runners can adopt them
+# without special-casing.
+
+
+def _render_shots_omnigen2(project: Project, prompts: List[Dict[str, Any]],
+                            out_dir: str) -> Dict[str, Any]:
+    """OmniGen2 character-identity keyframe render.
+
+    OmniGen2 (VectorSpaceLab, Apache 2.0, arxiv 2505.24862v5) is the
+    ViStoryBench CIDS leader for multi-character identity preservation.
+    Composed with StoryBooth bounded cross-frame attention it is the
+    research-confirmed answer to character drift across shots.
+
+    ``prompts`` is a list of ``{scene_id, shot_id, prompt, portrait_path}``
+    dicts; the backend renders one PNG per entry under ``out_dir``. Returns
+    ``{"backend": "omnigen2", "mode": local|cloud|skipped, "shots": [...]}``.
+
+    Tries, in order:
+      1. User-owned install at ``<base>/shots-omnigen2/config.json``
+      2. Cloud-burst dispatcher
+      3. Skip artifact with install hint
+
+    Caller remains responsible for falling through to SDXL when this
+    returns ``mode="skipped"``.
+    """
+    from . import cloud_burst as _cb
+
+    os.makedirs(out_dir, exist_ok=True)
+    cfg_path = _omnigen2_config_path(project)
+    cfg = _load_json_file(cfg_path)
+
+    if cfg and _check_omnigen2_local(cfg):
+        local = _run_omnigen2_local(cfg, prompts, out_dir)
+        if local is not None:
+            return {
+                "backend": "omnigen2",
+                "mode": "local",
+                "shots": local["shots"],
+                "stdout_tail": local.get("stdout_tail", ""),
+            }
+
+    # OmniGen2 renders many files (one per shot), so the cloud dispatcher's
+    # output_path is a lightweight marker file inside out_dir. The remote
+    # provider is expected to write PNGs next to the marker; the dry-run
+    # provider leaves them empty but still returns rendered=True.
+    marker = os.path.join(out_dir, "_cloud_dispatch.txt")
+    req = _cb.BurstRequest(
+        stage="shots", backend_name="omnigen2",
+        inputs={"prompts": prompts, "out_dir": _rel_posix(project.dir, out_dir)},
+        output_path=marker, deadline_seconds=1800,
+    )
+    burst = _cb.dispatch(req)
+    if burst.rendered:
+        rendered_paths = []
+        for p in prompts:
+            name = f"{p['scene_id']}_{p['shot_id']}.png"
+            abs_p = os.path.join(out_dir, name)
+            if os.path.exists(abs_p):
+                rendered_paths.append({
+                    "scene_id": p["scene_id"], "shot_id": p["shot_id"],
+                    "path": _rel_posix(project.dir, abs_p),
+                })
+        return {
+            "backend": "omnigen2",
+            "mode": "cloud",
+            "provider": burst.provider,
+            "shots": rendered_paths,
+            "details": burst.details,
+        }
+
+    install_hint = (
+        f"OmniGen2 is GPU-only (~20 GB VRAM at fp16). Install either path: "
+        f"(1) clone VectorSpaceLab/OmniGen2, make a venv, drop config.json "
+        f"at {cfg_path} with keys: repo_dir, venv_python, model_path. "
+        f"(2) Set STUDIOLITE_CLOUD_PROVIDER and the matching token + slug "
+        f"(e.g. REPLICATE_API_TOKEN + REPLICATE_SLUG_OMNIGEN2)."
+    )
+    return {
+        "backend": "omnigen2",
+        "mode": "skipped",
+        "skipped": burst.reason or "OmniGen2 not installed locally and no cloud provider",
+        "install_hint": install_hint,
+        "shots": [],
+    }
+
+
+def _omnigen2_config_path(project: Project) -> str:
+    films_root = os.path.dirname(project.dir)
+    base = (os.path.dirname(films_root)
+            if os.path.basename(films_root) == "films" else films_root)
+    return os.path.join(base, "shots-omnigen2", "config.json")
+
+
+def _check_omnigen2_local(cfg: Dict[str, Any]) -> bool:
+    for key in ("repo_dir", "venv_python", "model_path"):
+        value = cfg.get(key)
+        if not value or not os.path.exists(value):
+            return False
+    return True
+
+
+def _run_omnigen2_local(cfg: Dict[str, Any], prompts: List[Dict[str, Any]],
+                        out_dir: str) -> Optional[Dict[str, Any]]:
+    """Shell out to a user-owned OmniGen2 install. The user's inference
+    script is expected to read a prompts JSON and write one PNG per entry
+    named ``<scene_id>_<shot_id>.png`` into ``--output_dir``."""
+    manifest_path = os.path.join(out_dir, "_omnigen2_prompts.json")
+    try:
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump({"prompts": prompts}, f)
+    except OSError as exc:
+        logger.warning("OmniGen2 manifest write failed: %s", exc)
+        return None
+
+    inference_script = cfg.get("inference_script") or "inference.py"
+    cmd = [
+        cfg["venv_python"], inference_script,
+        "--prompts", manifest_path,
+        "--output_dir", out_dir,
+        "--model_path", cfg["model_path"],
+    ]
+    extra = cfg.get("extra_args") or []
+    if isinstance(extra, list):
+        cmd += [str(x) for x in extra]
+    try:
+        proc = subprocess.run(
+            cmd, cwd=cfg["repo_dir"], capture_output=True, text=True,
+            check=False, timeout=int(cfg.get("timeout_sec", 3600)),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.warning("OmniGen2 local run failed: %s", exc)
+        return None
+    if proc.returncode != 0:
+        logger.warning("OmniGen2 local run exited %s: %s",
+                        proc.returncode, (proc.stderr or "")[-300:])
+        return None
+    rendered: List[Dict[str, str]] = []
+    for p in prompts:
+        name = f"{p['scene_id']}_{p['shot_id']}.png"
+        abs_p = os.path.join(out_dir, name)
+        if os.path.exists(abs_p) and os.path.getsize(abs_p) > 1024:
+            rendered.append({
+                "scene_id": p["scene_id"], "shot_id": p["shot_id"],
+                "path": abs_p,
+            })
+    if not rendered:
+        return None
+    return {"shots": rendered, "stdout_tail": (proc.stdout or "")[-300:]}
+
+
+def _render_transition_flf2v(project: Project, first_image_abs: str,
+                              last_image_abs: str, out_abs: str,
+                              *, duration_sec: int = 2,
+                              prompt: str = "") -> Dict[str, Any]:
+    """Wan2.1-FLF2V transition render.
+
+    Wan2.1-Fun-14B-InP via city96's GGUF ladder (6.02 GB Q2_K up to 32.8 GB
+    bf16). First-last-frame-to-video, the InfinityStory recipe: a short
+    clip morphs from ``first_image`` to ``last_image`` so adjacent shots
+    cut without a hard pop.
+
+    Tries local -> cloud -> skip. Returns a dict carrying either the
+    rendered output path or the install hint.
+    """
+    from . import cloud_burst as _cb
+
+    cfg_path = _flf2v_config_path(project)
+    cfg = _load_json_file(cfg_path)
+    if cfg and _check_flf2v_local(cfg):
+        local = _run_flf2v_local(cfg, first_image_abs, last_image_abs,
+                                   out_abs, duration_sec=duration_sec,
+                                   prompt=prompt)
+        if local is not None:
+            return {
+                "backend": "wan21_flf2v",
+                "mode": "local",
+                "output_path": out_abs,
+                **local,
+            }
+
+    req = _cb.BurstRequest(
+        stage="motion_shots", backend_name="wan21_flf2v",
+        inputs={
+            "first_image": _rel_posix(project.dir, first_image_abs),
+            "last_image": _rel_posix(project.dir, last_image_abs),
+            "duration_sec": duration_sec, "prompt": prompt,
+        },
+        output_path=out_abs, deadline_seconds=1800,
+    )
+    burst = _cb.dispatch(req)
+    if burst.rendered and burst.output_path and os.path.exists(burst.output_path):
+        return {
+            "backend": "wan21_flf2v",
+            "mode": "cloud",
+            "provider": burst.provider,
+            "output_path": burst.output_path,
+            "details": burst.details,
+        }
+
+    install_hint = (
+        f"Wan2.1-FLF2V is GPU-only (6 GB Q2_K up to 32.8 GB bf16). "
+        f"Install either path: (1) ComfyUI with ComfyUI-GGUF and "
+        f"city96/wan2.1-fun-14b-inp-gguf, drop config.json at "
+        f"{cfg_path} with keys: repo_dir, venv_python, model_path. "
+        f"(2) Set STUDIOLITE_CLOUD_PROVIDER and the matching token + slug "
+        f"(e.g. REPLICATE_API_TOKEN + REPLICATE_SLUG_WAN21_FLF2V)."
+    )
+    return {
+        "backend": "wan21_flf2v",
+        "mode": "skipped",
+        "skipped": burst.reason or "Wan2.1-FLF2V not installed locally and no cloud provider",
+        "install_hint": install_hint,
+    }
+
+
+def _flf2v_config_path(project: Project) -> str:
+    films_root = os.path.dirname(project.dir)
+    base = (os.path.dirname(films_root)
+            if os.path.basename(films_root) == "films" else films_root)
+    return os.path.join(base, "motion-wan21-flf2v", "config.json")
+
+
+def _check_flf2v_local(cfg: Dict[str, Any]) -> bool:
+    for key in ("repo_dir", "venv_python", "model_path"):
+        value = cfg.get(key)
+        if not value or not os.path.exists(value):
+            return False
+    return True
+
+
+def _run_flf2v_local(cfg: Dict[str, Any], first_image_abs: str,
+                      last_image_abs: str, out_abs: str,
+                      *, duration_sec: int, prompt: str
+                      ) -> Optional[Dict[str, Any]]:
+    inference_script = cfg.get("inference_script") or "inference.py"
+    cmd = [
+        cfg["venv_python"], inference_script,
+        "--first_image", first_image_abs,
+        "--last_image", last_image_abs,
+        "--output", out_abs,
+        "--duration", str(duration_sec),
+        "--model_path", cfg["model_path"],
+    ]
+    if prompt:
+        cmd += ["--prompt", prompt]
+    extra = cfg.get("extra_args") or []
+    if isinstance(extra, list):
+        cmd += [str(x) for x in extra]
+    try:
+        proc = subprocess.run(
+            cmd, cwd=cfg["repo_dir"], capture_output=True, text=True,
+            check=False, timeout=int(cfg.get("timeout_sec", 1800)),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.warning("Wan2.1-FLF2V local run failed: %s", exc)
+        return None
+    if proc.returncode != 0:
+        logger.warning("Wan2.1-FLF2V local run exited %s: %s",
+                        proc.returncode, (proc.stderr or "")[-300:])
+        return None
+    if not (os.path.exists(out_abs) and os.path.getsize(out_abs) > 1024):
+        return None
+    return {"stdout_tail": (proc.stdout or "")[-300:]}
+
+
+# ---------------------------------------------------------------------------
 # NEW STAGE - Continuity & QC
 #
 # Walks every upstream artifact and compares it against what the next stage
@@ -5178,6 +5491,14 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
         # clips. Overnight-scale for 30+ shot films (15-30 min/clip on
         # 12GB). Explicit opt-in only; auto never picks it silently.
         wan22_pipe = _load_wan22_pipeline()
+    elif backend_cfg == "wan21_flf2v":
+        # Wan2.1-FLF2V - no in-process pipeline; the stage dispatches
+        # each shot to _render_transition_flf2v (local venv -> cloud ->
+        # ken-burns). The transition semantics (true first-last-frame
+        # morph between adjacent shots) needs an orchestrator-level
+        # change; here we pass the shot's keyframe as both ends, which
+        # still exercises the research-confirmed install path.
+        pass
     else:  # auto
         svd_pipe = _load_svd_pipeline()
         if svd_pipe is None:
@@ -5201,6 +5522,7 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
     used_animatediff = 0
     used_wan = 0
     used_wan22 = 0
+    used_flf2v = 0
     used_kb = 0
     total = len(shots)
     project.append_event({"type": "motion_progress", "done": 0, "total": total})
@@ -5234,10 +5556,28 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
                                   "total": total, "backend": backend})
             continue
 
+        # Wan2.1-FLF2V - roadmap backend; renders each shot via the
+        # local-config -> cloud-burst -> skip helper. No in-process
+        # pipeline is loaded for this path.
+        if backend_cfg == "wan21_flf2v" and os.path.exists(keyframe_abs):
+            try:
+                flf2v = _render_transition_flf2v(
+                    project, keyframe_abs, keyframe_abs, mp4_abs,
+                    duration_sec=clip_dur,
+                    prompt=s.get("prompt", "") or "",
+                )
+                if flf2v.get("mode") in ("local", "cloud") and os.path.exists(mp4_abs):
+                    rendered = True; backend = "wan21_flf2v"; used_flf2v += 1
+                else:
+                    error = flf2v.get("skipped") or "wan21_flf2v skipped"
+            except Exception as e:
+                logger.exception("Wan2.1-FLF2V failed for %s/%s", sid, shot_id)
+                error = f"wan21_flf2v: {e}"
+
         # Wan 2.2 TI2V-5B - keyframe-conditioned, 704p native. Tried
         # first when explicitly configured because it's the best quality
         # option on 12GB and produces a full 5s clip per generation.
-        if wan22_pipe is not None and os.path.exists(keyframe_abs):
+        if not rendered and wan22_pipe is not None and os.path.exists(keyframe_abs):
             try:
                 _render_wan22_i2v(
                     wan22_pipe, keyframe_abs, mp4_abs,
@@ -5324,10 +5664,12 @@ def run_motion_shots(project: Project) -> Dict[str, Any]:
         "animatediff_count": used_animatediff,
         "wan_count": used_wan,
         "wan22_count": used_wan22,
+        "wan21_flf2v_count": used_flf2v,
         "kb_count": used_kb,
         "backend_counts": {
             "svd": used_svd, "animatediff": used_animatediff,
-            "wan": used_wan, "wan22": used_wan22, "kenburns": used_kb,
+            "wan": used_wan, "wan22": used_wan22,
+            "wan21_flf2v": used_flf2v, "kenburns": used_kb,
         },
     }
 

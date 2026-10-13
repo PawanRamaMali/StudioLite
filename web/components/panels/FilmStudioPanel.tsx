@@ -454,6 +454,7 @@ function ProjectListView({
                     <option value="base">SDXL 1.0 - sharper, 30–50 steps</option>
                     <option value="z-image-turbo">Z-Image Turbo - Flux-tier at Turbo cost (if cached)</option>
                     <option value="flux-schnell">Flux Schnell - 4 steps (if cached)</option>
+                    <option value="omnigen2">OmniGen2 (roadmap - character identity, needs install or cloud)</option>
                   </select>
                 </div>
                 <div>
@@ -464,6 +465,7 @@ function ProjectListView({
                     <option value="svd">SVD 1.1</option>
                     <option value="animatediff">AnimateDiff</option>
                     <option value="wan22">Wan 2.2 TI2V-5B (12 GB VRAM)</option>
+                    <option value="wan21_flf2v">Wan 2.1-FLF2V (roadmap - needs install or cloud)</option>
                     <option value="framepack">FramePack (~6 GB VRAM, any length)</option>
                     <option value="ltx">LTX-Video (fastest)</option>
                     <option value="kenburns">Ken Burns only (no ML motion)</option>

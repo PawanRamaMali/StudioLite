@@ -4,10 +4,11 @@ import { useEffect, useState } from "react";
 import { Card, CardTitle, CardDescription } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Loader2, RefreshCw, Film as FilmIcon } from "lucide-react";
+import { Loader2, RefreshCw, Film as FilmIcon, FolderOpen } from "lucide-react";
 import {
-  filmList, filmVbench, type FilmListItem, type VBenchScorecard,
-  type VBenchDimension,
+  filmList, filmVbench, vbenchCorpus,
+  type FilmListItem, type VBenchScorecard, type VBenchDimension,
+  type VBenchCorpusSummary,
 } from "@/lib/api";
 
 const DIMENSION_LABELS: Record<string, string> = {
@@ -22,6 +23,7 @@ export default function QualityPanel() {
   const [films, setFilms] = useState<FilmListItem[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [card, setCard] = useState<VBenchScorecard | null>(null);
+  const [corpus, setCorpus] = useState<VBenchCorpusSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -34,6 +36,9 @@ export default function QualityPanel() {
         if (r.projects[0]) setSelected(r.projects[0].id);
       })
       .catch((e: unknown) => setErr(e instanceof Error ? e.message : "Load failed"));
+    vbenchCorpus()
+      .then((c) => setCorpus(c))
+      .catch(() => setCorpus(null));
   }, []);
 
   const load = (id: string, refresh = false) => {
@@ -118,6 +123,8 @@ export default function QualityPanel() {
         </Card>
       )}
 
+      {corpus && <PromptCorpusCard corpus={corpus} />}
+
       {card && (
         <>
           <Card>
@@ -177,6 +184,63 @@ export default function QualityPanel() {
         </>
       )}
     </div>
+  );
+}
+
+function PromptCorpusCard({ corpus }: { corpus: VBenchCorpusSummary }) {
+  const covered = corpus.capabilities.filter((c) => c.known).length;
+  const total = covered + corpus.missing_capabilities.length;
+  return (
+    <Card>
+      <CardTitle>Prompt corpus</CardTitle>
+      <CardDescription>
+        Prompts the harness scores against. Set <code>VBENCH2_PROMPT_DIR</code>{" "}
+        and drop one <code>&lt;capability&gt;.json</code> per sub-capability
+        inside; each file holds a list of prompts.
+      </CardDescription>
+      <div className="mt-3 flex items-center gap-3 text-xs text-zinc-400">
+        <FolderOpen className="w-3.5 h-3.5 text-zinc-500" />
+        <span className="font-mono truncate">
+          {corpus.corpus_dir ?? "(VBENCH2_PROMPT_DIR unset)"}
+        </span>
+        <Badge>
+          {corpus.exists ? "found" : "missing"}
+        </Badge>
+      </div>
+      <div className="mt-3 grid grid-cols-3 gap-3 text-xs">
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2">
+          <div className="text-zinc-500">Prompts loaded</div>
+          <div className="text-lg font-mono text-zinc-100">{corpus.total_prompts}</div>
+        </div>
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2">
+          <div className="text-zinc-500">Capabilities covered</div>
+          <div className="text-lg font-mono text-zinc-100">
+            {covered}/{total || "?"}
+          </div>
+        </div>
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2">
+          <div className="text-zinc-500">Unknown files</div>
+          <div className="text-lg font-mono text-zinc-100">
+            {corpus.capabilities.filter((c) => !c.known).length}
+          </div>
+        </div>
+      </div>
+      {corpus.missing_capabilities.length > 0 && (
+        <div className="mt-3">
+          <div className="text-xs text-zinc-500 mb-1.5">Not yet covered</div>
+          <div className="flex flex-wrap gap-1.5">
+            {corpus.missing_capabilities.map((c) => (
+              <span
+                key={c}
+                className="inline-block text-[10px] px-1.5 py-0.5 rounded border border-zinc-800 bg-zinc-900/60 text-zinc-400 font-mono"
+              >
+                {c}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

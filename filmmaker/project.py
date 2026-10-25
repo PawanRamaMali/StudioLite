@@ -84,6 +84,12 @@ class ProjectConfig:
     # backend's run_* function returns a skip-artifact when its models
     # aren't installed, so a misconfigured backend never halts the pipeline.
     lipsync_backend: str = "none"
+    # Optional between-shot transitions. "none" (default) skips the stage.
+    # "wan21_flf2v" renders a short morph between the last frame of shot N
+    # and the first frame of shot N+1 using Wan2.1-Fun-14B-InP via the
+    # city96 GGUF ladder (6 GB Q2_K up to 32.8 GB bf16); the editor splices
+    # the morph clip in between the corresponding motion shots.
+    transitions_backend: str = "none"
 
 
 @dataclass
@@ -435,6 +441,7 @@ def _meta_from_json(d: Dict[str, Any]) -> ProjectMeta:
         music_backend=_cfg_str(cfg_raw, "music_backend", "musicgen").lower(),
         upscale_backend=_cfg_str(cfg_raw, "upscale_backend", "none").lower(),
         lipsync_backend=_cfg_str(cfg_raw, "lipsync_backend", "none").lower(),
+        transitions_backend=_cfg_str(cfg_raw, "transitions_backend", "none").lower(),
     )
     return ProjectMeta(
         id=d["id"],

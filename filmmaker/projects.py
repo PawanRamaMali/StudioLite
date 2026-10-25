@@ -60,6 +60,7 @@ def _config_from_dict(d: Dict[str, Any]) -> ProjectConfig:
         music_backend=_str_or(d, "music_backend", "musicgen").lower(),
         upscale_backend=_str_or(d, "upscale_backend", "none").lower(),
         lipsync_backend=_str_or(d, "lipsync_backend", "none").lower(),
+        transitions_backend=_str_or(d, "transitions_backend", "none").lower(),
     )
 
 
@@ -68,7 +69,7 @@ def _config_from_dict(d: Dict[str, Any]) -> ProjectConfig:
 # (per_stage overrides, custom knobs) stays off this list on purpose.
 _PATCHABLE_FIELDS = frozenset({
     "lipsync_backend", "upscale_backend", "voice_backend",
-    "music_backend", "motion_backend",
+    "music_backend", "motion_backend", "transitions_backend",
     "quality", "sdxl_variant", "style",
     "llm_backend", "llm_model", "llm_host",
     "target_minutes",
@@ -79,6 +80,7 @@ _PATCHABLE_FIELDS = frozenset({
 _LOWERED_FIELDS = frozenset({
     "quality", "sdxl_variant", "motion_backend", "voice_backend",
     "music_backend", "upscale_backend", "lipsync_backend",
+    "transitions_backend",
 })
 
 # Which stage a config swap directly invalidates. The caller still runs
@@ -90,6 +92,7 @@ _FIELD_AFFECTS_STAGE = {
     "voice_backend": "voice_actor",
     "music_backend": "composer",
     "motion_backend": "motion_shots",
+    "transitions_backend": "transitions",
     "sdxl_variant": "shots",
     "quality": "shots",
 }

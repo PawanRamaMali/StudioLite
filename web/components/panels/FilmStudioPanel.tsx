@@ -1903,6 +1903,7 @@ function BackendSettings({
   const [music, setMusic] = useState<string>(project.config.music_backend || "musicgen");
   const [lipsync, setLipsync] = useState<string>(project.config.lipsync_backend || "none");
   const [upscale, setUpscale] = useState<string>(project.config.upscale_backend || "none");
+  const [transitions, setTransitions] = useState<string>(project.config.transitions_backend || "none");
   const [cloudReady, setCloudReady] = useState<boolean | null>(null);
 
   // Fetch cloud-provider status so the "needs install" hint on roadmap
@@ -1928,9 +1929,11 @@ function BackendSettings({
     setMusic(project.config.music_backend || "musicgen");
     setLipsync(project.config.lipsync_backend || "none");
     setUpscale(project.config.upscale_backend || "none");
+    setTransitions(project.config.transitions_backend || "none");
   }, [
     project.config.voice_backend, project.config.music_backend,
     project.config.lipsync_backend, project.config.upscale_backend,
+    project.config.transitions_backend,
   ]);
 
   if (!editing) {
@@ -1941,6 +1944,7 @@ function BackendSettings({
           {" · "}music <span className="text-zinc-300">{project.config.music_backend || "musicgen"}</span>
           {" · "}lip sync <span className="text-zinc-300">{project.config.lipsync_backend || "none"}</span>
           {" · "}upscale <span className="text-zinc-300">{project.config.upscale_backend || "none"}</span>
+          {" · "}transitions <span className="text-zinc-300">{project.config.transitions_backend || "none"}</span>
         </span>
         <button
           onClick={() => { setErr(null); setEditing(true); }}
@@ -1960,6 +1964,7 @@ function BackendSettings({
     if (music !== (project.config.music_backend || "musicgen")) patch.music_backend = music;
     if (lipsync !== (project.config.lipsync_backend || "none")) patch.lipsync_backend = lipsync;
     if (upscale !== (project.config.upscale_backend || "none")) patch.upscale_backend = upscale;
+    if (transitions !== (project.config.transitions_backend || "none")) patch.transitions_backend = transitions;
     if (Object.keys(patch).length === 0) {
       setEditing(false);
       return;
@@ -1982,7 +1987,7 @@ function BackendSettings({
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 space-y-2">
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
         <div>
           <label htmlFor="cfg-voice" className={labelClass}>Voice</label>
           <select id="cfg-voice" value={voice} onChange={(e) => setVoice(e.target.value)}
@@ -2023,6 +2028,16 @@ function BackendSettings({
             <option value="realesrgan">Real-ESRGAN</option>
             <option value="seedvr2" title={roadmapHint}>
               SeedVR2 {cloudReady ? "" : "(roadmap)"}
+            </option>
+          </select>
+        </div>
+        <div>
+          <label htmlFor="cfg-transitions" className={labelClass}>Transitions</label>
+          <select id="cfg-transitions" value={transitions} onChange={(e) => setTransitions(e.target.value)}
+                  disabled={saving} className={selectClass}>
+            <option value="none">Off</option>
+            <option value="wan21_flf2v" title={roadmapHint}>
+              Wan2.1-FLF2V {cloudReady ? "" : "(roadmap)"}
             </option>
           </select>
         </div>

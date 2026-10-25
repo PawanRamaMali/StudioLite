@@ -27,6 +27,7 @@ RUNNERS: Dict[StageKey, StageRunner] = {
     "voice_actor":         agents.run_voice_actor,
     "shots":               agents.run_shots,
     "motion_shots":        agents.run_motion_shots,
+    "transitions":         agents.run_transitions,
     "editor":              agents.run_editor,
     "ambient":             agents.run_ambient,
     "composer":            agents.run_composer,

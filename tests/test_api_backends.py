@@ -180,6 +180,68 @@ def test_vbench_endpoint_refresh_overrides_stored(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# GET /api/v1/vbench/corpus
+
+def test_vbench_corpus_without_env_returns_missing(monkeypatch, tmp_path):
+    monkeypatch.delenv("VBENCH2_PROMPT_DIR", raising=False)
+    _api, client = _fresh_api(monkeypatch, tmp_path)
+    r = client.get("/api/v1/vbench/corpus")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["corpus_dir"] is None
+    assert body["exists"] is False
+    assert body["total_prompts"] == 0
+    assert body["capabilities"] == []
+    # Every paper capability counts as missing when the dir isn't set.
+    assert "mechanics" in body["missing_capabilities"]
+
+
+def test_vbench_corpus_reads_env_and_reports_counts(monkeypatch, tmp_path):
+    """With VBENCH2_PROMPT_DIR set, the endpoint lists every JSON file it
+    found, enriches each with the paper's dimension (or known=False for
+    unknown filenames), and reports the still-missing capability names."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "mechanics.json").write_text(
+        '["ball drops", "water pours"]', encoding="utf-8")
+    (corpus / "composition.json").write_text(
+        '{"prompts": ["wide shot"]}', encoding="utf-8")
+    (corpus / "typo_cap.json").write_text('["nope"]', encoding="utf-8")
+    monkeypatch.setenv("VBENCH2_PROMPT_DIR", str(corpus))
+
+    _api, client = _fresh_api(monkeypatch, tmp_path)
+    r = client.get("/api/v1/vbench/corpus")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["exists"] is True
+    assert body["total_prompts"] == 4
+    by_cap = {r["capability"]: r for r in body["capabilities"]}
+    assert by_cap["mechanics"]["dimension"] == "physics"
+    assert by_cap["mechanics"]["known"] is True
+    assert by_cap["mechanics"]["prompt_count"] == 2
+    assert by_cap["typo_cap"]["known"] is False
+    assert "mechanics" not in body["missing_capabilities"]
+
+
+def test_vbench_corpus_dir_query_overrides_env(monkeypatch, tmp_path):
+    """?dir=... lets the caller inspect any directory, including a path
+    other than the one the server was launched with."""
+    monkeypatch.delenv("VBENCH2_PROMPT_DIR", raising=False)
+    corpus = tmp_path / "elsewhere"
+    corpus.mkdir()
+    (corpus / "material.json").write_text(
+        '["cloth tears"]', encoding="utf-8")
+
+    _api, client = _fresh_api(monkeypatch, tmp_path)
+    r = client.get(f"/api/v1/vbench/corpus?dir={corpus}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["exists"] is True
+    assert body["total_prompts"] == 1
+    assert body["capabilities"][0]["capability"] == "material"
+
+
+# ---------------------------------------------------------------------------
 # POST /api/v1/lipsync/eval
 
 def test_lipsync_eval_404_for_missing_project(monkeypatch, tmp_path):

@@ -676,6 +676,85 @@ def load_prompt_corpus(corpus_dir: Optional[str] = None
     return out
 
 
+# Known capability -> dimension lookup, so a corpus summary can report
+# which dimension each loaded capability belongs to and flag files whose
+# basename does not match any paper capability.
+_CAPABILITY_TO_DIMENSION: Dict[str, str] = {
+    cap: dim for dim, caps in DIMENSIONS.items() for cap in caps
+}
+
+
+def prompt_corpus_summary(corpus_dir: Optional[str] = None
+                           ) -> Dict[str, Any]:
+    """Describe the prompt corpus so a UI can tell the user what landed.
+
+    Returns a dict with:
+      - ``corpus_dir``: the directory that was scanned (None if unset)
+      - ``exists``: whether that directory exists
+      - ``total_prompts``: sum of prompts across every capability
+      - ``capabilities``: a list of ``{capability, dimension, prompt_count,
+         known}`` rows, one per JSON file found. ``known`` is False when
+         the file basename does not match any VBench-2.0 capability.
+      - ``missing_capabilities``: capability names from the paper that
+         the corpus does not cover - useful to show "install the full
+         suite" guidance before scoring on it.
+
+    Never raises; a missing directory just produces an empty report.
+    """
+    corpus_dir = corpus_dir or os.environ.get("VBENCH2_PROMPT_DIR")
+    report: Dict[str, Any] = {
+        "corpus_dir": corpus_dir,
+        "exists": bool(corpus_dir) and os.path.isdir(corpus_dir),
+        "total_prompts": 0,
+        "capabilities": [],
+        "missing_capabilities": [],
+    }
+    if not report["exists"]:
+        report["missing_capabilities"] = list(_CAPABILITY_TO_DIMENSION.keys())
+        return report
+    loaded = load_prompt_corpus(corpus_dir)
+    covered: List[str] = []
+    for cap, prompts in sorted(loaded.items()):
+        dim = _CAPABILITY_TO_DIMENSION.get(cap)
+        report["capabilities"].append({
+            "capability": cap,
+            "dimension": dim,
+            "prompt_count": len(prompts),
+            "known": dim is not None,
+        })
+        report["total_prompts"] += len(prompts)
+        if dim is not None:
+            covered.append(cap)
+    report["missing_capabilities"] = sorted(
+        cap for cap in _CAPABILITY_TO_DIMENSION if cap not in covered
+    )
+    return report
+
+
+def iter_prompt_jobs(corpus_dir: Optional[str] = None
+                      ) -> List[Dict[str, Any]]:
+    """Flatten the corpus into a list of generator jobs.
+
+    Each entry is ``{dimension, capability, prompt, index}`` so a
+    user-written generator loop can walk the corpus and render one clip
+    per prompt. Unknown-capability files are dropped - the paper's
+    scorecard only lines up with capability names it defines.
+    """
+    jobs: List[Dict[str, Any]] = []
+    for cap, prompts in sorted(load_prompt_corpus(corpus_dir).items()):
+        dim = _CAPABILITY_TO_DIMENSION.get(cap)
+        if dim is None:
+            continue
+        for i, p in enumerate(prompts):
+            jobs.append({
+                "dimension": dim,
+                "capability": cap,
+                "prompt": p,
+                "index": i,
+            })
+    return jobs
+
+
 # ---------------------------------------------------------------------------
 # Regression comparison.
 #

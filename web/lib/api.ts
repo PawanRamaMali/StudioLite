@@ -558,7 +558,7 @@ export type FilmStageKey =
   | "producer" | "screenwriter" | "story_editor" | "breakdown"
   | "storyboard" | "cinematographer"
   | "voice_cast" | "character_portraits" | "voice_actor"
-  | "shots" | "motion_shots" | "editor"
+  | "shots" | "motion_shots" | "transitions" | "editor"
   | "ambient" | "composer" | "sound_design" | "mixer"
   | "colorist" | "titles" | "upscale" | "lipsync" | "continuity"
   // Any newer stage added server-side falls through as a plain string.
@@ -589,6 +589,7 @@ export interface FilmConfig {
   music_backend?: "musicgen" | "acestep" | string;
   upscale_backend?: "none" | "realesrgan" | string;
   lipsync_backend?: "none" | "musetalk" | "latentsync" | "echomimicv3" | string;
+  transitions_backend?: "none" | "wan21_flf2v" | string;
   per_stage: Record<string, Record<string, unknown>>;
 }
 
@@ -787,6 +788,26 @@ export interface VBenchScorecard {
 export const filmVbench = (id: string, refresh = false) =>
   apiFetch<VBenchScorecard>(
     `/api/v1/films/${encodeURIComponent(id)}/vbench${refresh ? "?refresh=true" : ""}`,
+  );
+
+export interface VBenchCorpusCapability {
+  capability: string;
+  dimension: string | null;
+  prompt_count: number;
+  known: boolean;
+}
+
+export interface VBenchCorpusSummary {
+  corpus_dir: string | null;
+  exists: boolean;
+  total_prompts: number;
+  capabilities: VBenchCorpusCapability[];
+  missing_capabilities: string[];
+}
+
+export const vbenchCorpus = (dir?: string) =>
+  apiFetch<VBenchCorpusSummary>(
+    `/api/v1/vbench/corpus${dir ? `?dir=${encodeURIComponent(dir)}` : ""}`,
   );
 
 // ---------------------------------------------------------------------------

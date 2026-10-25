@@ -404,6 +404,70 @@ def test_prompt_corpus_reads_env(tmp_path, monkeypatch):
     assert out == {"material": ["cloth tears"]}
 
 
+def test_prompt_corpus_summary_reports_coverage(tmp_path, monkeypatch):
+    """Summary reports total prompts, which paper capabilities are covered,
+    and which are still missing. Unknown filenames are counted but marked
+    known=False so the UI can call them out without crashing."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "mechanics.json").write_text(
+        '["ball drops", "water pours"]', encoding="utf-8")
+    (corpus / "composition.json").write_text(
+        '{"prompts": ["wide shot of a tower"]}', encoding="utf-8")
+    (corpus / "typo_cap.json").write_text('["nope"]', encoding="utf-8")
+
+    monkeypatch.setenv("VBENCH2_PROMPT_DIR", str(corpus))
+    report = vbench2.prompt_corpus_summary()
+    assert report["corpus_dir"] == str(corpus)
+    assert report["exists"] is True
+    assert report["total_prompts"] == 4  # 2 + 1 + 1
+    by_cap = {r["capability"]: r for r in report["capabilities"]}
+    assert by_cap["mechanics"]["dimension"] == "physics"
+    assert by_cap["mechanics"]["known"] is True
+    assert by_cap["mechanics"]["prompt_count"] == 2
+    assert by_cap["composition"]["dimension"] == "controllability"
+    assert by_cap["typo_cap"]["dimension"] is None
+    assert by_cap["typo_cap"]["known"] is False
+    # Covered capabilities are not reported as missing.
+    assert "mechanics" not in report["missing_capabilities"]
+    assert "composition" not in report["missing_capabilities"]
+    # Something from the paper that we did not provide must be flagged.
+    assert "human_identity" in report["missing_capabilities"]
+
+
+def test_prompt_corpus_summary_missing_dir(monkeypatch):
+    monkeypatch.delenv("VBENCH2_PROMPT_DIR", raising=False)
+    report = vbench2.prompt_corpus_summary()
+    assert report["corpus_dir"] is None
+    assert report["exists"] is False
+    assert report["total_prompts"] == 0
+    assert report["capabilities"] == []
+    # Every paper capability is 'missing' when there is no corpus.
+    assert "mechanics" in report["missing_capabilities"]
+    assert "human_identity" in report["missing_capabilities"]
+
+
+def test_iter_prompt_jobs_flattens_and_drops_unknown(tmp_path, monkeypatch):
+    """iter_prompt_jobs returns one job per prompt, enriched with dimension
+    and capability. Prompts from files whose basename is not a paper
+    capability are dropped - the scorecard wouldn't line up anyway."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "mechanics.json").write_text(
+        '["ball drops", "water pours"]', encoding="utf-8")
+    (corpus / "bogus.json").write_text('["skip me"]', encoding="utf-8")
+
+    monkeypatch.setenv("VBENCH2_PROMPT_DIR", str(corpus))
+    jobs = vbench2.iter_prompt_jobs()
+    # Two jobs, both tagged as mechanics/physics.
+    assert len(jobs) == 2
+    assert all(j["dimension"] == "physics" for j in jobs)
+    assert all(j["capability"] == "mechanics" for j in jobs)
+    assert sorted(j["prompt"] for j in jobs) == ["ball drops", "water pours"]
+    # Indices are per-capability, starting at 0.
+    assert sorted(j["index"] for j in jobs) == [0, 1]
+
+
 # ---------------------------------------------------------------------------
 # Aspect ratio and duration-sanity scorers
 

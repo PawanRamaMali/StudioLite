@@ -1783,6 +1783,7 @@ def run_editor(project: Project) -> Dict[str, Any]:
     shots_art = project.read_artifact("shots") or {}
     cinema = project.read_artifact("cinematographer") or {}
     motion_art = project.read_artifact("motion_shots") or {}
+    transitions_art = project.read_artifact("transitions") or {}
     shots: List[Dict[str, Any]] = shots_art.get("shots") or []
     if not shots:
         raise ValueError("No rendered shots to edit.")
@@ -1800,12 +1801,26 @@ def run_editor(project: Project) -> Dict[str, Any]:
         if os.path.exists(mp4_abs):
             motion_by_key[f"{m['scene_id']}::{m['shot_id']}"] = mp4_abs
 
+    # Transitions: a short FLF2V morph that fits between the shot keyed by
+    # `from_key` and the shot keyed by `to_key`. The map is only populated
+    # when the transitions stage ran and produced at least one rendered
+    # row; otherwise the splice is a no-op.
+    transition_after: Dict[str, str] = {}
+    for t in transitions_art.get("transitions", []) or []:
+        p = t.get("path")
+        if not p or t.get("mode") not in ("local", "cloud"):
+            continue
+        mp4_abs = os.path.join(project.dir, p)
+        if os.path.exists(mp4_abs):
+            transition_after[str(t.get("from_key") or "")] = mp4_abs
+
     clips_dir = os.path.join(project.artifacts_dir, "editor_clips")
     os.makedirs(clips_dir, exist_ok=True)
 
     clip_paths: List[str] = []
     motion_used = 0
     kb_used = 0
+    transition_used = 0
     for i, s in enumerate(shots):
         img_abs = os.path.join(project.dir, s["path"])
         if not os.path.exists(img_abs):
@@ -1825,25 +1840,41 @@ def run_editor(project: Project) -> Dict[str, Any]:
                 _standardize_motion_clip(motion_src, clip_out, dur)
                 clip_paths.append(clip_out)
                 motion_used += 1
-                continue
             except Exception:
                 logger.exception("Motion clip normalize failed for %s/%s; using Ken Burns",
                                  scene_id, shot_id)
-        # Ken Burns fallback path.
-        try:
-            _render_kenburns_clip(img_abs, clip_out, dur, camera_move)
-        except FileNotFoundError as e:
-            raise RuntimeError("ffmpeg not on PATH - cannot assemble the final cut.") from e
-        except Exception:
-            logger.exception("Ken Burns render failed for %s/%s; using static clip",
-                             scene_id, shot_id)
+                motion_src = None
+        if motion_src is None:
+            # Ken Burns fallback path.
             try:
-                _render_static_clip(img_abs, clip_out, dur)
+                _render_kenburns_clip(img_abs, clip_out, dur, camera_move)
+            except FileNotFoundError as e:
+                raise RuntimeError("ffmpeg not on PATH - cannot assemble the final cut.") from e
             except Exception:
-                logger.exception("Static fallback failed for %s/%s; skipping", scene_id, shot_id)
-                continue
-        clip_paths.append(clip_out)
-        kb_used += 1
+                logger.exception("Ken Burns render failed for %s/%s; using static clip",
+                                 scene_id, shot_id)
+                try:
+                    _render_static_clip(img_abs, clip_out, dur)
+                except Exception:
+                    logger.exception("Static fallback failed for %s/%s; skipping", scene_id, shot_id)
+                    continue
+            clip_paths.append(clip_out)
+            kb_used += 1
+
+        # Transition after this shot: standardize the FLF2V morph the same
+        # way we standardize motion clips, then splice it in before the
+        # next shot. 2 seconds is the typical transition length.
+        tr_src = transition_after.get(f"{scene_id}::{shot_id}")
+        if tr_src is not None:
+            tr_out = os.path.join(clips_dir,
+                                   f"{i:03d}_{scene_id}_{shot_id}_T.mp4")
+            try:
+                _standardize_motion_clip(tr_src, tr_out, 2)
+                clip_paths.append(tr_out)
+                transition_used += 1
+            except Exception:
+                logger.exception("Transition normalize failed after %s/%s; dropping",
+                                 scene_id, shot_id)
 
     if not clip_paths:
         raise ValueError("No renderable shot images found.")
@@ -1878,6 +1909,7 @@ def run_editor(project: Project) -> Dict[str, Any]:
         "shot_count": len(shots),
         "motion_clips_used": motion_used,
         "kenburns_clips_used": kb_used,
+        "transition_clips_used": transition_used,
     }
 
 
@@ -4516,6 +4548,168 @@ def _run_flf2v_local(cfg: Dict[str, Any], first_image_abs: str,
     if not (os.path.exists(out_abs) and os.path.getsize(out_abs) > 1024):
         return None
     return {"stdout_tail": (proc.stdout or "")[-300:]}
+
+
+# ---------------------------------------------------------------------------
+# Transitions - Wan2.1-FLF2V between adjacent shots.
+#
+# Takes the last frame of motion shot N and the first frame of motion shot
+# N+1 and renders a short morph that the editor splices in between them.
+# The stage is a no-op unless `transitions_backend == "wan21_flf2v"`; when
+# set, it iterates boundaries, extracts the two keyframes via ffmpeg, and
+# calls the existing _render_transition_flf2v helper (local -> cloud ->
+# skip). Editor reads the artifact and interleaves transition clips with
+# the motion clips when assembling the silent cut.
+# ---------------------------------------------------------------------------
+
+def _extract_motion_endpoint(mp4_abs: str, out_png_abs: str,
+                              *, at: str) -> bool:
+    """Pull the first or last frame of ``mp4_abs`` as a PNG at ``out_png_abs``.
+    ``at`` is "first" or "last". Returns True on success. Uses ffmpeg
+    rather than loading the clip into Python so a torch-less environment
+    still works."""
+    if not os.path.exists(mp4_abs):
+        return False
+    os.makedirs(os.path.dirname(out_png_abs), exist_ok=True)
+    if at == "first":
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", mp4_abs,
+               "-vframes", "1", out_png_abs]
+    else:
+        # -sseof is relative to end-of-file; -update 1 overwrites the
+        # single output on each matching frame so we land on the last.
+        cmd = ["ffmpeg", "-y", "-v", "error", "-sseof", "-1",
+               "-i", mp4_abs, "-update", "1", "-q:v", "1", out_png_abs]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                               check=False, timeout=60)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        logger.warning("ffmpeg frame extract failed: %s", exc)
+        return False
+    if proc.returncode != 0:
+        logger.warning("ffmpeg frame extract exited %s: %s",
+                        proc.returncode, (proc.stderr or "")[-200:])
+        return False
+    return os.path.exists(out_png_abs) and os.path.getsize(out_png_abs) > 0
+
+
+def run_transitions(project: Project) -> Dict[str, Any]:
+    """Render Wan2.1-FLF2V morphs between adjacent motion shots.
+
+    No-op unless ``transitions_backend`` is set in the project config. The
+    editor reads this artifact and interleaves the transition clips with
+    the motion shots when the setting is on.
+
+    Each entry in the ``transitions`` list carries the ``from_key`` and
+    ``to_key`` ``(scene_id, shot_id)`` pair, the backend used, and the
+    relative output path. A ``skipped`` entry still appears so the UI can
+    show which boundaries failed and why.
+    """
+    backend_cfg = (project.meta.config.transitions_backend or "none").lower()
+    if backend_cfg in ("", "none"):
+        return {"transitions": [], "backend": "none",
+                "note": "transitions_backend is 'none' - skip."}
+
+    motion_art = project.read_artifact("motion_shots") or {}
+    motion_shots: List[Dict[str, Any]] = motion_art.get("motion_shots") or []
+    # Need at least two shots to have a boundary.
+    renderable = [m for m in motion_shots
+                   if m.get("path") and os.path.exists(
+                       os.path.join(project.dir, m["path"]))]
+    if len(renderable) < 2:
+        return {"transitions": [], "backend": backend_cfg,
+                "note": f"only {len(renderable)} motion clips - no boundaries."}
+
+    transitions_dir = os.path.join(project.artifacts_dir, "transitions")
+    frames_dir = os.path.join(transitions_dir, "_frames")
+    os.makedirs(transitions_dir, exist_ok=True)
+    os.makedirs(frames_dir, exist_ok=True)
+
+    results: List[Dict[str, Any]] = []
+    rendered_count = 0
+    skipped_count = 0
+    total_boundaries = len(renderable) - 1
+    project.append_event({"type": "transitions_progress",
+                           "done": 0, "total": total_boundaries})
+    for i in range(total_boundaries):
+        a = renderable[i]
+        b = renderable[i + 1]
+        a_mp4 = os.path.join(project.dir, a["path"])
+        b_mp4 = os.path.join(project.dir, b["path"])
+        a_sid, a_shot = a["scene_id"], a["shot_id"]
+        b_sid, b_shot = b["scene_id"], b["shot_id"]
+
+        last_png = os.path.join(frames_dir,
+                                 f"{i:03d}_last_{a_sid}_{a_shot}.png")
+        first_png = os.path.join(frames_dir,
+                                  f"{i:03d}_first_{b_sid}_{b_shot}.png")
+        out_mp4 = os.path.join(transitions_dir,
+                                f"{i:03d}_{a_sid}_{a_shot}_to_{b_sid}_{b_shot}.mp4")
+
+        if not _extract_motion_endpoint(a_mp4, last_png, at="last"):
+            results.append({
+                "index": i, "from_key": f"{a_sid}::{a_shot}",
+                "to_key": f"{b_sid}::{b_shot}",
+                "mode": "skipped", "backend": backend_cfg,
+                "error": "could not extract last frame of previous shot",
+            })
+            skipped_count += 1
+            project.append_event({"type": "transitions_progress",
+                                   "done": i + 1, "total": total_boundaries,
+                                   "mode": "skipped"})
+            continue
+        if not _extract_motion_endpoint(b_mp4, first_png, at="first"):
+            results.append({
+                "index": i, "from_key": f"{a_sid}::{a_shot}",
+                "to_key": f"{b_sid}::{b_shot}",
+                "mode": "skipped", "backend": backend_cfg,
+                "error": "could not extract first frame of next shot",
+            })
+            skipped_count += 1
+            project.append_event({"type": "transitions_progress",
+                                   "done": i + 1, "total": total_boundaries,
+                                   "mode": "skipped"})
+            continue
+
+        try:
+            r = _render_transition_flf2v(
+                project, last_png, first_png, out_mp4,
+                duration_sec=2, prompt="smooth morph between adjacent shots",
+            )
+        except Exception as exc:
+            logger.exception("transition render raised for boundary %d", i)
+            r = {"mode": "skipped",
+                 "skipped": f"{type(exc).__name__}: {exc}"}
+
+        mode = r.get("mode", "skipped")
+        row: Dict[str, Any] = {
+            "index": i,
+            "from_key": f"{a_sid}::{a_shot}",
+            "to_key": f"{b_sid}::{b_shot}",
+            "backend": backend_cfg,
+            "mode": mode,
+        }
+        if mode in ("local", "cloud") and os.path.exists(out_mp4):
+            row["path"] = os.path.relpath(out_mp4, project.dir).replace(os.sep, "/")
+            if r.get("provider"):
+                row["provider"] = r["provider"]
+            rendered_count += 1
+        else:
+            row["error"] = r.get("skipped") or "transition skipped"
+            if r.get("install_hint"):
+                row["install_hint"] = r["install_hint"]
+            skipped_count += 1
+        results.append(row)
+        project.append_event({"type": "transitions_progress",
+                               "done": i + 1, "total": total_boundaries,
+                               "mode": mode})
+
+    return {
+        "transitions": results,
+        "backend": backend_cfg,
+        "rendered_count": rendered_count,
+        "skipped_count": skipped_count,
+        "boundary_count": total_boundaries,
+    }
 
 
 # ---------------------------------------------------------------------------

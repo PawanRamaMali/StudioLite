@@ -6004,6 +6004,7 @@ def _film_meta_dict(project) -> Dict:
             "music_backend": m.config.music_backend,
             "upscale_backend": m.config.upscale_backend,
             "lipsync_backend": m.config.lipsync_backend,
+            "transitions_backend": m.config.transitions_backend,
             "per_stage": m.config.per_stage,
         },
     }
@@ -6337,6 +6338,20 @@ async def film_vbench_scorecard(project_id: str, refresh: bool = False):
             pass
     card = _vb.score_project(proj, store=True)
     return _asdict(card)
+
+
+@app.get("/api/v1/vbench/corpus")
+async def vbench_prompt_corpus(dir: Optional[str] = None):
+    """VBench-2.0 prompt corpus summary.
+
+    By default inspects ``$VBENCH2_PROMPT_DIR``; a caller can override
+    with ``?dir=`` for a one-off inspection of another directory. The
+    response is a safe-to-render summary (never the raw prompts) so the
+    UI can show the user how much of the paper's suite they have on disk
+    before kicking off a scoring run.
+    """
+    from filmmaker import vbench2 as _vb
+    return _vb.prompt_corpus_summary(dir)
 
 
 @app.put("/api/v1/films/{project_id}/artifact/{stage_key}")

@@ -470,6 +470,156 @@ def scorecard_to_dict(card: MatrixScorecard) -> Dict[str, Any]:
     return asdict(card)
 
 
+# ---------------------------------------------------------------------------
+# Scorecard diff for regression gating.
+#
+# The CI gate (scripts/lipsync_regression_check.py) runs the matrix against
+# an in-repo baseline and uses this helper to decide pass/fail. Mirrors the
+# shape of vbench2.compare_scorecards but operates per-(backend, metric)
+# since lipsync is a backend-vs-backend bakeoff, not a single aggregate
+# score. Thresholds are relative so a metric that moves from 0.01 to 0.02
+# on noise does not trip the gate while a 10 -> 2 drop does.
+
+DEFAULT_REGRESSION_THRESHOLD = 0.05
+
+
+@dataclass
+class MetricDelta:
+    backend: str
+    metric: str
+    higher_is_better: bool
+    baseline: Optional[float]
+    candidate: Optional[float]
+    delta: Optional[float]        # candidate - baseline, in the raw metric units
+    relative_delta: Optional[float]
+    regressed: bool               # relative drop (respecting direction) > threshold
+
+
+@dataclass
+class ScorecardDiff:
+    threshold: float
+    deltas: List[MetricDelta]
+    regressed_pairs: List[str]    # "backend/metric" labels for the gate's exit code
+
+
+def _coerce_scorecard(card: Any) -> Dict[str, Any]:
+    """Accept either a live MatrixScorecard or its dict form (as produced
+    by scorecard_to_dict / persisted to disk)."""
+    if isinstance(card, MatrixScorecard):
+        return scorecard_to_dict(card)
+    if isinstance(card, dict):
+        return card
+    raise TypeError(f"not a scorecard: {type(card).__name__}")
+
+
+def _metric_direction(card: Dict[str, Any], metric: str) -> Optional[bool]:
+    """Pull higher_is_better for a metric out of a scorecard dict. Falls
+    back to the live registry if the card does not carry it (older cards)."""
+    for row in card.get("backends") or []:
+        for clip in row.get("per_clip") or []:
+            for m in clip.get("metrics") or []:
+                if m.get("metric") == metric and "higher_is_better" in m:
+                    return bool(m["higher_is_better"])
+    for spec in _METRICS:
+        if spec.name == metric:
+            return spec.higher_is_better
+    return None
+
+
+def _relative_change(base: float, cand: float) -> float:
+    """Candidate relative to baseline. ``(cand - base) / |base|`` with a
+    small-baseline guard so a baseline near zero does not blow up the ratio.
+    """
+    denom = abs(base)
+    if denom < 1e-9:
+        # When baseline is effectively zero, fall back to absolute delta
+        # scaled to the threshold's unit. Anything non-zero in the candidate
+        # counts as a 100% change; both sides exactly zero is 0.
+        if abs(cand) < 1e-9:
+            return 0.0
+        return 1.0 if cand > base else -1.0
+    return (cand - base) / denom
+
+
+def compare_scorecards(baseline: Any, candidate: Any, *,
+                        threshold: float = DEFAULT_REGRESSION_THRESHOLD
+                        ) -> ScorecardDiff:
+    """Compare a candidate scorecard against a baseline, per (backend, metric).
+
+    ``threshold`` is the minimum relative drop (respecting the metric's
+    direction) that counts as a regression. 0.05 = 5%.
+
+    A pair is regressed when both sides have a numeric opinion and the
+    candidate is worse than the baseline by more than the threshold.
+    "Worse" means lower for higher-is-better metrics, higher for
+    lower-is-better. Pairs with None on either side are reported but never
+    flagged - a scorer-coverage change is not a quality regression.
+    """
+    if threshold < 0:
+        raise ValueError("threshold must be non-negative")
+    base = _coerce_scorecard(baseline)
+    cand = _coerce_scorecard(candidate)
+    cand_by_backend = {r.get("backend"): r for r in cand.get("backends") or []}
+
+    deltas: List[MetricDelta] = []
+    regressed: List[str] = []
+    for brow in base.get("backends") or []:
+        name = brow.get("backend") or ""
+        base_metrics = brow.get("metrics") or {}
+        cand_metrics = (cand_by_backend.get(name) or {}).get("metrics") or {}
+        for metric, b_val in base_metrics.items():
+            c_val = cand_metrics.get(metric)
+            direction = _metric_direction(base, metric)
+            if direction is None:
+                direction = _metric_direction(cand, metric)
+            higher_is_better = bool(direction) if direction is not None else True
+
+            if b_val is None or c_val is None:
+                deltas.append(MetricDelta(
+                    backend=name, metric=metric,
+                    higher_is_better=higher_is_better,
+                    baseline=b_val, candidate=c_val,
+                    delta=None, relative_delta=None, regressed=False,
+                ))
+                continue
+            try:
+                bf = float(b_val)
+                cf = float(c_val)
+            except (TypeError, ValueError):
+                deltas.append(MetricDelta(
+                    backend=name, metric=metric,
+                    higher_is_better=higher_is_better,
+                    baseline=b_val, candidate=c_val,
+                    delta=None, relative_delta=None, regressed=False,
+                ))
+                continue
+            raw_delta = cf - bf
+            rel = _relative_change(bf, cf)
+            # Regression test respects direction. For higher-is-better a
+            # negative relative change is bad; for lower-is-better a
+            # positive one is bad.
+            is_regression = (
+                (higher_is_better and rel < -threshold)
+                or (not higher_is_better and rel > threshold)
+            )
+            if is_regression:
+                regressed.append(f"{name}/{metric}")
+            deltas.append(MetricDelta(
+                backend=name, metric=metric,
+                higher_is_better=higher_is_better,
+                baseline=bf, candidate=cf,
+                delta=raw_delta, relative_delta=rel,
+                regressed=is_regression,
+            ))
+
+    return ScorecardDiff(threshold=threshold, deltas=deltas,
+                          regressed_pairs=regressed)
+
+
+def diff_to_dict(diff: ScorecardDiff) -> Dict[str, Any]:
+    return asdict(diff)
+
+
 def _cli_run(argv: List[str]) -> int:
     """CLI entry point for the matrix runner.
 

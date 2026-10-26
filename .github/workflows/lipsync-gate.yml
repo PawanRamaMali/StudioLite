@@ -1,0 +1,42 @@
+name: Lipsync regression gate
+
+on:
+  pull_request:
+    paths:
+      - "filmmaker/lipsync**"
+      - "filmmaker/agents.py"
+      - "filmmaker/registry.py"
+      - "scripts/lipsync_regression_check.py"
+      - "tests/data/lipsync_baseline.json"
+      - ".github/workflows/lipsync-gate.yml"
+  workflow_dispatch:
+
+jobs:
+  gate:
+    name: Lipsync scorecard diff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      # Same slim surface as the main pytest job; the gate itself does
+      # not need torch/diffusers because no lipsync model is installed
+      # in the free runner. The script detects that and exits 0.
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            pytest httpx fastapi pydantic uvicorn python-multipart \
+            requests cryptography Pillow numpy imagehash
+
+      - name: Run regression gate
+        env:
+          LIPSYNC_REGRESSION_THRESHOLD: "0.05"
+        run: python scripts/lipsync_regression_check.py

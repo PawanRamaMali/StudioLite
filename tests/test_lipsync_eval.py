@@ -286,3 +286,119 @@ def test_cli_runs_with_noop_drivers(tmp_path: Path, capsys):
     assert body["corpus_count"] == 1
     assert body["backends"][0]["backend"] == "musetalk"
     assert body["backends"][0]["rendered_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Scorecard diff / regression gate verdict
+
+def _card(backends):
+    """Build a MatrixScorecard dict with the shape compare_scorecards wants."""
+    return {
+        "corpus_count": 1,
+        "backends": [
+            {
+                "backend": name,
+                "clip_count": 1,
+                "rendered_count": 1,
+                "metrics": metrics,
+                "per_clip": [{
+                    "reference_video": "r", "candidate_video": "c",
+                    "audio": None,
+                    "metrics": [
+                        {"metric": m, "value": v,
+                         "higher_is_better": higher.get(m, True)}
+                        for m, v in metrics.items()
+                    ],
+                }],
+            }
+            for name, metrics, higher in backends
+        ],
+        "ranking": {},
+    }
+
+
+def test_compare_scorecards_no_regression_within_threshold():
+    """Candidate within 5% of baseline on both directions - no regression."""
+    higher = {"syncnet_confidence": True, "lmd": False}
+    base = _card([("musetalk",
+                   {"syncnet_confidence": 7.00, "lmd": 2.00}, higher)])
+    cand = _card([("musetalk",
+                   {"syncnet_confidence": 6.75, "lmd": 2.08}, higher)])
+    diff = le.compare_scorecards(base, cand, threshold=0.05)
+    assert diff.regressed_pairs == []
+    pairs = {(d.backend, d.metric): d for d in diff.deltas}
+    assert pairs[("musetalk", "syncnet_confidence")].regressed is False
+    assert pairs[("musetalk", "lmd")].regressed is False
+
+
+def test_compare_scorecards_detects_regression_higher_is_better():
+    """SyncNet confidence drops 20% - must flag."""
+    higher = {"syncnet_confidence": True}
+    base = _card([("musetalk", {"syncnet_confidence": 10.0}, higher)])
+    cand = _card([("musetalk", {"syncnet_confidence": 8.0}, higher)])
+    diff = le.compare_scorecards(base, cand, threshold=0.05)
+    assert diff.regressed_pairs == ["musetalk/syncnet_confidence"]
+    (d,) = [x for x in diff.deltas
+            if x.backend == "musetalk" and x.metric == "syncnet_confidence"]
+    assert d.regressed is True
+    assert d.relative_delta is not None and d.relative_delta < -0.05
+
+
+def test_compare_scorecards_detects_regression_lower_is_better():
+    """LMD rises 50% - a jump in landmark distance is a regression."""
+    higher = {"lmd": False}
+    base = _card([("latentsync", {"lmd": 1.0}, higher)])
+    cand = _card([("latentsync", {"lmd": 1.6}, higher)])
+    diff = le.compare_scorecards(base, cand, threshold=0.05)
+    assert diff.regressed_pairs == ["latentsync/lmd"]
+
+
+def test_compare_scorecards_none_side_never_regresses():
+    """Scorer-coverage change (one side has no opinion) must not flag."""
+    higher = {"syncnet_confidence": True}
+    base = _card([("x", {"syncnet_confidence": 10.0}, higher)])
+    cand = _card([("x", {"syncnet_confidence": None}, higher)])
+    diff = le.compare_scorecards(base, cand, threshold=0.01)
+    assert diff.regressed_pairs == []
+
+
+def test_compare_scorecards_small_baseline_guard():
+    """Baseline effectively zero + candidate also zero -> no regression,
+    not a divide-by-zero crash."""
+    higher = {"frame_count_delta": False}
+    base = _card([("x", {"frame_count_delta": 0.0}, higher)])
+    cand = _card([("x", {"frame_count_delta": 0.0}, higher)])
+    diff = le.compare_scorecards(base, cand, threshold=0.05)
+    assert diff.regressed_pairs == []
+
+
+def test_compare_scorecards_missing_backend_in_candidate_is_coverage_gap():
+    """Baseline has 'extra' backend; candidate run did not include it. The
+    diff must still emit the baseline rows with candidate=None (no flag)."""
+    higher = {"syncnet_confidence": True}
+    base = _card([
+        ("musetalk", {"syncnet_confidence": 7.0}, higher),
+        ("extra", {"syncnet_confidence": 7.0}, higher),
+    ])
+    cand = _card([("musetalk", {"syncnet_confidence": 7.0}, higher)])
+    diff = le.compare_scorecards(base, cand, threshold=0.05)
+    assert diff.regressed_pairs == []
+    pairs = {(d.backend, d.metric): d for d in diff.deltas}
+    assert pairs[("extra", "syncnet_confidence")].candidate is None
+    assert pairs[("extra", "syncnet_confidence")].regressed is False
+
+
+def test_compare_scorecards_threshold_rejects_negative():
+    base = _card([("x", {"syncnet_confidence": 1.0}, {"syncnet_confidence": True})])
+    with pytest.raises(ValueError):
+        le.compare_scorecards(base, base, threshold=-0.01)
+
+
+def test_diff_to_dict_is_json_round_trippable():
+    higher = {"syncnet_confidence": True}
+    base = _card([("x", {"syncnet_confidence": 10.0}, higher)])
+    cand = _card([("x", {"syncnet_confidence": 8.0}, higher)])
+    diff = le.compare_scorecards(base, cand, threshold=0.05)
+    body = le.diff_to_dict(diff)
+    text = json.dumps(body)
+    assert "regressed_pairs" in json.loads(text)

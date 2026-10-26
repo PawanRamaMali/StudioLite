@@ -1,0 +1,49 @@
+{
+  "_comment": "Baseline lipsync scorecard for CI regression gate. Shape matches filmmaker.lipsync_eval.scorecard_to_dict. Regenerate when a lipsync backend swap or model-weight bump is intentional: python -m filmmaker.lipsync_eval run --corpus tests/data/lipsync_corpus.jsonl --out /tmp/out > tests/data/lipsync_baseline.json. Placeholders here are null so the gate reports 'no opinion' and passes until a real run lands.",
+  "corpus_count": 0,
+  "backends": [
+    {
+      "backend": "musetalk",
+      "clip_count": 0,
+      "rendered_count": 0,
+      "metrics": {
+        "duration_drift_sec": null,
+        "frame_count_delta": null,
+        "syncnet_confidence": null,
+        "lmd": null,
+        "fid": null,
+        "fvd": null
+      },
+      "per_clip": []
+    },
+    {
+      "backend": "latentsync",
+      "clip_count": 0,
+      "rendered_count": 0,
+      "metrics": {
+        "duration_drift_sec": null,
+        "frame_count_delta": null,
+        "syncnet_confidence": null,
+        "lmd": null,
+        "fid": null,
+        "fvd": null
+      },
+      "per_clip": []
+    },
+    {
+      "backend": "echomimicv3",
+      "clip_count": 0,
+      "rendered_count": 0,
+      "metrics": {
+        "duration_drift_sec": null,
+        "frame_count_delta": null,
+        "syncnet_confidence": null,
+        "lmd": null,
+        "fid": null,
+        "fvd": null
+      },
+      "per_clip": []
+    }
+  ],
+  "ranking": {}
+}

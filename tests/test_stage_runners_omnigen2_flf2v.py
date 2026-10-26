@@ -448,3 +448,208 @@ def test_run_transitions_no_op_with_fewer_than_two_motion_clips():
 
         assert r["transitions"] == []
         assert "boundaries" in r["note"].lower()
+
+
+# ---------------------------------------------------------------------------
+# run_editor splice: transitions_art rows weave between motion clips
+# ---------------------------------------------------------------------------
+
+def _seed_editor_fixture(project: _FakeProject, *, transitions_mode: str) -> None:
+    """Seed shots, motion_shots, and (optionally) transitions artifacts
+    plus the backing files on disk for a 3-shot cut.
+
+    ``transitions_mode``:
+      - ``"absent"``  - no transitions artifact at all
+      - ``"both"``    - 2 rendered rows (one per boundary)
+      - ``"first_only"`` - boundary 1 rendered, boundary 2 skipped
+    """
+    project.write_artifact("storyboard", {
+        "scenes": {"s01": [
+            {"id": "sh1", "description": "shot one",
+             "subject": "a robot", "action": "waves", "dialogue": ""},
+            {"id": "sh2", "description": "shot two",
+             "subject": "the robot", "action": "turns", "dialogue": ""},
+            {"id": "sh3", "description": "shot three",
+             "subject": "the robot", "action": "leaves", "dialogue": ""},
+        ]},
+    })
+    project.write_artifact("cinematographer", {
+        "scenes": {"s01": {
+            "sh1": {"framing": "MS", "lens_mm": 35, "camera_move": "static",
+                     "lighting": "soft", "palette": "warm", "duration_sec": 4},
+            "sh2": {"framing": "CU", "lens_mm": 50, "camera_move": "pan",
+                     "lighting": "hard", "palette": "cool", "duration_sec": 4},
+            "sh3": {"framing": "WS", "lens_mm": 24, "camera_move": "static",
+                     "lighting": "soft", "palette": "warm", "duration_sec": 4},
+        }},
+    })
+
+    # Three shot keyframes on disk + the shots artifact.
+    shots_scene_dir = os.path.join(project.shots_dir, "s01")
+    os.makedirs(shots_scene_dir, exist_ok=True)
+    shots: List[Dict[str, Any]] = []
+    for shot_id in ("sh1", "sh2", "sh3"):
+        png = os.path.join(shots_scene_dir, f"{shot_id}.png")
+        with open(png, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + b"x" * 128)
+        shots.append({
+            "scene_id": "s01", "shot_id": shot_id,
+            "path": os.path.relpath(png, project.dir).replace(os.sep, "/"),
+            "duration_sec": 4, "rendered": True,
+        })
+    project.write_artifact("shots", {"shots": shots})
+
+    # Three motion mp4s on disk + the motion_shots artifact (so run_editor
+    # takes the motion branch and never calls Ken Burns).
+    motion_dir = os.path.join(project.artifacts_dir, "motion")
+    os.makedirs(motion_dir, exist_ok=True)
+    motions: List[Dict[str, Any]] = []
+    for shot_id in ("sh1", "sh2", "sh3"):
+        mp4 = os.path.join(motion_dir, f"s01_{shot_id}.mp4")
+        _write_fake_clip(mp4)
+        motions.append({
+            "scene_id": "s01", "shot_id": shot_id,
+            "path": os.path.relpath(mp4, project.dir).replace(os.sep, "/"),
+            "duration_sec": 4, "backend": "wan22", "rendered": True,
+        })
+    project.write_artifact("motion_shots", {"motion_shots": motions})
+
+    if transitions_mode == "absent":
+        return
+
+    tr_dir = os.path.join(project.artifacts_dir, "transitions")
+    os.makedirs(tr_dir, exist_ok=True)
+    rows: List[Dict[str, Any]] = []
+    pairs = [("sh1", "sh2"), ("sh2", "sh3")]
+    for idx, (frm, to) in enumerate(pairs):
+        rendered = (transitions_mode == "both"
+                     or (transitions_mode == "first_only" and idx == 0))
+        if rendered:
+            mp4 = os.path.join(tr_dir, f"s01_{frm}_to_{to}.mp4")
+            _write_fake_clip(mp4)
+            rows.append({
+                "from_key": f"s01::{frm}",
+                "to_key": f"s01::{to}",
+                "mode": "local",
+                "path": os.path.relpath(mp4, project.dir).replace(os.sep, "/"),
+            })
+        else:
+            rows.append({
+                "from_key": f"s01::{frm}",
+                "to_key": f"s01::{to}",
+                "mode": "skipped",
+                "error": "no FLF2V available",
+                "install_hint": "install this",
+            })
+    project.write_artifact("transitions",
+                            {"transitions": rows, "backend": "wan21_flf2v"})
+
+
+def _editor_patches(agents_mod):
+    """Patch the three ffmpeg-shelling helpers run_editor touches so no
+    subprocess fires. _standardize_motion_clip is used for BOTH motion
+    clips and transition clips; _render_kenburns_clip must never fire
+    when a motion mp4 is present; the concat subprocess.run is stubbed
+    to just create its output file. Returns a tuple of patchers to
+    enter under one ``with`` statement."""
+    def _fake_standardize(src, dst, duration_sec):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "wb") as f:
+            f.write(b"\x00" * 2048)
+
+    def _fake_subprocess_run(cmd, *args, **kwargs):
+        # cmd[-1] is the concat output path; create it so run_editor's
+        # relpath call succeeds.
+        out = cmd[-1]
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        with open(out, "wb") as f:
+            f.write(b"\x00" * 2048)
+        return SimpleNamespace(stderr="", stdout="")
+
+    return (
+        patch.object(agents_mod, "_standardize_motion_clip",
+                      side_effect=_fake_standardize),
+        patch.object(agents_mod, "_render_kenburns_clip",
+                      side_effect=AssertionError(
+                          "Ken Burns must not run when motion mp4s are present")),
+        patch.object(agents_mod.subprocess, "run",
+                      side_effect=_fake_subprocess_run),
+    )
+
+
+def _read_concat_lines(project: _FakeProject) -> List[str]:
+    concat_txt = os.path.join(project.artifacts_dir, "editor.concat.txt")
+    with open(concat_txt, encoding="utf-8") as f:
+        return [ln.rstrip("\n") for ln in f if ln.strip()]
+
+
+def test_run_editor_splices_transition_clips_between_motion_shots():
+    """Three motion shots + two rendered boundaries weaves to
+    motion1, trans1, motion2, trans2, motion3 in the concat list, and
+    the stage result reports transition_clips_used == 2."""
+    from filmmaker import agents
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _FakeProject(tmp)
+        _seed_editor_fixture(p, transitions_mode="both")
+
+        a, b, c = _editor_patches(agents)
+        with a, b, c:
+            r = agents.run_editor(p)
+
+        lines = _read_concat_lines(p)
+        assert len(lines) == 5, lines
+        # concat lines look like: file 'C:/.../000_s01_sh1.mp4'
+        assert lines[0].endswith("000_s01_sh1.mp4'")
+        assert lines[1].endswith("000_s01_sh1_T.mp4'")
+        assert lines[2].endswith("001_s01_sh2.mp4'")
+        assert lines[3].endswith("001_s01_sh2_T.mp4'")
+        assert lines[4].endswith("002_s01_sh3.mp4'")
+        assert r["motion_clips_used"] == 3
+        assert r["transition_clips_used"] == 2
+        assert r["shot_count"] == 3
+
+
+def test_run_editor_without_transitions_artifact_behaves_as_before():
+    """No transitions artifact at all: three motion clips, no morph
+    splices, and transition_clips_used == 0."""
+    from filmmaker import agents
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _FakeProject(tmp)
+        _seed_editor_fixture(p, transitions_mode="absent")
+
+        a, b, c = _editor_patches(agents)
+        with a, b, c:
+            r = agents.run_editor(p)
+
+        lines = _read_concat_lines(p)
+        assert len(lines) == 3, lines
+        assert lines[0].endswith("000_s01_sh1.mp4'")
+        assert lines[1].endswith("001_s01_sh2.mp4'")
+        assert lines[2].endswith("002_s01_sh3.mp4'")
+        assert r["motion_clips_used"] == 3
+        assert r["transition_clips_used"] == 0
+
+
+def test_run_editor_skips_unrendered_transition_rows():
+    """Boundary 1 rendered, boundary 2 skipped: concat is
+    motion1, trans1, motion2, motion3 and transition_clips_used == 1."""
+    from filmmaker import agents
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _FakeProject(tmp)
+        _seed_editor_fixture(p, transitions_mode="first_only")
+
+        a, b, c = _editor_patches(agents)
+        with a, b, c:
+            r = agents.run_editor(p)
+
+        lines = _read_concat_lines(p)
+        assert len(lines) == 4, lines
+        assert lines[0].endswith("000_s01_sh1.mp4'")
+        assert lines[1].endswith("000_s01_sh1_T.mp4'")
+        assert lines[2].endswith("001_s01_sh2.mp4'")
+        assert lines[3].endswith("002_s01_sh3.mp4'")
+        assert r["motion_clips_used"] == 3
+        assert r["transition_clips_used"] == 1

@@ -297,7 +297,7 @@ function ProjectListView({
             </CardTitle>
             <p className="text-[11px] text-zinc-500 mb-3">
               Pick a template to spawn a project with a working brief and the config knobs
-              already set. Edit it from the project view once it's created.
+              already set. Edit it from the project view once it&apos;s created.
             </p>
             <div className="space-y-1.5">
               {templates.slice(0, 4).map((t) => (

@@ -83,7 +83,10 @@ def test_sign_installer_captures_signtool_failure(monkeypatch, tmp_path):
     stub = tmp_path / "signtool.exe"
     stub.write_bytes(b"")
     monkeypatch.setenv("STUDIOLITE_SIGNTOOL", str(stub))
-    ns["subprocess"].run = fake_run  # patch inside the helper's namespace
+    # Patch via monkeypatch so pytest unwinds it; the exec'd namespace
+    # shares the real subprocess module, so a bare assignment would leak
+    # into every subsequent test's subprocess.run.
+    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
 
     result = ns["_sign_installer"](tmp_path / "fake.exe")
     assert result["signed"] is False

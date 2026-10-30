@@ -2991,13 +2991,15 @@ def _load_maya2_if_requested(voice_backend: str, project) -> Optional[_Maya2Wrap
         logger.info("Maya2 wired to HTTP endpoint %s", http_url)
         return _Maya2Wrap(project, mode="http", http_url=http_url)
     try:
-        from maya3_tts import Maya3TTS  # type: ignore
+        from maya3 import Maya3TTS  # type: ignore
     except ImportError as e:
         logger.warning(
-            "Maya2 not installed (%s). Install from "
-            "https://github.com/maya-research/maya2 (Linux + CUDA 12.8 "
-            "required), or point MAYA2_URL=http://host:port at a running "
-            "server. Falling back to XTTS/Piper.", e,
+            "Maya2 not installed (%s). Install with: `pip install "
+            "\"maya3[server] @ git+https://github.com/MayaResearch/"
+            "maya2-native\" --extra-index-url "
+            "https://download.pytorch.org/whl/cu128` (Linux + CUDA 12.8 "
+            "per upstream README). Or point MAYA2_URL=http://host:port "
+            "at a running server. Falling back to XTTS/Piper.", e,
         )
         return None
     model_dir = _MAYA2_MODEL_DIR

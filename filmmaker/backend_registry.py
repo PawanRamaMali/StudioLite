@@ -196,6 +196,16 @@ register(BackendSpec(
     source_url="https://huggingface.co/coqui/XTTS-v2",
     notes="24 kHz, 6s-clip cloning. License is CPML; not drop-in commercial.",
 ))
+register(BackendSpec(
+    stage="voice_actor", name="maya2",
+    license="Apache-2.0", available="shipping",
+    min_vram_gb_fp16=8.0, cloud_burst=True,
+    base_model="maya-research/maya2-native",
+    source_url="https://huggingface.co/maya-research/maya2-native",
+    notes="12 Indian langs + English, 20 built-in voices, zero-shot "
+          "cloning. Native path needs Linux + CUDA 12.8; set MAYA2_URL "
+          "to use the server endpoint from any OS.",
+))
 
 # ---------------------------------------------------------------------------
 # Roadmap entries - not yet wired in a stage runner, but surfaced in the

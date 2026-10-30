@@ -2179,7 +2179,11 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
 
     voice_backend = (project.meta.config.voice_backend or "piper").lower()
 
-    # IndexTTS-2 first if requested - best local prosody, disentangled
+    # Maya2-native: multilingual (12 Indian languages + English), 20 built-in
+    # voices, zero-shot cloning. HTTP endpoint path works from Windows;
+    # native Python path needs Linux + CUDA 12.8.
+    maya2_wrap = _load_maya2_if_requested(voice_backend, project)
+    # IndexTTS-2 next if requested - best local prosody, disentangled
     # emotion control. Auto-bootstraps reference clips from Piper on
     # first use per character. Falls through cleanly if model isn't on
     # disk or the package isn't installed.
@@ -2240,7 +2244,17 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
         ok = False
         err: Optional[str] = None
         backend_used = ""
-        if indextts2_wrap is not None:
+        if maya2_wrap is not None:
+            try:
+                maya2_wrap.synthesize(line["text"], wav_abs, speaker=speaker)
+                _pad_wav_with_silence(wav_abs, head_sec=0.25, tail_sec=0.45)
+                ok = True
+                backend_used = "maya2"
+            except Exception as e:
+                logger.warning("Maya2 synth failed for %s/%s (%s); trying next backend",
+                                sid, shot["id"], e)
+                err = f"maya2: {e}"
+        if not ok and indextts2_wrap is not None:
             try:
                 indextts2_wrap.synthesize(line["text"], wav_abs, speaker=speaker)
                 _pad_wav_with_silence(wav_abs, head_sec=0.25, tail_sec=0.45)
@@ -2249,7 +2263,7 @@ def run_voice_actor(project: Project) -> Dict[str, Any]:
             except Exception as e:
                 logger.warning("IndexTTS-2 synth failed for %s/%s (%s); trying next backend",
                                 sid, shot["id"], e)
-                err = f"indextts2: {e}"
+                err = f"{err or ''}; indextts2: {e}".lstrip("; ")
         if not ok and xtts_wrap is not None:
             try:
                 xtts_wrap.synthesize(line["text"], wav_abs, speaker=speaker)
@@ -2837,6 +2851,173 @@ def _load_xtts_if_requested(voice_backend: str, project) -> Optional[_XTTSWrap]:
         return None
     except Exception as e:
         logger.warning("XTTS load failed (%s); falling back to Piper", e)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Maya2-native (maya-research/maya2-native): autoregressive multilingual TTS
+# with 20 built-in voices across 12 Indian languages + English, plus zero-shot
+# cloning from a short reference clip. Two paths:
+#
+#   1. Native Python: `maya3-tts` package + local weights. Requires Linux +
+#      CUDA 12.8 per upstream README, so this path returns None on Windows
+#      and on boxes where the package isn't importable.
+#   2. HTTP server: the OpenAI-compatible `POST /v1/audio/speech` endpoint
+#      the Maya2 server package exposes. Works from anywhere the user has
+#      network access to a running Maya2 instance (WSL, Docker, remote GPU).
+#      Opt in by setting MAYA2_URL=http://host:port.
+#
+# When both paths fail the wrapper is None and the voice_actor stage falls
+# through to its XTTS / Piper cascade exactly like IndexTTS2 does.
+# ---------------------------------------------------------------------------
+
+_MAYA2_MODEL_DIR = os.path.expanduser(
+    os.environ.get("MAYA2_MODEL_DIR", r"~/models/maya2-native")
+)
+
+# The 20 built-in voices Maya2 ships with. Default language is English; a
+# project can route per-character to any of these via voice_cast entries
+# shaped like {"maya2_voice": "Ahana", "maya2_lang": "hi"}.
+# Source: https://huggingface.co/maya-research/maya2-native
+_MAYA2_DEFAULT_VOICE = "Ahana"
+_MAYA2_DEFAULT_LANG = "en"
+
+
+class _Maya2Wrap:
+    """Shared ``synthesize(text, out_path, speaker=...)`` interface so the
+    voice_actor stage can treat Maya2 interchangeably with XTTS and Piper.
+
+    ``mode`` is 'native' (the loaded Python model) or 'http' (an HTTP client
+    against the OpenAI-compatible speech endpoint). The two modes share the
+    same voice-mapping helpers.
+    """
+
+    def __init__(self, project, *, mode: str, native_tts=None,
+                 http_url: str = ""):
+        self._project = project
+        self._mode = mode
+        self._tts = native_tts
+        self._http_url = http_url.rstrip("/")
+        cast_art = project.read_artifact("voice_cast") or {}
+        self._cast: Dict[str, Dict[str, str]] = cast_art.get("cast") or {}
+
+    def _voice_and_lang_for(self, speaker: str) -> Tuple[str, str]:
+        """Walk the voice_cast artifact for an explicit Maya2 voice/lang
+        assignment, with the same exact→substring→first-word cascade used
+        across the voice loader. Falls back to the global defaults."""
+        sp = speaker.upper().strip()
+        items = [(k, v) for k, v in self._cast.items() if k]
+        picked: Optional[Dict[str, str]] = None
+        for k, v in items:
+            if k.upper().strip() == sp:
+                picked = v; break
+        if picked is None:
+            for k, v in items:
+                ku = k.upper().strip()
+                if sp and (sp in ku or ku in sp):
+                    picked = v; break
+        if picked is None:
+            sp_first = sp.split()[0] if sp else ""
+            for k, v in items:
+                ku_first = k.upper().strip().split()[0] if k.strip() else ""
+                if sp_first and sp_first == ku_first:
+                    picked = v; break
+        if not picked:
+            return (_MAYA2_DEFAULT_VOICE, _MAYA2_DEFAULT_LANG)
+        voice = str(picked.get("maya2_voice")
+                    or picked.get("voice")
+                    or _MAYA2_DEFAULT_VOICE)
+        lang = str(picked.get("maya2_lang") or _MAYA2_DEFAULT_LANG)
+        return (voice, lang)
+
+    def synthesize(self, text: str, out_path: str, *, speaker: str = "") -> None:
+        voice, lang = self._voice_and_lang_for(speaker or "")
+        if self._mode == "http":
+            self._synthesize_http(text, out_path, voice=voice, lang=lang)
+        else:
+            self._synthesize_native(text, out_path, voice=voice, lang=lang)
+
+    def _synthesize_http(self, text: str, out_path: str, *,
+                          voice: str, lang: str) -> None:
+        """Call the Maya2 server's OpenAI-compatible speech endpoint. The
+        upstream server returns raw PCM/WAV bytes we can drop straight to disk."""
+        import requests
+        payload = {
+            "model": "maya2-native",
+            "input": text,
+            "voice": voice,
+            # Maya2's server extends OpenAI's shape with a `language` hint
+            # and an explicit `response_format=wav` so we don't have to
+            # ffmpeg-convert mp3 output.
+            "language": lang,
+            "response_format": "wav",
+        }
+        r = requests.post(f"{self._http_url}/v1/audio/speech",
+                          json=payload, timeout=120)
+        if r.status_code != 200:
+            raise RuntimeError(
+                f"Maya2 HTTP {r.status_code}: {r.text[:200]}"
+            )
+        with open(out_path, "wb") as f:
+            f.write(r.content)
+
+    def _synthesize_native(self, text: str, out_path: str, *,
+                            voice: str, lang: str) -> None:
+        """Invoke the loaded Maya2 Python model."""
+        if self._tts is None:
+            raise RuntimeError("Maya2 native model is not loaded")
+        import soundfile as sf
+        audio = self._tts.generate(
+            text,
+            lang=lang,
+            voice=voice,
+            normalize=True,
+        )
+        # Maya2 returns float32 24kHz mono per the model card.
+        sf.write(out_path, audio, 24000)
+
+
+def _load_maya2_if_requested(voice_backend: str, project) -> Optional[_Maya2Wrap]:
+    """Return a wrapper when ``voice_backend='maya2'``. Prefers the HTTP
+    endpoint (works everywhere) when ``MAYA2_URL`` is set, otherwise tries
+    the native Python loader. Returns None on failure so the caller falls
+    through to XTTS / Piper."""
+    if voice_backend != "maya2":
+        return None
+    http_url = os.environ.get("MAYA2_URL", "").strip()
+    if http_url:
+        # No handshake call - we assume the user set the URL deliberately.
+        # First synth will surface a clean error if the server is down.
+        logger.info("Maya2 wired to HTTP endpoint %s", http_url)
+        return _Maya2Wrap(project, mode="http", http_url=http_url)
+    try:
+        from maya3_tts import Maya3TTS  # type: ignore
+    except ImportError as e:
+        logger.warning(
+            "Maya2 not installed (%s). Install from "
+            "https://github.com/maya-research/maya2 (Linux + CUDA 12.8 "
+            "required), or point MAYA2_URL=http://host:port at a running "
+            "server. Falling back to XTTS/Piper.", e,
+        )
+        return None
+    model_dir = _MAYA2_MODEL_DIR
+    cfg_path = os.path.join(model_dir, "config.json")
+    if not os.path.exists(cfg_path):
+        logger.warning(
+            "Maya2 weights not found at %s. Run: `hf download "
+            "maya-research/maya2-native --local-dir=%s`. Falling back to "
+            "XTTS/Piper.", model_dir, model_dir,
+        )
+        return None
+    try:
+        # max_seats=1 is the single-session mode Maya2's card recommends
+        # for 12 GB-class GPUs; raise it in config when running on larger
+        # cards and sustained throughput matters.
+        tts = Maya3TTS.from_pretrained(model_dir, max_seats=1)
+        logger.info("Maya2-native loaded from %s", model_dir)
+        return _Maya2Wrap(project, mode="native", native_tts=tts)
+    except Exception as e:
+        logger.warning("Maya2 load failed (%s); falling back to XTTS/Piper", e)
         return None
 
 

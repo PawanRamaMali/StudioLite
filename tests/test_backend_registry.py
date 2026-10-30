@@ -26,6 +26,7 @@ def test_core_shipping_backends_present():
         ("composer", "acestep"),
         ("voice_actor", "piper"),
         ("voice_actor", "xtts"),
+        ("voice_actor", "maya2"),
     }
     for stage, name in shipping:
         spec = br.get(stage, name)

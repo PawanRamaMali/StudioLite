@@ -13,19 +13,23 @@ import {
   type Job,
 } from "@/lib/api";
 
+type UpscaleBackend = "auto" | "lanczos" | "realesrgan" | "seedvr2";
+
 interface Preset {
   id: string;
   name: string;
   desc: string;
-  badge: "Fast" | "Quality" | "Ultra" | "Anime";
+  badge: "Fast" | "Quality" | "Ultra" | "Anime" | "SeedVR2";
   scale: 1 | 2 | 3 | 4;
+  backend: UpscaleBackend;
 }
 
 const PRESETS: Preset[] = [
-  { id: "fast_2x",    name: "Fast 2x",    desc: "Lanczos interpolation", badge: "Fast",    scale: 2 },
-  { id: "quality_2x", name: "Quality 2x", desc: "Real-ESRGAN",           badge: "Quality", scale: 2 },
-  { id: "ultra_4x",   name: "Ultra 4x",   desc: "Real-ESRGAN 4x",        badge: "Ultra",   scale: 4 },
-  { id: "anime_4x",   name: "Anime 4x",   desc: "Anime-optimized",       badge: "Anime",   scale: 4 },
+  { id: "fast_2x",    name: "Fast 2x",    desc: "Lanczos resize (CPU)",         badge: "Fast",    scale: 2, backend: "lanczos" },
+  { id: "quality_2x", name: "Quality 2x", desc: "Real-ESRGAN x2",               badge: "Quality", scale: 2, backend: "realesrgan" },
+  { id: "ultra_4x",   name: "Ultra 4x",   desc: "Real-ESRGAN x4",               badge: "Ultra",   scale: 4, backend: "realesrgan" },
+  { id: "anime_4x",   name: "Anime 4x",   desc: "Real-ESRGAN anime-tuned x4",   badge: "Anime",   scale: 4, backend: "realesrgan" },
+  { id: "seedvr2_4k", name: "SeedVR2 4K", desc: "Diffusion restorer, needs GPU", badge: "SeedVR2", scale: 4, backend: "seedvr2" },
 ];
 
 export default function UpscalePanel() {
@@ -68,6 +72,7 @@ export default function UpscalePanel() {
         video_path: upload.video_path,
         scale: preset.scale,
         preset: preset.id,
+        backend: preset.backend,
       });
       setJob(j);
       // Poll every 2 s until the job leaves running/queued.

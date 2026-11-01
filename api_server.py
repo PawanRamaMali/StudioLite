@@ -441,6 +441,20 @@ class UpscaleRequest(BaseModel):
     video_path: str
     scale: int = Field(default=2, ge=1, le=4)
     preset: str = "quality_2x"
+    # Explicit backend override. "auto" picks from the preset table.
+    # Valid: lanczos | realesrgan | seedvr2
+    backend: str = "auto"
+
+
+# Preset id -> (backend, scale). The panel sends preset + backend; backend
+# "auto" resolves from here. Keep in sync with web/components/panels/UpscalePanel.tsx.
+_UPSCALE_PRESET_BACKENDS: dict[str, tuple[str, int]] = {
+    "fast_2x":     ("lanczos",    2),
+    "quality_2x":  ("realesrgan", 2),
+    "ultra_4x":    ("realesrgan", 4),
+    "anime_4x":    ("realesrgan", 4),
+    "seedvr2_4k":  ("seedvr2",    4),
+}
 
 
 class ExtractAudioRequest(BaseModel):
@@ -1602,49 +1616,119 @@ def _run_merge(job_id: str, req: MergeRequest):
         )
 
 
+def _run_upscale_lanczos(job_id: str, req: UpscaleRequest,
+                          output_path: str, *, scale: int) -> None:
+    """Fast fallback: moviepy's lanczos resize. Not AI super-resolution,
+    but it works everywhere and keeps the Fast 2x preset meaningful."""
+    from moviepy.editor import VideoFileClip
+
+    clip = VideoFileClip(req.video_path)
+    new_width = int(clip.w * scale)
+    new_height = int(clip.h * scale)
+    _update_job(
+        job_id,
+        progress=20,
+        message=f"Lanczos resize {clip.w}x{clip.h} -> {new_width}x{new_height}...",
+    )
+    resized = clip.resize((new_width, new_height))
+    resized.write_videofile(
+        output_path,
+        codec="libx264",
+        audio_codec="aac" if resized.audio else None,
+        bitrate="8000k",
+        logger=None,
+    )
+    resized.close()
+    clip.close()
+    _update_job(
+        job_id,
+        status="completed",
+        progress=100,
+        message="Upscale complete (lanczos).",
+        result={
+            "video_path": output_path,
+            "backend": "lanczos",
+            "scale": scale,
+            "new_resolution": f"{new_width}x{new_height}",
+        },
+    )
+
+
 def _run_upscale(job_id: str, req: UpscaleRequest):
     try:
-        _update_job(job_id, status="running", message="Upscaling video...")
+        _update_job(job_id, status="running", message="Starting upscale...")
 
         if not os.path.isfile(req.video_path):
             raise FileNotFoundError(f"Video not found: {req.video_path}")
 
-        from moviepy.editor import VideoFileClip
-
-        clip = VideoFileClip(req.video_path)
-        new_width = int(clip.w * req.scale)
-        new_height = int(clip.h * req.scale)
-
-        _update_job(
-            job_id,
-            progress=20,
-            message=f"Resizing from {clip.w}x{clip.h} to {new_width}x{new_height}...",
+        preset_backend, preset_scale = _UPSCALE_PRESET_BACKENDS.get(
+            req.preset, ("lanczos", req.scale)
         )
-
-        resized = clip.resize((new_width, new_height))
+        backend = (req.backend or "auto").lower()
+        if backend == "auto":
+            backend = preset_backend
+        # Preset's scale wins when the request still has the default of 2
+        # (the panel's Ultra 4x and SeedVR2 4K presets should imply 4).
+        scale = req.scale if req.scale != 2 else preset_scale
         output_path = os.path.join(OUTPUT_DIR, f"upscaled_{job_id}.mp4")
-        resized.write_videofile(
-            output_path,
-            codec="libx264",
-            audio_codec="aac" if resized.audio else None,
-            bitrate="8000k",
-            logger=None,
-        )
-        resized.close()
-        clip.close()
 
-        _update_job(
-            job_id,
-            status="completed",
-            progress=100,
-            message="Upscale complete.",
-            result={
-                "video_path": output_path,
-                "original_resolution": f"{clip.w}x{clip.h}",
-                "new_resolution": f"{new_width}x{new_height}",
-                "scale": req.scale,
-            },
-        )
+        if backend == "lanczos":
+            _run_upscale_lanczos(job_id, req, output_path, scale=scale)
+            return
+
+        if backend == "realesrgan":
+            _update_job(
+                job_id,
+                progress=10,
+                message=f"Real-ESRGAN x{scale}: loading weights...",
+            )
+            from filmmaker.agents import upscale_file_realesrgan
+            result = upscale_file_realesrgan(req.video_path, output_path, scale=scale)
+            if not result.get("ok"):
+                raise RuntimeError(result.get("error") or "Real-ESRGAN failed")
+            _update_job(
+                job_id,
+                status="completed",
+                progress=100,
+                message=f"Real-ESRGAN x{result['scale']} complete.",
+                result={
+                    "video_path": output_path,
+                    "backend": result["backend"],
+                    "scale": result["scale"],
+                },
+            )
+            return
+
+        if backend == "seedvr2":
+            _update_job(
+                job_id,
+                progress=10,
+                message="SeedVR2: running local engine...",
+            )
+            from filmmaker.agents import upscale_file_seedvr2
+            result = upscale_file_seedvr2(req.video_path, output_path)
+            if not result.get("ok"):
+                # Prefer the install hint so the user sees the fix, not just
+                # a bare 'SeedVR2 not installed' error.
+                raise RuntimeError(
+                    result.get("install_hint")
+                    or result.get("error")
+                    or "SeedVR2 failed"
+                )
+            _update_job(
+                job_id,
+                status="completed",
+                progress=100,
+                message="SeedVR2 complete.",
+                result={
+                    "video_path": output_path,
+                    "backend": "seedvr2",
+                    "variant": result.get("variant", "3b"),
+                },
+            )
+            return
+
+        raise ValueError(f"Unknown upscale backend: {backend}")
     except Exception as exc:
         _update_job(
             job_id,

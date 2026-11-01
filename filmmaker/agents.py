@@ -5218,6 +5218,81 @@ def _upscale_video_realesrgan(model, src_abs: str, out_abs: str,
     logger.info("upscale done: %d frames -> %s", frame_count, out_abs)
 
 
+def upscale_file_realesrgan(src_abs: str, out_abs: str, *, scale: int) -> Dict[str, Any]:
+    """Standalone Real-ESRGAN upscale on one video file. Mirrors the
+    pipeline's run_upscale realesrgan branch but takes raw paths instead
+    of a Project, so the one-off `/api/v1/edit/upscale` endpoint can
+    reuse the same model-loading, weight-fetch and ffmpeg-pipe code.
+
+    Returns {ok, backend, scale, output_path} on success or
+    {ok: False, error} on any failure. Never raises."""
+    if scale not in (2, 4):
+        return {"ok": False, "error": f"realesrgan scale must be 2 or 4, got {scale}"}
+    if not os.path.isfile(src_abs):
+        return {"ok": False, "error": f"source not found: {src_abs}"}
+
+    weight_name = f"RealESRGAN_x{scale}.pth"
+    weight_path = os.path.join(_REALESRGAN_MODEL_DIR, weight_name)
+    if not os.path.exists(weight_path):
+        try:
+            from huggingface_hub import hf_hub_download
+            hf_hub_download("ai-forever/Real-ESRGAN", weight_name,
+                             local_dir=_REALESRGAN_MODEL_DIR)
+        except Exception as e:
+            return {"ok": False, "error": f"weights unavailable: {e}"}
+
+    try:
+        from spandrel import ModelLoader
+        import torch as _torch
+    except ImportError as e:
+        return {"ok": False, "error": f"spandrel/torch import failed: {e}"}
+
+    device = "cuda" if _torch.cuda.is_available() else "cpu"
+    model = ModelLoader().load_from_file(weight_path)
+    model.to(device).eval()
+    try:
+        _upscale_video_realesrgan(model, src_abs, out_abs, device=device)
+    except Exception as e:
+        return {"ok": False, "error": f"realesrgan run failed: {e}"}
+
+    if not (os.path.exists(out_abs) and os.path.getsize(out_abs) > 1024):
+        return {"ok": False, "error": "upscale produced no output"}
+    return {"ok": True, "backend": f"realesrgan_x{scale}",
+            "scale": model.scale, "output_path": out_abs}
+
+
+def upscale_file_seedvr2(src_abs: str, out_abs: str, *,
+                          variant: str = "3b",
+                          config_path: Optional[str] = None) -> Dict[str, Any]:
+    """Standalone SeedVR2 upscale on one video file. Reads config from
+    `config_path` or ``~/.studiolite/upscale-seedvr2/config.json``.
+    Returns {ok, backend, variant, output_path} on success or
+    {ok: False, error, install_hint?} on any failure. Never raises."""
+    if not os.path.isfile(src_abs):
+        return {"ok": False, "error": f"source not found: {src_abs}"}
+    if not config_path:
+        config_path = os.path.expanduser(
+            "~/.studiolite/upscale-seedvr2/config.json"
+        )
+    cfg = _load_json_file(config_path)
+    if not cfg or not _check_seedvr2_local(cfg):
+        install_hint = (
+            "SeedVR2 is GPU-only. Drop a config.json at "
+            f"{config_path} with keys: repo_dir, venv_python, model_path, "
+            "variant (3b|7b). Point them at a ComfyUI install with "
+            "numz/SeedVR2_comfyUI + cmeka/SeedVR2-GGUF."
+        )
+        return {"ok": False, "error": "SeedVR2 not installed locally",
+                "install_hint": install_hint}
+    cfg = {**cfg, "variant": variant}
+    local_result = _run_seedvr2_local(cfg, src_abs, out_abs)
+    if local_result is None:
+        return {"ok": False,
+                "error": "SeedVR2 local run failed; see server log for details"}
+    return {"ok": True, "backend": "seedvr2", "variant": variant,
+            "output_path": out_abs, **local_result}
+
+
 def _render_title_card(out_path: str, *, title: str, subtitle: str, duration: float) -> None:
     """Black 1280x720 card with the title fading in for the first second,
     holding, then fading out. Optional subtitle underneath.

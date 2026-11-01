@@ -323,7 +323,12 @@ export const uploadEditVideo = (file: File) =>
 export const uploadEditAudio = (file: File) =>
   _uploadFile<EditAudioUploadResponse>("/api/v1/edit/upload-audio", file);
 
-export const upscaleVideo = (params: { video_path: string; scale: 1 | 2 | 3 | 4; preset: string }) =>
+export const upscaleVideo = (params: {
+  video_path: string;
+  scale: 1 | 2 | 3 | 4;
+  preset: string;
+  backend?: "auto" | "lanczos" | "realesrgan" | "seedvr2";
+}) =>
   apiFetch<Job>("/api/v1/edit/upscale", { method: "POST", body: JSON.stringify(params) });
 
 // Keyframe animation ------------------------------------------------------

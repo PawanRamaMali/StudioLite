@@ -391,6 +391,7 @@ class StoryRequest(BaseModel):
     quality_preset: str = "standard"  # draft, standard, high
     enable_upscale: bool = False  # Post-process upscale with Real-ESRGAN
     enable_interpolation: bool = False  # RIFE frame interpolation for smoother motion
+    interpolation_multiplier: int = 2  # RIFE output fps multiplier: 2, 4, or 8
     # Engine override - "auto" picks best available (Wan 2.2 > Hunyuan 1.5 > LTX-2.3 > VACE > T2V).
     # Map quality tiers: "draft" -> LTX-2.3, "balanced" -> Hunyuan 1.5, "quality" -> Wan 2.2.
     video_engine: str = "auto"
@@ -1321,58 +1322,43 @@ Return ONLY valid JSON (close all brackets):
                 return
 
         if enable_interp:
-            _update_job(job_id, progress=97, message="Interpolating frames (RIFE 2x)...")
-            try:
-                from rife_ncnn_vulkan_python import Rife
-                # Double the frame rate by interpolating between every pair of frames
-                from video_editor import extract_frames, frames_to_video
-                from PIL import Image as PILImage
-                import numpy as np
-                import tempfile
+            mult = int(getattr(req, "interpolation_multiplier", 2) or 2)
+            _update_job(job_id, progress=97,
+                        message=f"Interpolating frames (RIFE {mult}x)...")
+            from filmmaker.rife import interpolate_video
+            interp_out = os.path.join(OUTPUT_DIR, f"story_smooth_{job_id}.mp4")
 
-                frames_dir = tempfile.mkdtemp()
-                frame_paths = extract_frames(final_video, frames_dir)
+            def _rife_progress(cur: int, tot: int, msg: str) -> None:
+                _update_job(
+                    job_id,
+                    progress=97 + int((cur / max(tot, 1)) * 2),
+                    message=f"RIFE: {msg}",
+                )
 
-                if len(frame_paths) > 1:
-                    rife = Rife(gpuid=0)
-                    interp_frames = []
-                    for fi in range(len(frame_paths)):
-                        interp_frames.append(frame_paths[fi])
-                        if fi < len(frame_paths) - 1:
-                            img0 = PILImage.open(frame_paths[fi])
-                            img1 = PILImage.open(frame_paths[fi + 1])
-                            mid = rife.process(np.array(img0), np.array(img1))
-                            mid_path = os.path.join(frames_dir, f"interp_{fi:05d}.png")
-                            PILImage.fromarray(mid).save(mid_path)
-                            interp_frames.append(mid_path)
-                        _update_job(
-                            job_id, progress=97 + int((fi / len(frame_paths)) * 2),
-                            message=f"Interpolating frame {fi+1}/{len(frame_paths)}",
-                        )
-
-                    interp_video = os.path.join(OUTPUT_DIR, f"story_interp_{job_id}.mp4")
-                    frames_to_video(interp_frames, interp_video, fps=req_fps * 2)
-
-                    # Preserve audio from original
-                    from moviepy.editor import VideoFileClip, AudioFileClip
-                    orig_clip = VideoFileClip(final_video)
-                    if orig_clip.audio:
-                        interp_clip = VideoFileClip(interp_video)
-                        interp_clip = interp_clip.set_audio(orig_clip.audio)
-                        final_interp = os.path.join(OUTPUT_DIR, f"story_smooth_{job_id}.mp4")
-                        interp_clip.write_videofile(final_interp, codec="libx264", audio_codec="aac", logger=None)
-                        interp_clip.close()
-                        final_video = final_interp
-                    else:
-                        final_video = interp_video
-                    orig_clip.close()
-
-                    _update_job(job_id, progress=99, message=f"Frame interpolation done ({req_fps}→{req_fps*2} fps)")
-            except ImportError:
-                _update_job(job_id, progress=99, message="RIFE not installed, skipping interpolation (pip install rife-ncnn-vulkan-python)")
-            except Exception as e:
-                _update_job(job_id, status="failed", error=f"Frame interpolation failed: {e}",
-                    message=f"RIFE interpolation failed: {e}. Install rife-ncnn-vulkan-python or disable interpolation.")
+            result = interpolate_video(
+                final_video, interp_out,
+                multiplier=mult,
+                progress_callback=_rife_progress,
+            )
+            if result.get("ok"):
+                final_video = result["output_path"]
+                _update_job(
+                    job_id, progress=99,
+                    message=(f"Frame interpolation done "
+                             f"({result.get('fps_in') or req_fps:.0f}"
+                             f"→{result.get('fps_out') or req_fps*mult:.0f} fps)"),
+                )
+            elif "install_hint" in result:
+                # RIFE not installed on this machine: don't fail the whole
+                # story job over an optional smoothness pass.
+                _update_job(job_id, progress=99,
+                            message=(f"RIFE skipped: {result['error']}. "
+                                     f"{result['install_hint']}"))
+                enable_interp = False  # keep the summary line honest
+            else:
+                _update_job(job_id, status="failed",
+                            error=f"Frame interpolation failed: {result.get('error')}",
+                            message=f"RIFE interpolation failed: {result.get('error')}")
                 return
 
         _update_job(

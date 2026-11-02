@@ -151,6 +151,7 @@ export default function StoryPanel() {
   const [qualityPreset, setQualityPreset] = useState("standard");
   const [enableUpscale, setEnableUpscale] = useState(false);
   const [enableInterpolation, setEnableInterpolation] = useState(false);
+  const [interpolationMultiplier, setInterpolationMultiplier] = useState<2 | 4 | 8>(2);
 
   // Video engine selector (auto / wan22 / hunyuan15 / ltx23)
   const [videoEngine, setVideoEngine] = useState<string>("auto");
@@ -524,6 +525,7 @@ export default function StoryPanel() {
         quality_preset: qualityPreset,
         enable_upscale: enableUpscale,
         enable_interpolation: enableInterpolation,
+        interpolation_multiplier: interpolationMultiplier,
         video_engine: videoEngine,
         enable_lip_sync: enableLipSync,
       });
@@ -994,7 +996,9 @@ export default function StoryPanel() {
                   <label className="flex items-center justify-between cursor-pointer py-1">
                     <div>
                       <span className="text-xs text-zinc-300">Smooth Motion (RIFE)</span>
-                      <span className="text-[10px] text-zinc-600 block">Frame interpolation {fps}→{fps * 2}fps</span>
+                      <span className="text-[10px] text-zinc-600 block">
+                        Frame interpolation {fps}→{fps * interpolationMultiplier}fps
+                      </span>
                     </div>
                     <button onClick={() => setEnableInterpolation(!enableInterpolation)}
                       className={`w-8 h-4 rounded-full transition-colors flex items-center ${
@@ -1003,6 +1007,24 @@ export default function StoryPanel() {
                       <span className="w-3 h-3 rounded-full bg-white mx-0.5 block" />
                     </button>
                   </label>
+                  {enableInterpolation && (
+                    <div className="flex items-center gap-1 pl-1 pb-1">
+                      <span className="text-[10px] text-zinc-500 mr-1">Multiplier:</span>
+                      {([2, 4, 8] as const).map((m) => (
+                        <button
+                          key={m}
+                          onClick={() => setInterpolationMultiplier(m)}
+                          className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+                            interpolationMultiplier === m
+                              ? "border-amber-500 bg-amber-500/10 text-amber-200"
+                              : "border-zinc-700 text-zinc-400 hover:border-zinc-600"
+                          }`}
+                        >
+                          {m}x
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   <label className={`flex items-center justify-between py-1 ${lipSyncAvailable ? "cursor-pointer" : "opacity-50 cursor-not-allowed"}`}>
                     <div>
                       <span className="text-xs text-zinc-300">Lip Sync (LatentSync 1.6)</span>

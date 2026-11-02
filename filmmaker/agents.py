@@ -4193,9 +4193,9 @@ def run_upscale(project: Project) -> Dict[str, Any]:
     if not os.path.exists(weight_path):
         # Try to pull it from HF on demand - small file, one-off cost.
         try:
-            from huggingface_hub import hf_hub_download
-            hf_hub_download("ai-forever/Real-ESRGAN", weight_name,
-                             local_dir=_REALESRGAN_MODEL_DIR)
+            from hf_download import hf_download
+            hf_download("ai-forever/Real-ESRGAN", weight_name,
+                        local_dir=_REALESRGAN_MODEL_DIR)
         except Exception as e:
             logger.warning("Real-ESRGAN weights unavailable (%s); skipping upscale", e)
             return {"backend": backend, "skipped": f"weights: {e}",
@@ -5235,9 +5235,9 @@ def upscale_file_realesrgan(src_abs: str, out_abs: str, *, scale: int) -> Dict[s
     weight_path = os.path.join(_REALESRGAN_MODEL_DIR, weight_name)
     if not os.path.exists(weight_path):
         try:
-            from huggingface_hub import hf_hub_download
-            hf_hub_download("ai-forever/Real-ESRGAN", weight_name,
-                             local_dir=_REALESRGAN_MODEL_DIR)
+            from hf_download import hf_download
+            hf_download("ai-forever/Real-ESRGAN", weight_name,
+                        local_dir=_REALESRGAN_MODEL_DIR)
         except Exception as e:
             return {"ok": False, "error": f"weights unavailable: {e}"}
 

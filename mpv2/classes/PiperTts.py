@@ -79,7 +79,7 @@ def download_piper_model(voice_name):
 
     Returns path to the .onnx model file.
     """
-    from huggingface_hub import hf_hub_download
+    from hf_download import hf_download
 
     if voice_name not in PIPER_VOICES:
         raise ValueError(f"Unknown voice: {voice_name}. Available: {list(PIPER_VOICES.keys())}")
@@ -111,7 +111,7 @@ def download_piper_model(voice_name):
         print(f"Downloading Piper voice model: {voice_name} ({model_name})...")
         try:
             # Download from HuggingFace
-            downloaded = hf_hub_download(
+            downloaded = hf_download(
                 repo_id=repo_id,
                 filename=f"{hf_subdir}/{model_file}",
                 local_dir=str(models_dir),
@@ -127,7 +127,7 @@ def download_piper_model(voice_name):
 
     if not config_path.exists():
         try:
-            downloaded = hf_hub_download(
+            downloaded = hf_download(
                 repo_id=repo_id,
                 filename=f"{hf_subdir}/{config_file}",
                 local_dir=str(models_dir),

@@ -340,12 +340,13 @@ def download_model(model_key: str, progress_callback=None, cancel_event=None) ->
         }
 
     try:
-        from huggingface_hub import HfApi, hf_hub_download, snapshot_download
+        from huggingface_hub import HfApi
     except ImportError as e:
         raise RuntimeError(f"huggingface_hub not installed: {e}") from e
+    from hf_download import hf_download, hf_snapshot, hf_token
 
     total_bytes = estimate_download_size(model_key)  # 0 if unknown
-    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    token = hf_token()
 
     # Enumerate files so we can check cancel_event between them. If the
     # metadata call fails (network / gated / rate-limit) fall back to the
@@ -399,7 +400,7 @@ def download_model(model_key: str, progress_callback=None, cancel_event=None) ->
                 if cancel_event is not None and cancel_event.is_set():
                     raise DownloadCancelled(f"Cancelled at {rfilename}")
                 try:
-                    path = hf_hub_download(
+                    path = hf_download(
                         repo_id=hf_id,
                         filename=rfilename,
                         token=token,
@@ -411,7 +412,7 @@ def download_model(model_key: str, progress_callback=None, cancel_event=None) ->
             # Metadata call failed - fall back to snapshot_download without
             # cancel support. Still respects resume_download.
             try:
-                path = snapshot_download(
+                path = hf_snapshot(
                     repo_id=hf_id,
                     token=token,
                     resume_download=True,

@@ -200,10 +200,10 @@ def list_ollama_models():
 
 def download_image_model(model_id: str, filename: str = None) -> str:
     """Download an SDXL model from Hugging Face."""
-    from huggingface_hub import hf_hub_download
+    from hf_download import hf_download
     models_dir = os.path.join(ROOT_DIR, "models")
     os.makedirs(models_dir, exist_ok=True)
-    return hf_hub_download(
+    return hf_download(
         repo_id=model_id,
         filename=filename,
         local_dir=models_dir,

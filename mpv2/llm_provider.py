@@ -157,14 +157,15 @@ def download_model(model_id: str, filename: str = None, progress_callback=None) 
     Returns:
         Path to the downloaded model file
     """
-    from huggingface_hub import hf_hub_download, list_repo_files
+    from huggingface_hub import list_repo_files
+    from hf_download import hf_download, hf_token
 
     models_dir = get_models_dir()
     models_dir.mkdir(parents=True, exist_ok=True)
 
     # If no filename specified, find a good GGUF file
     if filename is None:
-        files = list_repo_files(model_id)
+        files = list_repo_files(model_id, token=hf_token())
         gguf_files = [f for f in files if f.endswith(".gguf")]
 
         # Prefer Q4_K_M quantization (good balance of quality/size)
@@ -177,7 +178,7 @@ def download_model(model_id: str, filename: str = None, progress_callback=None) 
             raise RuntimeError(f"No GGUF files found in {model_id}")
 
     # Download
-    local_path = hf_hub_download(
+    local_path = hf_download(
         repo_id=model_id,
         filename=filename,
         local_dir=str(models_dir),

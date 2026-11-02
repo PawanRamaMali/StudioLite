@@ -463,6 +463,25 @@ class ExtractAudioRequest(BaseModel):
     format: str = "wav"  # wav | mp3
 
 
+class CaptionRequest(BaseModel):
+    video_path: str
+    # If omitted, auto-transcribe via faster-whisper on the video's audio.
+    srt_path: Optional[str] = None
+    language: Optional[str] = None  # ISO code, or null for auto-detect
+    # Styling for the burned-in subtitles. See captions.CaptionStyle for defaults.
+    font_name: str = "Arial"
+    font_size: int = Field(default=24, ge=8, le=96)
+    font_color: str = "white"
+    outline_color: str = "black"
+    outline_width: int = Field(default=2, ge=0, le=6)
+    bold: bool = False
+    italic: bool = False
+    # libass numpad: 2=bottom-centre, 8=top-centre, 5=middle. The panel
+    # exposes top/middle/bottom.
+    position: str = "bottom"  # top | middle | bottom
+    margin_v: int = Field(default=32, ge=0, le=400)
+
+
 class VideoPathRequest(BaseModel):
     video_path: str
 
@@ -1950,6 +1969,89 @@ def _run_extract_audio(job_id: str, req: ExtractAudioRequest):
         )
     except Exception as exc:
         _update_job(job_id, status="failed", error=str(exc), message=f"Audio extraction failed: {exc}")
+
+
+def _run_caption(job_id: str, req: "CaptionRequest"):
+    """Burn captions into req.video_path. Transcribes with
+    faster-whisper if no SRT was supplied."""
+    try:
+        _update_job(job_id, status="running", progress=5,
+                     message="Preparing captions...")
+        _require_video_path(req.video_path)
+
+        from captions import (
+            CaptionStyle,
+            burn_captions_into_video,
+            write_srt_file,
+        )
+
+        pos_map = {"top": 8, "middle": 5, "bottom": 2}
+        style = CaptionStyle(
+            font_name=req.font_name,
+            font_size=req.font_size,
+            primary_color=req.font_color,
+            outline_color=req.outline_color,
+            outline_width=req.outline_width,
+            bold=req.bold,
+            italic=req.italic,
+            alignment=pos_map.get(req.position.lower(), 2),
+            margin_v=req.margin_v,
+        )
+
+        srt_path = req.srt_path
+        segments: Optional[list] = None
+        if not srt_path:
+            _update_job(job_id, progress=15,
+                         message="Transcribing with faster-whisper...")
+            from transcriber import Transcriber, TranscriptionConfig
+            cfg = TranscriptionConfig(language=req.language)
+            transcriber = Transcriber(cfg)
+            result = transcriber.transcribe(
+                req.video_path,
+                progress_callback=lambda m: _update_job(
+                    job_id, message=f"Whisper: {m}"
+                ),
+            )
+            if not result.get("success"):
+                raise RuntimeError(
+                    f"transcription failed: {result.get('error') or 'unknown'}"
+                )
+            segments = result.get("segments") or []
+            if not segments:
+                raise RuntimeError("no speech found in audio track")
+            # Persist the SRT next to the output so the user can grab it.
+            srt_path = os.path.join(OUTPUT_DIR, f"captions_{job_id}.srt")
+            write_srt_file(segments, srt_path)
+        elif not os.path.isfile(srt_path):
+            raise FileNotFoundError(f"SRT not found: {srt_path}")
+
+        _update_job(job_id, progress=60,
+                     message="Burning captions with ffmpeg...")
+        output_path = os.path.join(OUTPUT_DIR, f"captioned_{job_id}.mp4")
+        result = burn_captions_into_video(
+            req.video_path, output_path,
+            srt_path=srt_path,
+            style=style,
+        )
+        if not result.get("ok"):
+            hint = result.get("install_hint")
+            msg = result.get("error") or "caption burn failed"
+            raise RuntimeError(f"{msg}{(' - ' + hint) if hint else ''}")
+
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Captions burned in.",
+            result={
+                "video_path": output_path,
+                "srt_path": result["srt_path"],
+                "backend": result["backend"],
+            },
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc),
+                     message=f"Caption burn failed: {exc}")
 
 
 def _run_remove_audio(job_id: str, req: VideoPathRequest):
@@ -3468,6 +3570,23 @@ async def edit_extract_audio(req: ExtractAudioRequest):
         raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
     job_id = _create_job("extract_audio", req.model_dump())
     thread = threading.Thread(target=_run_extract_audio, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/caption", response_model=JobResponse)
+async def edit_caption(req: CaptionRequest):
+    """Burn captions into a video. If `srt_path` is omitted the audio
+    is transcribed via faster-whisper and the resulting SRT is both
+    saved alongside the output and reported in the job result."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422,
+                            detail=f"Video file not found: {req.video_path}")
+    if req.srt_path and not os.path.isfile(req.srt_path):
+        raise HTTPException(status_code=422,
+                            detail=f"SRT not found: {req.srt_path}")
+    job_id = _create_job("caption", req.model_dump())
+    thread = threading.Thread(target=_run_caption, args=(job_id, req), daemon=True)
     thread.start()
     return _job_response(job_id)
 

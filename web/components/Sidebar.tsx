@@ -5,7 +5,7 @@ import {
   Home, Video, Wand2, BookOpen, Scissors, Music, ArrowUpCircle,
   Users, KeyRound, Briefcase, Settings, ChevronLeft, ChevronRight,
   Sparkles, Image as ImageIcon, Radio, ScanText, FileVideo, Cpu,
-  Film, LayoutList, Library, Server, Gauge, Mic,
+  Film, LayoutList, Library, Server, Gauge, Mic, Captions,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getSystemStatus, type SystemStatus } from "@/lib/api";
@@ -32,6 +32,7 @@ const NAV_ITEMS: { id: string; label: string; icon: typeof Video; group: string;
   { id: "screen-transcribe", label: "Screen Transcribe", icon: ScanText, group: "Tools" },
   { id: "video-transcribe", label: "Video Transcribe", icon: FileVideo, group: "Tools" },
   { id: "upscale", label: "Upscale Video", icon: ArrowUpCircle, group: "Tools" },
+  { id: "captions", label: "Auto Captions", icon: Captions, group: "Tools" },
   { id: "characters", label: "Characters", icon: Users, group: "Assets" },
   { id: "keyframes", label: "Keyframes", icon: KeyRound, group: "Assets" },
   { id: "library", label: "Library", icon: Library, group: "Assets" },

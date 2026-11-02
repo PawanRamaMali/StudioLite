@@ -331,6 +331,22 @@ export const upscaleVideo = (params: {
 }) =>
   apiFetch<Job>("/api/v1/edit/upscale", { method: "POST", body: JSON.stringify(params) });
 
+export const captionVideo = (params: {
+  video_path: string;
+  srt_path?: string | null;
+  language?: string | null;
+  font_name?: string;
+  font_size?: number;
+  font_color?: string;
+  outline_color?: string;
+  outline_width?: number;
+  bold?: boolean;
+  italic?: boolean;
+  position?: "top" | "middle" | "bottom";
+  margin_v?: number;
+}) =>
+  apiFetch<Job>("/api/v1/edit/caption", { method: "POST", body: JSON.stringify(params) });
+
 // Keyframe animation ------------------------------------------------------
 
 export interface ImageUploadResponse {

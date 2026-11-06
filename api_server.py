@@ -3131,6 +3131,46 @@ class TalkingHeadRequest(BaseModel):
     inference_steps: int = Field(default=20, ge=4, le=60)
 
 
+class MotionStrokeRequest(BaseModel):
+    """One arrow stroke in normalized (0..1) image coordinates."""
+    x0: float = Field(ge=-0.5, le=1.5)
+    y0: float = Field(ge=-0.5, le=1.5)
+    x1: float = Field(ge=-0.5, le=1.5)
+    y1: float = Field(ge=-0.5, le=1.5)
+    label: str = ""
+
+
+class MotionBrushRequest(BaseModel):
+    """Translate arrow strokes into a motion-prompt suffix."""
+    strokes: list[MotionStrokeRequest] = Field(default_factory=list)
+    base_prompt: str = ""
+    min_length: float = Field(default=0.02, ge=0.0, le=0.3)
+
+
+@app.post("/api/v1/motion-brush/apply")
+async def motion_brush_apply(req: MotionBrushRequest):
+    """Convert arrow strokes to a motion-prompt suffix (and the final prompt).
+
+    Pure: no job queued. The frontend can post the user's strokes alongside
+    the current prompt and get back the enriched prompt ready to send to
+    Story Mode or the single-clip generator.
+    """
+    import motion_brush
+    strokes = [
+        motion_brush.MotionStroke(
+            x0=s.x0, y0=s.y0, x1=s.x1, y1=s.y1, label=s.label,
+        )
+        for s in req.strokes
+    ]
+    strokes = motion_brush.dedupe_strokes(strokes, min_length=req.min_length)
+    suffix = motion_brush.format_prompt_suffix(strokes)
+    return {
+        "suffix": suffix,
+        "final_prompt": (req.base_prompt or "").rstrip(" .,") + suffix,
+        "stroke_count": len(strokes),
+    }
+
+
 class AmbientAudioRequest(BaseModel):
     """Generate ambient/foley audio from a text prompt (AudioLDM2 or Stable Audio)."""
     prompt: str

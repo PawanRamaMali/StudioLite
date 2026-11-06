@@ -1705,6 +1705,23 @@ export const previewGenerate = (params: PreviewParams) =>
 export const previewDefaults = (engine: string) =>
   apiFetch<Record<string, unknown>>(`/api/v1/preview/defaults?engine=${encodeURIComponent(engine)}`);
 
+// Motion brush: arrow strokes -> prompt suffix
+export interface MotionStrokeInput {
+  x0: number; y0: number; x1: number; y1: number; label?: string;
+}
+
+export interface MotionBrushParams {
+  strokes: MotionStrokeInput[];
+  base_prompt?: string;
+  min_length?: number;
+}
+
+export const applyMotionBrush = (params: MotionBrushParams) =>
+  apiFetch<{ suffix: string; final_prompt: string; stroke_count: number }>(
+    "/api/v1/motion-brush/apply",
+    { method: "POST", body: JSON.stringify(params) },
+  );
+
 // AudioLDM2 / Stable Audio Open ambient-audio generation
 export interface AmbientStatus {
   backends: string[];

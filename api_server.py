@@ -3100,6 +3100,74 @@ async def audio_snap_to_beats(req: SnapToBeatsRequest):
     return {"snapped": snapped}
 
 
+class PreviewGenerateRequest(BaseModel):
+    """Fast low-res proxy render for iteration."""
+    prompt: str
+    engine: str = "ltx23_distilled_gguf"  # fastest draft tier
+    aspect: str = "9:16"
+    target_duration_s: float = Field(default=1.0, ge=0.3, le=4.0)
+    seed: Optional[int] = None
+
+
+@app.get("/api/v1/preview/defaults")
+async def preview_defaults_route(engine: str = "ltx23_distilled_gguf"):
+    """Describe the preview settings used for ``engine`` (steps, fps, dims, aspects)."""
+    import preview_generator
+    return preview_generator.preview_defaults(engine)
+
+
+@app.post("/api/v1/preview/generate", response_model=JobResponse)
+async def preview_generate(req: PreviewGenerateRequest):
+    """Kick off a tiny low-res draft so the user can iterate on prompt choice.
+
+    Reuses the real scene-video pipeline but with aggressively-trimmed config
+    (small dims, few steps, few frames). Expected wall-clock: 4-20 seconds
+    depending on engine, vs. minutes for a full render.
+    """
+    import preview_generator
+    cfg = preview_generator.build_preview_config(
+        prompt=req.prompt, engine=req.engine, aspect=req.aspect,
+        target_duration_s=req.target_duration_s, seed=req.seed,
+    )
+
+    def _runner(job_id: str):
+        try:
+            _update_job(job_id, status="running", progress=5, message="Preview: loading engine...")
+            from scene_generator import generate_scene_video
+            path = generate_scene_video(
+                prompt=req.prompt,
+                target_duration=cfg.target_duration_s,
+                fps=cfg.fps,
+                num_inference_steps=cfg.num_inference_steps,
+                guidance_scale=cfg.guidance_scale,
+                seed=cfg.seed,
+                preferred_engine=cfg.engine,
+                width=cfg.width, height=cfg.height,
+                progress_callback=lambda s, t, m: _update_job(
+                    job_id, progress=5 + int((s / t) * 90),
+                    message=f"Preview: {m}",
+                ),
+            )
+            _update_job(
+                job_id, status="completed", progress=100,
+                message="Preview ready",
+                result={
+                    "output_path": path,
+                    "config": cfg.__dict__,
+                    "download_url": f"/api/v1/download/video?path={path}",
+                },
+            )
+        except Exception as e:
+            _update_job(job_id, status="failed", error=str(e),
+                        message=f"Preview failed: {e}")
+            traceback.print_exc()
+
+    job_id = _create_job("preview", {**req.model_dump(), "config": cfg.__dict__})
+    thread = threading.Thread(target=_runner, args=(job_id,), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
 @app.post("/api/v1/beats/{template_id}/preview")
 async def preview_beat_template(template_id: str, total_duration_s: float = 30.0):
     """Expand a beat template into concrete scene stubs with durations.

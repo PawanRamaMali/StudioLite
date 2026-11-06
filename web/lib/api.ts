@@ -1684,6 +1684,24 @@ export const buildKaraokeCaptions = (params: KaraokeCaptionsParams) =>
     body: JSON.stringify(params),
   });
 
+// Low-res preview (proxy render for iteration)
+export interface PreviewParams {
+  prompt: string;
+  engine?: string;
+  aspect?: string;
+  target_duration_s?: number;
+  seed?: number | null;
+}
+
+export const previewGenerate = (params: PreviewParams) =>
+  apiFetch<Job>("/api/v1/preview/generate", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+
+export const previewDefaults = (engine: string) =>
+  apiFetch<Record<string, unknown>>(`/api/v1/preview/defaults?engine=${encodeURIComponent(engine)}`);
+
 // Character library
 export interface StoredCharacter {
   id: string;

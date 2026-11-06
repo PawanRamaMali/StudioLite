@@ -2905,6 +2905,51 @@ def _compute_features(has_cuda: bool) -> dict:
     return features
 
 
+# ---- Prompt templates / style presets -----------------------------------
+
+
+class PresetSaveRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    id: Optional[str] = None
+    category: str = Field(default="custom", max_length=40)
+    description: str = Field(default="", max_length=500)
+    positive_prompt: str = Field(default="", max_length=4000)
+    negative_prompt: str = Field(default="", max_length=4000)
+    recommended_settings: Dict[str, Any] = Field(default_factory=dict)
+    tags: List[str] = Field(default_factory=list)
+
+
+@app.get("/api/v1/presets")
+async def list_presets():
+    """List built-in style/genre/shot/lighting presets plus user saved ones."""
+    import prompt_presets
+    return {
+        "builtin": prompt_presets.list_builtin_presets(),
+        "user": prompt_presets.list_user_presets(),
+        "categories": prompt_presets.list_builtin_categories(),
+    }
+
+
+@app.post("/api/v1/presets")
+async def save_preset(req: PresetSaveRequest):
+    """Persist a user-defined preset. Returns the stored dict (with
+    generated id if the caller didn't supply one)."""
+    import prompt_presets
+    try:
+        return prompt_presets.save_user_preset(req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.delete("/api/v1/presets/{preset_id}")
+async def delete_preset(preset_id: str):
+    import prompt_presets
+    ok = prompt_presets.delete_user_preset(preset_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return {"deleted": True, "id": preset_id}
+
+
 @app.get("/api/v1/system/status")
 async def system_status():
     """Get system status: GPU, VRAM, loaded models, feature capabilities."""

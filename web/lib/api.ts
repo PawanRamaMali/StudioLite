@@ -398,6 +398,35 @@ export const detectScenes = (params: SceneDetectParams) =>
     body: JSON.stringify(params),
   });
 
+export interface PromptPreset {
+  id: string;
+  name: string;
+  category: string;
+  description?: string;
+  positive_prompt?: string;
+  negative_prompt?: string;
+  recommended_settings?: Record<string, unknown>;
+  tags?: string[];
+  builtin?: boolean;
+}
+export interface PresetLibrary {
+  builtin: PromptPreset[];
+  user: PromptPreset[];
+  categories: string[];
+}
+export const listPresets = () => apiFetch<PresetLibrary>("/api/v1/presets");
+
+export const savePreset = (preset: Partial<PromptPreset> & { name: string }) =>
+  apiFetch<PromptPreset>("/api/v1/presets", {
+    method: "POST",
+    body: JSON.stringify(preset),
+  });
+
+export const deletePreset = (id: string) =>
+  apiFetch<{ deleted: boolean; id: string }>(`/api/v1/presets/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
 // Video edit utilities
 export interface EditUploadResponse {
   video_path: string;

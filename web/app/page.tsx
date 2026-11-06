@@ -28,6 +28,7 @@ import SceneDetectPanel from "@/components/panels/SceneDetectPanel";
 import WebcamRecorderPanel from "@/components/panels/WebcamRecorderPanel";
 import ScreenRecorderPanel from "@/components/panels/ScreenRecorderPanel";
 import BatchPanel from "@/components/panels/BatchPanel";
+import PresetsPanel from "@/components/panels/PresetsPanel";
 import CharactersPanel from "@/components/panels/CharactersPanel";
 import KeyframesPanel from "@/components/panels/KeyframesPanel";
 import JobsPanel from "@/components/panels/JobsPanel";
@@ -104,6 +105,7 @@ export default function Home() {
       case "webcam":            return <WebcamRecorderPanel />;
       case "screen-record":     return <ScreenRecorderPanel />;
       case "batch":             return <BatchPanel />;
+      case "presets":           return <PresetsPanel />;
       case "characters":        return <CharactersPanel />;
       case "keyframes":         return <KeyframesPanel />;
       case "library":           return <LibraryPanel />;

@@ -1705,6 +1705,31 @@ export const previewGenerate = (params: PreviewParams) =>
 export const previewDefaults = (engine: string) =>
   apiFetch<Record<string, unknown>>(`/api/v1/preview/defaults?engine=${encodeURIComponent(engine)}`);
 
+// Audio-driven talking-head generation
+export interface TalkingHeadStatus {
+  backends: string[];
+  available: boolean;
+  install_hint: string;
+}
+
+export interface TalkingHeadParams {
+  image_path: string;
+  audio_path: string;
+  backend?: "auto" | "sadtalker" | "hallo3";
+  expression_scale?: number;
+  guidance_scale?: number;
+  inference_steps?: number;
+}
+
+export const talkingHeadStatus = () =>
+  apiFetch<TalkingHeadStatus>("/api/v1/talking-head/status");
+
+export const generateTalkingHead = (params: TalkingHeadParams) =>
+  apiFetch<Job>("/api/v1/generate/talking-head", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+
 // Character library
 export interface StoredCharacter {
   id: string;

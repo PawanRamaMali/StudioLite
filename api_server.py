@@ -3116,6 +3116,82 @@ async def preview_defaults_route(engine: str = "ltx23_distilled_gguf"):
     return preview_generator.preview_defaults(engine)
 
 
+class TalkingHeadRequest(BaseModel):
+    """Generate a lip-synced video from a portrait + driving audio.
+
+    Lip sync happens AT generation (not post-hoc on an existing video) using
+    SadTalker or Hallo3 behind one interface. ``backend="auto"`` picks the
+    highest-quality installed backend.
+    """
+    image_path: str
+    audio_path: str
+    backend: str = "auto"          # "auto" | "sadtalker" | "hallo3"
+    expression_scale: float = Field(default=1.0, ge=0.0, le=3.0)
+    guidance_scale: float = Field(default=2.0, ge=0.1, le=10.0)
+    inference_steps: int = Field(default=20, ge=4, le=60)
+
+
+@app.get("/api/v1/talking-head/status")
+async def talking_head_status():
+    """Which backends are installed and runnable. Install hint if none."""
+    import talking_head
+    backends = talking_head.available_backends()
+    return {
+        "backends": backends,
+        "available": bool(backends),
+        "install_hint": talking_head.install_hint() if not backends else "",
+    }
+
+
+def _run_talking_head(job_id: str, req: "TalkingHeadRequest"):
+    """Background worker for talking-head generation."""
+    try:
+        _update_job(job_id, status="running", progress=5,
+                    message="Loading talking-head backend...")
+        import talking_head
+        out_path = os.path.join(OUTPUT_DIR, f"talking_{job_id}.mp4")
+        path = talking_head.generate_talking_head(
+            image_path=req.image_path,
+            audio_path=req.audio_path,
+            output_path=out_path,
+            backend=req.backend,
+            expression_scale=req.expression_scale,
+            guidance_scale=req.guidance_scale,
+            inference_steps=req.inference_steps,
+            progress_callback=lambda s, t, m: _update_job(
+                job_id, progress=5 + int((s / t) * 90),
+                message=f"Talking head: {m}",
+            ),
+        )
+        _update_job(
+            job_id, status="completed", progress=100,
+            message="Talking head ready",
+            result={
+                "output_path": path,
+                "download_url": f"/api/v1/download/video?path={path}",
+            },
+        )
+    except Exception as e:
+        _update_job(job_id, status="failed", error=str(e),
+                    message=f"Talking head failed: {e}")
+        traceback.print_exc()
+
+
+@app.post("/api/v1/generate/talking-head", response_model=JobResponse)
+async def generate_talking_head_route(req: TalkingHeadRequest):
+    """Generate a lip-synced talking-head video at generation time."""
+    if not os.path.isfile(req.image_path):
+        raise HTTPException(status_code=422, detail=f"Portrait not found: {req.image_path}")
+    if not os.path.isfile(req.audio_path):
+        raise HTTPException(status_code=422, detail=f"Audio not found: {req.audio_path}")
+    if req.backend not in ("auto", "sadtalker", "hallo3"):
+        raise HTTPException(status_code=422, detail=f"Unknown backend: {req.backend}")
+    job_id = _create_job("talking_head", req.model_dump())
+    thread = threading.Thread(target=_run_talking_head, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
 @app.post("/api/v1/preview/generate", response_model=JobResponse)
 async def preview_generate(req: PreviewGenerateRequest):
     """Kick off a tiny low-res draft so the user can iterate on prompt choice.

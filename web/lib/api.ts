@@ -1705,6 +1705,33 @@ export const previewGenerate = (params: PreviewParams) =>
 export const previewDefaults = (engine: string) =>
   apiFetch<Record<string, unknown>>(`/api/v1/preview/defaults?engine=${encodeURIComponent(engine)}`);
 
+// AudioLDM2 / Stable Audio Open ambient-audio generation
+export interface AmbientStatus {
+  backends: string[];
+  available: boolean;
+  install_hint: string;
+}
+
+export interface AmbientAudioParams {
+  prompt: string;
+  duration_s?: number;
+  negative_prompt?: string;
+  num_inference_steps?: number;
+  guidance_scale?: number;
+  sample_rate?: number;
+  backend?: "auto" | "audioldm2" | "stable_audio";
+  seed?: number | null;
+}
+
+export const ambientStatus = () =>
+  apiFetch<AmbientStatus>("/api/v1/audio/ambient/status");
+
+export const generateAmbient = (params: AmbientAudioParams) =>
+  apiFetch<Job>("/api/v1/audio/ambient", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+
 // PuLID identity-anchored scene image
 export interface IdentityStatus {
   pulid_available: boolean;

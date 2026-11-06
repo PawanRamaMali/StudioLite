@@ -3131,6 +3131,81 @@ class TalkingHeadRequest(BaseModel):
     inference_steps: int = Field(default=20, ge=4, le=60)
 
 
+class AmbientAudioRequest(BaseModel):
+    """Generate ambient/foley audio from a text prompt (AudioLDM2 or Stable Audio)."""
+    prompt: str
+    duration_s: float = Field(default=5.0, gt=0.0, le=60.0)
+    negative_prompt: str = "low quality, distorted, noise, silence"
+    num_inference_steps: int = Field(default=50, ge=4, le=200)
+    guidance_scale: float = Field(default=3.5, ge=0.0, le=15.0)
+    sample_rate: int = 48000
+    backend: str = "auto"  # auto | audioldm2 | stable_audio
+    seed: Optional[int] = None
+
+
+@app.get("/api/v1/audio/ambient/status")
+async def ambient_status():
+    """Which ambient-audio backends are usable right now."""
+    import ambient_audio
+    backends = ambient_audio.available_backends()
+    return {
+        "backends": backends,
+        "available": bool(backends),
+        "install_hint": ambient_audio.install_hint() if not backends else "",
+    }
+
+
+def _run_ambient_audio(job_id: str, req: "AmbientAudioRequest"):
+    try:
+        _update_job(job_id, status="running", progress=5,
+                    message="Loading ambient audio model...")
+        import ambient_audio
+        out_path = os.path.join(OUTPUT_DIR, f"ambient_{job_id}.wav")
+        cfg = ambient_audio.AmbientConfig(
+            prompt=req.prompt,
+            duration_s=req.duration_s,
+            negative_prompt=req.negative_prompt,
+            num_inference_steps=req.num_inference_steps,
+            guidance_scale=req.guidance_scale,
+            sample_rate=req.sample_rate,
+            seed=req.seed,
+            output_path=out_path,
+        )
+        path = ambient_audio.generate_ambient(
+            cfg, backend=req.backend,
+            progress_callback=lambda s, t, m: _update_job(
+                job_id, progress=5 + int((s / t) * 90),
+                message=f"Ambient: {m}",
+            ),
+        )
+        _update_job(
+            job_id, status="completed", progress=100,
+            message="Ambient audio ready",
+            result={"output_path": path,
+                    "download_url": f"/api/v1/download/audio?path={path}"},
+        )
+    except Exception as e:
+        _update_job(job_id, status="failed", error=str(e),
+                    message=f"Ambient generation failed: {e}")
+        traceback.print_exc()
+
+
+@app.post("/api/v1/audio/ambient", response_model=JobResponse)
+async def audio_ambient(req: AmbientAudioRequest):
+    """Generate ambient / foley audio to layer under a clip."""
+    import ambient_audio
+    if req.backend not in ("auto", "audioldm2", "stable_audio"):
+        raise HTTPException(status_code=422, detail=f"Unknown backend: {req.backend}")
+    # pre-flight: if no backend is installed, fail fast with the install hint
+    if not ambient_audio.available_backends():
+        raise HTTPException(status_code=503,
+                            detail=ambient_audio.install_hint())
+    job_id = _create_job("ambient_audio", req.model_dump())
+    thread = threading.Thread(target=_run_ambient_audio, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
 class IdentityGenerateRequest(BaseModel):
     """Generate an SDXL scene image anchored to a specific person's face."""
     reference_image: str

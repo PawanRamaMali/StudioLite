@@ -404,26 +404,30 @@ export default function PresetsPanel({ onNavigate }: PresetsPanelProps = {}) {
             )}
 
             <div className="flex flex-wrap gap-2">
-              {onNavigate && (
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    try {
-                      sessionStorage.setItem(
-                        "studiolite:apply-preset",
-                        JSON.stringify({
-                          id: selected.id,
-                          positive_prompt: selected.positive_prompt,
-                          negative_prompt: selected.negative_prompt,
-                        }),
-                      );
-                    } catch { /* storage denied - fall through, prompt stays empty */ }
-                    onNavigate("generate");
-                  }}
-                >
-                  <Wand2 className="w-3.5 h-3.5 mr-1" /> Apply in Generator
-                </Button>
-              )}
+              {onNavigate && (() => {
+                const stash = () => {
+                  try {
+                    sessionStorage.setItem(
+                      "studiolite:apply-preset",
+                      JSON.stringify({
+                        id: selected.id,
+                        positive_prompt: selected.positive_prompt,
+                        negative_prompt: selected.negative_prompt,
+                      }),
+                    );
+                  } catch { /* storage denied - target panel falls back to empty */ }
+                };
+                return (
+                  <>
+                    <Button size="sm" onClick={() => { stash(); onNavigate("generate"); }}>
+                      <Wand2 className="w-3.5 h-3.5 mr-1" /> Apply in Generator
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => { stash(); onNavigate("story"); }}>
+                      Apply in Story
+                    </Button>
+                  </>
+                );
+              })()}
               <Button size="sm" variant="secondary" onClick={() => beginDuplicate(selected)}>
                 <Copy className="w-3.5 h-3.5 mr-1" /> Duplicate
               </Button>

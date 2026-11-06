@@ -111,6 +111,19 @@ export default function StoryPanel() {
     };
     fetchEngines();
     getSystemStatus().then(setSysStatus).catch(() => setSysStatus(null));
+    // Pick up a preset the user applied from the Prompt Templates panel.
+    try {
+      const raw = sessionStorage.getItem("studiolite:apply-preset");
+      if (raw) {
+        sessionStorage.removeItem("studiolite:apply-preset");
+        const parsed = JSON.parse(raw) as { positive_prompt?: string };
+        if (parsed.positive_prompt) {
+          setConcept((c) => c.trim()
+            ? `${c.trim()}\n\nStyle: ${parsed.positive_prompt}`
+            : parsed.positive_prompt!);
+        }
+      }
+    } catch { /* storage denied, skip */ }
   }, []);
 
   // Fetch registered character portraits from backend

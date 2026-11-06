@@ -1604,6 +1604,9 @@ export interface SocialExportParams {
   normalize_loudness?: boolean;
   max_duration_s?: number | null;
   caption_font_size_pct?: number;
+  upscale?: boolean;
+  upscale_factor?: 2 | 3 | 4;
+  upscale_backend?: "lanczos" | "realesrgan";
 }
 
 export const exportSocial = (params: SocialExportParams) =>

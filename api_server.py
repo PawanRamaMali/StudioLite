@@ -4862,10 +4862,21 @@ class SocialExportRequest(BaseModel):
     normalize_loudness: bool = True
     max_duration_s: Optional[float] = Field(default=None, ge=1.0, le=600.0)
     caption_font_size_pct: float = Field(default=0.045, ge=0.015, le=0.12)
+    # Optional upscale pre-pass before reshape. When enabled, the source is
+    # resized by ``upscale_factor`` using the chosen backend first, then
+    # reshaped - so a 480p generation can ship as crisp 1080p on the feed.
+    upscale: bool = False
+    upscale_factor: int = Field(default=2, ge=2, le=4)
+    upscale_backend: str = "lanczos"  # "lanczos" | "realesrgan"
 
 
 def _run_social_export(job_id: str, req: "SocialExportRequest"):
-    """Background worker that reshapes a video for a social platform."""
+    """Background worker that reshapes a video for a social platform.
+
+    Optional pre-pass: if ``upscale`` is enabled, run a lanczos or
+    Real-ESRGAN upscale first. The reshape then runs against the upscaled
+    intermediate so the final clip sits at the platform's native resolution.
+    """
     try:
         _update_job(job_id, status="running", progress=5,
                     message=f"Preparing {req.format_id} export...")
@@ -4875,6 +4886,44 @@ def _run_social_export(job_id: str, req: "SocialExportRequest"):
         out_name = f"social_{preset.id}_{job_id}.mp4"
         out_path = os.path.join(OUTPUT_DIR, out_name)
 
+        source_path = req.video_path
+        upscale_intermediate = None
+        if req.upscale:
+            backend = (req.upscale_backend or "lanczos").lower()
+            _update_job(job_id, progress=8,
+                        message=f"Upscale pre-pass: {backend} x{req.upscale_factor}...")
+            upscale_intermediate = os.path.join(OUTPUT_DIR, f"social_upscale_{job_id}.mp4")
+            try:
+                if backend == "realesrgan":
+                    from filmmaker.agents import upscale_file_realesrgan
+                    result = upscale_file_realesrgan(
+                        source_path, upscale_intermediate, scale=req.upscale_factor,
+                    )
+                    if not result.get("ok"):
+                        raise RuntimeError(result.get("error") or "Real-ESRGAN failed")
+                else:
+                    from moviepy.editor import VideoFileClip
+                    with VideoFileClip(source_path) as clip:
+                        resized = clip.resize(
+                            (int(clip.w * req.upscale_factor),
+                             int(clip.h * req.upscale_factor)),
+                        )
+                        resized.write_videofile(
+                            upscale_intermediate, codec="libx264",
+                            audio_codec="aac" if resized.audio else None,
+                            bitrate="8000k", logger=None,
+                        )
+                        resized.close()
+                source_path = upscale_intermediate
+                _update_job(job_id, progress=40, message="Upscale complete.")
+            except Exception as ue:
+                # Don't fail the whole job for a failed pre-pass - the reshape
+                # still produces a usable output from the original source.
+                logger.warning(f"social export upscale failed: {ue}")
+                _update_job(job_id, progress=12,
+                            message=f"Upscale skipped: {ue}. Reshaping original source.")
+                source_path = req.video_path
+
         style = social_export.SocialExportStyle(
             format_id=req.format_id,
             fit_mode=req.fit_mode,
@@ -4883,14 +4932,22 @@ def _run_social_export(job_id: str, req: "SocialExportRequest"):
             max_duration_s=req.max_duration_s,
             caption_font_size_pct=req.caption_font_size_pct,
         )
-        _update_job(job_id, progress=15,
+        _update_job(job_id, progress=50,
                     message=f"Reshaping to {preset.width}x{preset.height} @ {preset.target_fps}fps...")
-        summary = social_export.run_export(req.video_path, out_path, style)
+        summary = social_export.run_export(source_path, out_path, style)
         if not summary.get("ok"):
             _update_job(job_id, status="failed",
                         error=summary.get("stderr") or "ffmpeg export failed",
                         message="Social export failed")
             return
+
+        # Clean up upscale intermediate once the final file is written.
+        if upscale_intermediate and os.path.isfile(upscale_intermediate):
+            try:
+                os.remove(upscale_intermediate)
+            except OSError:
+                pass
+
         _update_job(
             job_id, status="completed", progress=100,
             message=f"{preset.label}: export ready",

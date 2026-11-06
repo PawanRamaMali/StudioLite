@@ -31,6 +31,9 @@ export default function SocialExportPanel() {
   const [subtitlePath, setSubtitlePath] = useState("");
   const [maxDuration, setMaxDuration] = useState<string>("");
   const [captionSize, setCaptionSize] = useState<number>(4.5);
+  const [upscaleEnabled, setUpscaleEnabled] = useState(false);
+  const [upscaleFactor, setUpscaleFactor] = useState<2 | 3 | 4>(2);
+  const [upscaleBackend, setUpscaleBackend] = useState<"lanczos" | "realesrgan">("lanczos");
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState<string>("");
@@ -81,6 +84,9 @@ export default function SocialExportPanel() {
         normalize_loudness: normalize,
         max_duration_s: maxDuration ? Number(maxDuration) : null,
         caption_font_size_pct: captionSize / 100,
+        upscale: upscaleEnabled,
+        upscale_factor: upscaleFactor,
+        upscale_backend: upscaleBackend,
       });
 
       const poll = setInterval(async () => {
@@ -211,6 +217,38 @@ export default function SocialExportPanel() {
                      onChange={(e) => setCaptionSize(Number(e.target.value))}
                      className="w-full mt-1 px-3 py-2 bg-zinc-900 border border-zinc-800 rounded text-sm" />
             </div>
+          </div>
+
+          <div className="pt-3 border-t border-zinc-800">
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={upscaleEnabled}
+                     onChange={(e) => setUpscaleEnabled(e.target.checked)} />
+              Upscale source before reshape
+              <span className="text-[11px] text-zinc-500">(hides artifacts from low-res generation)</span>
+            </label>
+            {upscaleEnabled && (
+              <div className="mt-2 grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-zinc-400">Factor</label>
+                  <select value={upscaleFactor}
+                          onChange={(e) => setUpscaleFactor(Number(e.target.value) as 2 | 3 | 4)}
+                          className="w-full mt-1 px-3 py-2 bg-zinc-900 border border-zinc-800 rounded text-sm">
+                    <option value={2}>2x</option>
+                    <option value={3}>3x</option>
+                    <option value={4}>4x</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-zinc-400">Backend</label>
+                  <select value={upscaleBackend}
+                          onChange={(e) => setUpscaleBackend(e.target.value as "lanczos" | "realesrgan")}
+                          className="w-full mt-1 px-3 py-2 bg-zinc-900 border border-zinc-800 rounded text-sm">
+                    <option value="lanczos">Lanczos (fast, works everywhere)</option>
+                    <option value="realesrgan">Real-ESRGAN (AI, slower)</option>
+                  </select>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </Card>

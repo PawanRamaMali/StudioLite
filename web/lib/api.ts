@@ -356,6 +356,27 @@ export const mixBackgroundMusic = async (
   return res.json();
 };
 
+export type CollageLayout =
+  | "hstack_2" | "vstack_2" | "hstack_3" | "vstack_3"
+  | "grid_2x2" | "grid_3x3" | "pip";
+export interface CollageParams {
+  video_paths: string[];
+  layout?: CollageLayout;
+  cell_width?: number;
+  cell_height?: number;
+  fps?: number;
+  background?: string;
+  pip_position?: "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  pip_scale?: number;
+  audio?: "first" | "mix" | "drop";
+  crf?: number;
+}
+export const buildCollage = (params: CollageParams) =>
+  apiFetch<Job>("/api/v1/edit/collage", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+
 // Video edit utilities
 export interface EditUploadResponse {
   video_path: string;

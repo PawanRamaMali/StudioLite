@@ -23,6 +23,7 @@ import ChromaKeyPanel from "@/components/panels/ChromaKeyPanel";
 import NoiseReductionPanel from "@/components/panels/NoiseReductionPanel";
 import EqualizerPanel from "@/components/panels/EqualizerPanel";
 import BackgroundMusicPanel from "@/components/panels/BackgroundMusicPanel";
+import CollagePanel from "@/components/panels/CollagePanel";
 import CharactersPanel from "@/components/panels/CharactersPanel";
 import KeyframesPanel from "@/components/panels/KeyframesPanel";
 import JobsPanel from "@/components/panels/JobsPanel";
@@ -94,6 +95,7 @@ export default function Home() {
       case "denoise":           return <NoiseReductionPanel />;
       case "equalizer":         return <EqualizerPanel />;
       case "bgmusic":           return <BackgroundMusicPanel />;
+      case "collage":           return <CollagePanel />;
       case "characters":        return <CharactersPanel />;
       case "keyframes":         return <KeyframesPanel />;
       case "library":           return <LibraryPanel />;

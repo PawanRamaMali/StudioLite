@@ -574,6 +574,20 @@ class ChromaKeyRequest(BaseModel):
     background_path: Optional[str] = None               # image / video modes
 
 
+class CollageRequest(BaseModel):
+    video_paths: List[str] = Field(default_factory=list,
+                                   description="Ordered absolute paths of source clips.")
+    layout: str = Field(default="hstack_2")
+    cell_width: int = Field(default=640, ge=120, le=3840)
+    cell_height: int = Field(default=360, ge=120, le=2160)
+    fps: int = Field(default=30, ge=1, le=120)
+    background: str = Field(default="black")
+    pip_position: str = Field(default="bottom-right")
+    pip_scale: float = Field(default=0.28, ge=0.05, le=0.5)
+    audio: str = Field(default="first")  # first|mix|drop
+    crf: int = Field(default=20, ge=0, le=51)
+
+
 class SlideshowRequest(BaseModel):
     images: List[str] = Field(default_factory=list,
                                description="Ordered absolute paths of source images.")
@@ -2549,6 +2563,49 @@ def _run_chroma_key(job_id: str, req: "ChromaKeyRequest"):
                     message=f"Chroma key failed: {exc}")
 
 
+def _run_collage(job_id: str, req: "CollageRequest"):
+    try:
+        _update_job(job_id, status="running", progress=5,
+                    message=f"Building collage ({req.layout}, {len(req.video_paths)} clips)...")
+        from video_collage import build_collage, CollageStyle
+
+        style = CollageStyle(
+            layout=req.layout,
+            cell_width=req.cell_width,
+            cell_height=req.cell_height,
+            fps=req.fps,
+            background=req.background,
+            pip_position=req.pip_position,
+            pip_scale=req.pip_scale,
+            audio=req.audio,
+            crf=req.crf,
+        )
+        out_path = os.path.join(OUTPUT_DIR, f"collage_{job_id}.mp4")
+        result = build_collage(list(req.video_paths), out_path, style=style)
+        if not result.get("ok"):
+            err = result.get("error", "unknown error")
+            hint = result.get("install_hint")
+            msg = f"{err} ({hint})" if hint else err
+            _update_job(job_id, status="failed", error=err,
+                        message=f"Collage failed: {msg}")
+            return
+
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message=f"Collage ({result['layout']}) complete.",
+            result={
+                "video_path": result["output_path"],
+                "layout": result["layout"],
+                "cells": result["cells"],
+            },
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc),
+                    message=f"Collage failed: {exc}")
+
+
 def _run_slideshow(job_id: str, req: "SlideshowRequest"):
     try:
         _update_job(job_id, status="running", progress=5,
@@ -4387,6 +4444,30 @@ async def edit_thumbnail(req: ThumbnailRequest):
         raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
     job_id = _create_job("thumbnail", req.model_dump())
     thread = threading.Thread(target=_run_thumbnail, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/collage", response_model=JobResponse)
+async def edit_collage(req: CollageRequest):
+    """Tile two or more clips into a grid, split screen or PIP. 422s
+    on the obvious misuses (too few clips for the picked layout, or a
+    path that doesn't exist on disk) before the job queues."""
+    from video_collage import LAYOUTS
+    if req.layout not in LAYOUTS:
+        raise HTTPException(status_code=422, detail=f"Unknown layout: {req.layout}")
+    _cols, _rows, min_in, max_in = LAYOUTS[req.layout]
+    if len(req.video_paths) < min_in:
+        raise HTTPException(status_code=422,
+                            detail=f"{req.layout} needs at least {min_in} clips")
+    if len(req.video_paths) > max_in:
+        raise HTTPException(status_code=422,
+                            detail=f"{req.layout} accepts at most {max_in} clips")
+    for p in req.video_paths:
+        if not os.path.isfile(p):
+            raise HTTPException(status_code=422, detail=f"Video file not found: {p}")
+    job_id = _create_job("collage", req.model_dump())
+    thread = threading.Thread(target=_run_collage, args=(job_id, req), daemon=True)
     thread.start()
     return _job_response(job_id)
 

@@ -427,6 +427,43 @@ export const deletePreset = (id: string) =>
     method: "DELETE",
   });
 
+export interface StreamInfo {
+  index: number;
+  codec_type?: "video" | "audio" | string;
+  codec_name?: string;
+  codec_long_name?: string;
+  width?: number;
+  height?: number;
+  pix_fmt?: string;
+  fps?: number | null;
+  has_bframes?: number;
+  aspect_ratio?: string;
+  sample_rate?: number;
+  channels?: number;
+  channel_layout?: string;
+  bit_rate?: number | null;
+}
+export interface VideoInfoResult {
+  ok: boolean;
+  error?: string;
+  install_hint?: string;
+  info?: {
+    path: string;
+    format_name: string;
+    duration: number | null;
+    size_bytes: number | null;
+    bitrate: number | null;
+    streams: StreamInfo[];
+    video: StreamInfo | null;
+    audio: StreamInfo | null;
+  };
+}
+export const inspectVideo = (video_path: string) =>
+  apiFetch<VideoInfoResult>("/api/v1/edit/info", {
+    method: "POST",
+    body: JSON.stringify({ video_path }),
+  });
+
 // Video edit utilities
 export interface EditUploadResponse {
   video_path: string;

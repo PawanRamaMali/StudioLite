@@ -574,6 +574,10 @@ class ChromaKeyRequest(BaseModel):
     background_path: Optional[str] = None               # image / video modes
 
 
+class VideoInfoRequest(BaseModel):
+    video_path: str
+
+
 class SceneDetectRequest(BaseModel):
     video_path: str
     threshold: float = Field(default=10.0, ge=0.0, le=100.0,
@@ -4558,6 +4562,17 @@ async def edit_thumbnail(req: ThumbnailRequest):
     thread = threading.Thread(target=_run_thumbnail, args=(job_id, req), daemon=True)
     thread.start()
     return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/info")
+async def edit_video_info(req: VideoInfoRequest):
+    """Return ffprobe metadata for a video (duration, dims, codec, fps,
+    audio sample rate, bitrate) synchronously. No job dispatched -
+    probing is cheap enough to run in-request."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    import video_info as _vi
+    return _vi.inspect_video(req.video_path)
 
 
 @app.post("/api/v1/edit/scene-detect", response_model=JobResponse)

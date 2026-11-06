@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Sparkles, Play, Loader2, Download, Camera, Film, Zap, Cpu } from "lucide-react";
 import { generateText2Video, getJob, getDownloadUrl, downloadBlob, getSystemStatus, type SystemStatus } from "@/lib/api";
+import SafeZoneOverlay from "@/components/SafeZoneOverlay";
 
 const SAMPLE_PROMPTS = [
   { label: "Cinematic Nature", prompt: "A majestic eagle soaring through dramatic mountain landscape at golden hour, snow-capped peaks, volumetric clouds, cinematic tracking shot, warm sunlight on detailed feathers, 4K quality" },
@@ -72,6 +73,9 @@ export default function GeneratePanel() {
   const [resultJobId, setResultJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sysStatus, setSysStatus] = useState<SystemStatus | null>(null);
+  // Safe-zone preview overlay: picks a platform format to mask the viewable
+  // area. Visual only - doesn't affect generation.
+  const [previewFormat, setPreviewFormat] = useState<string>("");
   const pollRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
@@ -324,8 +328,25 @@ export default function GeneratePanel() {
           <Card className="min-h-[300px] flex flex-col items-center justify-center">
             {resultJobId ? (
               <div className="w-full">
-                <video src={getDownloadUrl(resultJobId)} controls autoPlay loop muted
-                  className="w-full rounded-lg border border-zinc-700" />
+                <div className="relative">
+                  <video src={getDownloadUrl(resultJobId)} controls autoPlay loop muted
+                    className="w-full rounded-lg border border-zinc-700" />
+                  <SafeZoneOverlay formatId={previewFormat} />
+                </div>
+                <div className="mt-3 flex items-center gap-2 text-xs">
+                  <span className="text-zinc-500">Platform preview:</span>
+                  <select value={previewFormat}
+                          onChange={(e) => setPreviewFormat(e.target.value)}
+                          className="flex-1 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-zinc-200">
+                    <option value="">Off</option>
+                    <option value="reels">Instagram Reels (9:16)</option>
+                    <option value="shorts">YouTube Shorts (9:16)</option>
+                    <option value="tiktok">TikTok (9:16)</option>
+                    <option value="square">Instagram Feed (1:1)</option>
+                    <option value="feed_portrait">Feed Portrait (4:5)</option>
+                    <option value="landscape">YouTube Landscape (16:9)</option>
+                  </select>
+                </div>
                 <Button variant="secondary" className="w-full mt-3" onClick={() => {
                   downloadBlob(getDownloadUrl(resultJobId), `${resultJobId}.mp4`).catch(() => {});
                 }}>

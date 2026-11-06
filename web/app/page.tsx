@@ -25,6 +25,8 @@ import EqualizerPanel from "@/components/panels/EqualizerPanel";
 import BackgroundMusicPanel from "@/components/panels/BackgroundMusicPanel";
 import CollagePanel from "@/components/panels/CollagePanel";
 import SceneDetectPanel from "@/components/panels/SceneDetectPanel";
+import WebcamRecorderPanel from "@/components/panels/WebcamRecorderPanel";
+import ScreenRecorderPanel from "@/components/panels/ScreenRecorderPanel";
 import CharactersPanel from "@/components/panels/CharactersPanel";
 import KeyframesPanel from "@/components/panels/KeyframesPanel";
 import JobsPanel from "@/components/panels/JobsPanel";
@@ -98,6 +100,8 @@ export default function Home() {
       case "bgmusic":           return <BackgroundMusicPanel />;
       case "collage":           return <CollagePanel />;
       case "scene-detect":      return <SceneDetectPanel />;
+      case "webcam":            return <WebcamRecorderPanel />;
+      case "screen-record":     return <ScreenRecorderPanel />;
       case "characters":        return <CharactersPanel />;
       case "keyframes":         return <KeyframesPanel />;
       case "library":           return <LibraryPanel />;

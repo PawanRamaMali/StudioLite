@@ -397,6 +397,10 @@ class StoryRequest(BaseModel):
     video_engine: str = "auto"
     # LatentSync 1.6 post-processing for talking-head scenes.
     enable_lip_sync: bool = False
+    # Target platform format: "reels", "shorts", "tiktok", "square",
+    # "feed_portrait", "landscape". Drives gen dims, duration cap, target fps,
+    # and the one-click Social Export defaults. Empty keeps legacy landscape.
+    format_id: str = ""
 
 
 class TTSRequest(BaseModel):
@@ -1110,6 +1114,23 @@ Return ONLY valid JSON (close all brackets):
             if hasattr(ch, "name") and hasattr(ch, "appearance"):
                 char_appearances[ch.name] = ch.appearance or ch.name
 
+        # Auto-pull appearance text from the saved character library for any
+        # scene character that wasn't supplied explicitly. This closes the gap
+        # where the frontend sends scene character NAMES but not their
+        # appearance descriptions - the library has it from the portrait
+        # generator, so faces stay consistent without re-typing.
+        try:
+            import character_library
+            missing_names = [
+                n for n, v in char_appearances.items() if not v or v == n
+            ]
+            if missing_names:
+                found = character_library.lookup_appearances(missing_names)
+                for n, appearance in found.items():
+                    char_appearances[n] = appearance
+        except Exception as e:
+            logger.warning(f"Character library lookup failed: {e}")
+
         # Merge with visual_anchor which often contains character descriptions
         global_char_desc = visual_identity or ""
 
@@ -1186,6 +1207,7 @@ Return ONLY valid JSON (close all brackets):
                 guidance_scale=qp["guidance"],
                 seed=shared_seed + idx,
                 preferred_engine=getattr(req, "video_engine", "auto") or "auto",
+                format_id=getattr(req, "format_id", "") or None,
                 progress_callback=lambda s, t, m: _update_job(
                     job_id,
                     progress=pct_base + int((s / t) * (55 / len(scene_list))),
@@ -2934,6 +2956,30 @@ async def list_presets():
     }
 
 
+@app.get("/api/v1/formats")
+async def list_formats():
+    """List social-media format presets (Reels/Shorts/TikTok/Square/Feed/Landscape)."""
+    import video_formats
+    return {"formats": video_formats.all_presets()}
+
+
+@app.get("/api/v1/characters")
+async def list_characters_route():
+    """List every character in the persistent library (newest first)."""
+    import character_library
+    return {"characters": character_library.list_characters()}
+
+
+@app.delete("/api/v1/characters/{name}")
+async def delete_character_route(name: str):
+    """Remove a character record from the library. Portraits on disk are untouched."""
+    import character_library
+    ok = character_library.delete_character(name)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"No character named {name!r}")
+    return {"status": "deleted", "name": name}
+
+
 @app.post("/api/v1/presets")
 async def save_preset(req: PresetSaveRequest):
     """Persist a user-defined preset. Returns the stored dict (with
@@ -4587,6 +4633,79 @@ async def edit_scene_detect(req: SceneDetectRequest):
     return _job_response(job_id)
 
 
+class SocialExportRequest(BaseModel):
+    """One-click reshape of a finished video for Reels/Shorts/TikTok/etc."""
+    video_path: str
+    format_id: str = "reels"  # see video_formats.FORMAT_PRESETS
+    fit_mode: str = "pad_blur"  # pad_blur, pad_black, crop, stretch
+    subtitle_path: str = ""     # optional SRT/VTT to burn in
+    normalize_loudness: bool = True
+    max_duration_s: Optional[float] = Field(default=None, ge=1.0, le=600.0)
+    caption_font_size_pct: float = Field(default=0.045, ge=0.015, le=0.12)
+
+
+def _run_social_export(job_id: str, req: "SocialExportRequest"):
+    """Background worker that reshapes a video for a social platform."""
+    try:
+        _update_job(job_id, status="running", progress=5,
+                    message=f"Preparing {req.format_id} export...")
+        import social_export
+        import video_formats
+        preset = video_formats.resolve_format(req.format_id)
+        out_name = f"social_{preset.id}_{job_id}.mp4"
+        out_path = os.path.join(OUTPUT_DIR, out_name)
+
+        style = social_export.SocialExportStyle(
+            format_id=req.format_id,
+            fit_mode=req.fit_mode,
+            subtitle_path=req.subtitle_path,
+            normalize_loudness=req.normalize_loudness,
+            max_duration_s=req.max_duration_s,
+            caption_font_size_pct=req.caption_font_size_pct,
+        )
+        _update_job(job_id, progress=15,
+                    message=f"Reshaping to {preset.width}x{preset.height} @ {preset.target_fps}fps...")
+        summary = social_export.run_export(req.video_path, out_path, style)
+        if not summary.get("ok"):
+            _update_job(job_id, status="failed",
+                        error=summary.get("stderr") or "ffmpeg export failed",
+                        message="Social export failed")
+            return
+        _update_job(
+            job_id, status="completed", progress=100,
+            message=f"{preset.label}: export ready",
+            result={
+                "output_path": summary["output_path"],
+                "format": summary["format"],
+                "download_url": f"/api/v1/download/video?path={out_path}",
+            },
+        )
+    except Exception as e:
+        _update_job(job_id, status="failed", error=str(e),
+                    message=f"Social export failed: {e}")
+        traceback.print_exc()
+
+
+@app.post("/api/v1/export/social", response_model=JobResponse)
+async def export_social(req: SocialExportRequest):
+    """Reshape a finished video for a social platform: aspect, duration cap,
+    LUFS normalization, optional burned captions, H.264 under the platform's
+    bitrate ceiling. 422 up front on missing files or unknown format."""
+    import video_formats
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video not found: {req.video_path}")
+    if req.format_id not in video_formats.FORMAT_PRESETS:
+        raise HTTPException(status_code=422, detail=f"Unknown format_id: {req.format_id}")
+    if req.subtitle_path and not os.path.isfile(req.subtitle_path):
+        raise HTTPException(status_code=422, detail=f"Subtitle file not found: {req.subtitle_path}")
+    if req.fit_mode not in ("pad_blur", "pad_black", "crop", "stretch"):
+        raise HTTPException(status_code=422, detail=f"Unknown fit_mode: {req.fit_mode}")
+    job_id = _create_job("social_export", req.model_dump())
+    thread = threading.Thread(target=_run_social_export, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
 @app.post("/api/v1/edit/collage", response_model=JobResponse)
 async def edit_collage(req: CollageRequest):
     """Tile two or more clips into a grid, split screen or PIP. 422s
@@ -5058,6 +5177,29 @@ def _run_character_portrait(job_id: str, req: CharacterPortraitRequest):
                 ip_adapter_status = f"Registered {len(ref_paths)} reference(s) for IP-Adapter"
             except Exception as e:
                 ip_adapter_status = f"Generated but IP-Adapter registration failed: {e}"
+
+        # Persist to character library so Story Mode can auto-pull the
+        # appearance text when a scene names this character without any
+        # explicit CharacterDef in the request.
+        try:
+            import character_library
+            front_url = ""
+            if "front" in generated_paths:
+                front_url = generated_paths["front"]["url"]
+            elif generated_paths:
+                front_url = next(iter(generated_paths.values())).get("url", "")
+            # Prefer the detailed visual prompt as the appearance text when
+            # supplied; fall back to the short description.
+            appearance = (req.visual_prompt or req.description or "").strip()
+            character_library.save_character(
+                name=req.name,
+                appearance=appearance,
+                description=req.description or "",
+                style=req.style or "photorealistic",
+                portrait_url=front_url,
+            )
+        except Exception as e:
+            logger.warning(f"Character library save failed for {req.name}: {e}")
 
         _update_job(
             job_id,

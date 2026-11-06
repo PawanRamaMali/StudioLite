@@ -494,12 +494,29 @@ def _load_vace(progress_callback: Optional[Callable] = None):
     return _i2v_pipe
 
 
-def generate_scene_image(prompt, negative_prompt="", width=832, height=480, seed=None):
-    """Generate a scene image using SDXL Turbo."""
+def generate_scene_image(prompt, negative_prompt="", width=832, height=480, seed=None,
+                         aspect_ratio: Optional[str] = None):
+    """Generate a scene image using SDXL Turbo.
+
+    If ``aspect_ratio`` is given ("9:16", "1:1", "4:5", "16:9"), it's passed to
+    SDXL directly. Otherwise the ratio is inferred from ``width/height`` so
+    portrait calls land on a portrait SDXL output instead of being stretched
+    from a landscape generation.
+    """
     _unload_i2v()
     from reelforge import rf_generate_image
+    if not aspect_ratio:
+        r = width / max(1, height)
+        if r < 0.7:
+            aspect_ratio = "9:16"
+        elif r < 0.95:
+            aspect_ratio = "4:5"
+        elif r < 1.3:
+            aspect_ratio = "1:1"
+        else:
+            aspect_ratio = "16:9"
     return rf_generate_image(prompt=prompt, provider="sdxl_turbo", style="photorealistic",
-                             aspect_ratio="16:9", seed=seed)
+                             aspect_ratio=aspect_ratio, seed=seed)
 
 
 def animate_wan22_gguf(image_path, prompt, negative_prompt="", height=480, width=832,
@@ -764,7 +781,8 @@ def _concat_clips(clip_paths: list, output_path: str) -> str:
 def _animate_chained(engine: str, image_path: str, prompt: str, negative_prompt: str,
                      target_duration: float, num_inference_steps: int,
                      guidance_scale: float, seed: Optional[int],
-                     progress_callback: Optional[Callable]) -> str:
+                     progress_callback: Optional[Callable],
+                     width: int = 832, height: int = 480) -> str:
     """Generate enough chained I2V clips to cover ``target_duration``.
 
     Each clip after the first uses the previous clip's last frame as its image
@@ -812,6 +830,7 @@ def _animate_chained(engine: str, image_path: str, prompt: str, negative_prompt:
         if engine == "wan22_14b_gguf":
             cp = animate_wan22_gguf(
                 image_path=current_image, prompt=prompt, negative_prompt=negative_prompt,
+                width=width, height=height,
                 num_frames=frames, num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale, fps=fps, seed=clip_seed,
                 progress_callback=clip_cb,
@@ -819,6 +838,7 @@ def _animate_chained(engine: str, image_path: str, prompt: str, negative_prompt:
         elif engine == "hunyuan15_i2v_gguf":
             cp = animate_hunyuan15(
                 image_path=current_image, prompt=prompt, negative_prompt=negative_prompt,
+                width=width, height=height,
                 num_frames=frames, num_inference_steps=num_inference_steps,
                 guidance_scale=min(guidance_scale, 6.5), fps=fps, seed=clip_seed,
                 progress_callback=clip_cb,
@@ -826,12 +846,14 @@ def _animate_chained(engine: str, image_path: str, prompt: str, negative_prompt:
         elif engine == "ltx23_distilled_gguf":
             cp = animate_ltx23(
                 image_path=current_image, prompt=prompt, negative_prompt=negative_prompt,
+                width=width, height=height,
                 num_frames=frames, num_inference_steps=8, guidance_scale=1.0,
                 fps=fps, seed=clip_seed, progress_callback=clip_cb,
             )
         elif engine == "vace_1.3b":
             cp = animate_vace(
                 image_path=current_image, prompt=prompt, negative_prompt=negative_prompt,
+                width=width, height=height,
                 num_frames=frames, num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale, fps=fps, seed=clip_seed,
                 progress_callback=clip_cb,
@@ -865,7 +887,9 @@ def _animate_chained(engine: str, image_path: str, prompt: str, negative_prompt:
 
 def generate_scene_video(prompt, negative_prompt="", target_duration=5.0, fps=16,
                          num_inference_steps=30, guidance_scale=5.0, seed=None,
-                         progress_callback=None, preferred_engine: Optional[str] = None):
+                         progress_callback=None, preferred_engine: Optional[str] = None,
+                         format_id: Optional[str] = None,
+                         width: Optional[int] = None, height: Optional[int] = None):
     """Full pipeline: pick best engine (respects ``preferred_engine`` override).
 
     preferred_engine: one of
@@ -874,6 +898,10 @@ def generate_scene_video(prompt, negative_prompt="", target_duration=5.0, fps=16
 - "balanced" / "hunyuan15_i2v_gguf" -> HunyuanVideo 1.5
 - "draft" / "ltx23_distilled_gguf" -> LTX-2.3 distilled
 - "vace_1.3b", "t2v_1.3b" -> older local fallbacks
+
+    format_id picks a video_formats preset ("reels", "shorts", "tiktok",
+    "square", "feed_portrait", "landscape"); gen-dims are rounded to the
+    engine's stride. Explicit width/height override the preset.
     """
     # Env var can force the engine when preferred_engine unset
     if preferred_engine is None:
@@ -881,11 +909,26 @@ def generate_scene_video(prompt, negative_prompt="", target_duration=5.0, fps=16
 
     engine = get_available_engine(preferred_engine)
 
+    # Resolve dims: explicit > format preset > legacy landscape default
+    gen_w, gen_h = 832, 480
+    if format_id:
+        try:
+            from video_formats import resolve_format, dims_for_engine
+            preset = resolve_format(format_id)
+            gen_w, gen_h = dims_for_engine(engine, preset)
+        except Exception:
+            pass
+    if width and height:
+        gen_w, gen_h = int(width), int(height)
+
     # --- SDXL step is shared across all I2V engines ---
     def _do_sdxl():
         if progress_callback:
             progress_callback(2, 100, "Step 1/2: Scene image (SDXL)...")
-        return generate_scene_image(prompt=prompt, negative_prompt=negative_prompt, seed=seed)
+        return generate_scene_image(
+            prompt=prompt, negative_prompt=negative_prompt, seed=seed,
+            width=gen_w, height=gen_h,
+        )
 
     if engine in ENGINE_MAX_FRAMES:
         # All I2V engines share one chained-generation path. The chain helper
@@ -904,6 +947,7 @@ def generate_scene_video(prompt, negative_prompt="", target_duration=5.0, fps=16
             guidance_scale=guidance_scale,
             seed=seed,
             progress_callback=progress_callback,
+            width=gen_w, height=gen_h,
         )
 
     # Last resort: T2V only (no image input, no chaining yet)

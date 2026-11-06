@@ -84,6 +84,9 @@ export default function StoryPanel() {
   const [resolution, setResolution] = useState("480p");
   const [frames, setFrames] = useState(49);
   const [fps, setFps] = useState(16);
+  // Portrait-first config: pick a social format or stay on legacy landscape.
+  // Options come from /api/v1/formats; value is the preset id ("" = legacy).
+  const [formatId, setFormatId] = useState<string>("");
 
   // Character consistency
   const [continuityMode, setContinuityMode] = useState("prompt");
@@ -541,6 +544,7 @@ export default function StoryPanel() {
         interpolation_multiplier: interpolationMultiplier,
         video_engine: videoEngine,
         enable_lip_sync: enableLipSync,
+        format_id: formatId || undefined,
       });
 
       setGenStatus(`Job ${job.job_id.slice(0, 8)}... started`);
@@ -1100,6 +1104,19 @@ export default function StoryPanel() {
                     <select value={engine} onChange={(e) => setEngine(e.target.value)}
                       className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs text-zinc-200 mt-0.5">
                       {ENGINES.map((e) => <option key={e.id} value={e.id}>{e.name} - {e.desc}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-500">Target format</label>
+                    <select value={formatId} onChange={(e) => setFormatId(e.target.value)}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs text-zinc-200 mt-0.5">
+                      <option value="">Legacy landscape (16:9)</option>
+                      <option value="reels">Instagram Reels (9:16)</option>
+                      <option value="shorts">YouTube Shorts (9:16)</option>
+                      <option value="tiktok">TikTok (9:16)</option>
+                      <option value="square">Instagram Feed (1:1)</option>
+                      <option value="feed_portrait">Feed Portrait (4:5)</option>
+                      <option value="landscape">YouTube Landscape (16:9)</option>
                     </select>
                   </div>
                   <div className="grid grid-cols-2 gap-2">

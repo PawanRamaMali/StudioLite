@@ -30,6 +30,7 @@ import ScreenRecorderPanel from "@/components/panels/ScreenRecorderPanel";
 import BatchPanel from "@/components/panels/BatchPanel";
 import PresetsPanel from "@/components/panels/PresetsPanel";
 import InspectorPanel from "@/components/panels/InspectorPanel";
+import SocialExportPanel from "@/components/panels/SocialExportPanel";
 import CharactersPanel from "@/components/panels/CharactersPanel";
 import KeyframesPanel from "@/components/panels/KeyframesPanel";
 import JobsPanel from "@/components/panels/JobsPanel";
@@ -108,6 +109,7 @@ export default function Home() {
       case "batch":             return <BatchPanel />;
       case "presets":           return <PresetsPanel onNavigate={setActiveTab} />;
       case "inspector":         return <InspectorPanel />;
+      case "social-export":     return <SocialExportPanel />;
       case "characters":        return <CharactersPanel />;
       case "keyframes":         return <KeyframesPanel />;
       case "library":           return <LibraryPanel />;

@@ -1570,3 +1570,65 @@ export const libraryStartReencode = (opts: LibraryReencodeOptions = {}) =>
   );
 
 export const LIBRARY_API_BASE = API_BASE;
+
+// ---------------------------------------------------------------------------
+// Video format presets (Reels / Shorts / TikTok / Square / Feed / Landscape)
+// ---------------------------------------------------------------------------
+export interface VideoFormatPreset {
+  id: string;
+  label: string;
+  aspect: string;
+  width: number;
+  height: number;
+  gen_width: number;
+  gen_height: number;
+  max_duration_s: number;
+  target_fps: number;
+  max_bitrate_mbps: number;
+  audio_lufs: number;
+  safe_zone_px: { top: number; right: number; bottom: number; left: number };
+  notes: string;
+}
+
+export const listFormats = () =>
+  apiFetch<{ formats: VideoFormatPreset[] }>("/api/v1/formats");
+
+// Social export
+export type SocialFitMode = "pad_blur" | "pad_black" | "crop" | "stretch";
+
+export interface SocialExportParams {
+  video_path: string;
+  format_id: string;
+  fit_mode?: SocialFitMode;
+  subtitle_path?: string;
+  normalize_loudness?: boolean;
+  max_duration_s?: number | null;
+  caption_font_size_pct?: number;
+}
+
+export const exportSocial = (params: SocialExportParams) =>
+  apiFetch<Job>("/api/v1/export/social", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+
+// Character library
+export interface StoredCharacter {
+  id: string;
+  name: string;
+  appearance: string;
+  description: string;
+  style: string;
+  portrait_url: string;
+  ip_adapter_id: string;
+  updated_at: number;
+}
+
+export const listCharacters = () =>
+  apiFetch<{ characters: StoredCharacter[] }>("/api/v1/characters");
+
+export const deleteCharacter = (name: string) =>
+  apiFetch<{ status: string; name: string }>(
+    `/api/v1/characters/${encodeURIComponent(name)}`,
+    { method: "DELETE" },
+  );

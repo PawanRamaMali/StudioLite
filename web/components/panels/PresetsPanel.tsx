@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Sparkles, Plus, Save, Trash2, Copy, Search, X, Tag, Upload, FileDown } from "lucide-react";
+import { Sparkles, Plus, Save, Trash2, Copy, Search, X, Tag, Upload, FileDown, Wand2 } from "lucide-react";
 import {
   listPresets,
   savePreset,
@@ -19,7 +19,11 @@ const CATEGORY_LABELS: Record<string, string> = {
   custom: "Your presets",
 };
 
-export default function PresetsPanel() {
+interface PresetsPanelProps {
+  onNavigate?: (tab: string) => void;
+}
+
+export default function PresetsPanel({ onNavigate }: PresetsPanelProps = {}) {
   const [library, setLibrary] = useState<PresetLibrary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -400,6 +404,26 @@ export default function PresetsPanel() {
             )}
 
             <div className="flex flex-wrap gap-2">
+              {onNavigate && (
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    try {
+                      sessionStorage.setItem(
+                        "studiolite:apply-preset",
+                        JSON.stringify({
+                          id: selected.id,
+                          positive_prompt: selected.positive_prompt,
+                          negative_prompt: selected.negative_prompt,
+                        }),
+                      );
+                    } catch { /* storage denied - fall through, prompt stays empty */ }
+                    onNavigate("generate");
+                  }}
+                >
+                  <Wand2 className="w-3.5 h-3.5 mr-1" /> Apply in Generator
+                </Button>
+              )}
               <Button size="sm" variant="secondary" onClick={() => beginDuplicate(selected)}>
                 <Copy className="w-3.5 h-3.5 mr-1" /> Duplicate
               </Button>

@@ -76,6 +76,21 @@ export default function GeneratePanel() {
 
   useEffect(() => {
     getSystemStatus().then(setSysStatus).catch(() => setSysStatus(null));
+    // Read a preset handed off from the Prompt Templates panel. Appending
+    // rather than replacing lets a user layer a style preset onto one of
+    // the sample prompts without losing their words.
+    try {
+      const raw = sessionStorage.getItem("studiolite:apply-preset");
+      if (raw) {
+        sessionStorage.removeItem("studiolite:apply-preset");
+        const parsed = JSON.parse(raw) as { positive_prompt?: string };
+        if (parsed.positive_prompt) {
+          setPrompt((p) => p.trim()
+            ? `${p.trim()}, ${parsed.positive_prompt}`
+            : parsed.positive_prompt!);
+        }
+      }
+    } catch { /* storage denied, no preset carry-over */ }
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, []);
 

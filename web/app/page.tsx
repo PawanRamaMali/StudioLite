@@ -106,7 +106,7 @@ export default function Home() {
       case "webcam":            return <WebcamRecorderPanel />;
       case "screen-record":     return <ScreenRecorderPanel />;
       case "batch":             return <BatchPanel />;
-      case "presets":           return <PresetsPanel />;
+      case "presets":           return <PresetsPanel onNavigate={setActiveTab} />;
       case "inspector":         return <InspectorPanel />;
       case "characters":        return <CharactersPanel />;
       case "keyframes":         return <KeyframesPanel />;

@@ -8,6 +8,7 @@ import {
   Film, LayoutList, Library, Server, Gauge, Mic, Captions, ImagePlus,
   Images, Clapperboard, VolumeX, SlidersHorizontal, Music2, Grid3x3, Search,
   Camera, Monitor, Layers, Palette, Info, Smartphone,
+  UserCircle2, Waves, MousePointer2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getSystemStatus, type SystemStatus } from "@/lib/api";
@@ -48,6 +49,10 @@ const NAV_ITEMS: { id: string; label: string; icon: typeof Video; group: string;
   { id: "batch", label: "Batch Processing", icon: Layers, group: "Tools" },
   { id: "inspector", label: "Video Inspector", icon: Info, group: "Tools" },
   { id: "social-export", label: "Social Export", icon: Smartphone, group: "Tools" },
+  { id: "talking-head", label: "Talking Head", icon: Mic, group: "Create", gpuRequired: true },
+  { id: "identity", label: "Identity Portrait", icon: UserCircle2, group: "Create", gpuRequired: true },
+  { id: "ambient-audio", label: "Ambient Audio", icon: Waves, group: "Tools", gpuRequired: true },
+  { id: "motion-brush", label: "Motion Brush", icon: MousePointer2, group: "Tools" },
   { id: "presets", label: "Prompt Templates", icon: Palette, group: "Assets" },
   { id: "slideshow", label: "Slideshow", icon: Images, group: "Create" },
   { id: "characters", label: "Characters", icon: Users, group: "Assets" },

@@ -494,6 +494,64 @@ class CaptionRequest(BaseModel):
     margin_v: int = Field(default=32, ge=0, le=400)
 
 
+class KaraokeCaptionsRequest(BaseModel):
+    """Build an animated word-highlight (karaoke) .ass subtitle file.
+
+    Accepts either raw whisper-style segments with word-level timings, or a
+    flat list of word dicts. Response is the path to the written .ass file.
+    """
+    # Either segments OR words - segments preferred when available.
+    segments: list[dict] = Field(default_factory=list)
+    words: list[dict] = Field(default_factory=list)
+    font_name: str = "Arial"
+    font_size: int = Field(default=72, ge=18, le=180)
+    primary_color: str = "FFFFFF"       # inactive word
+    highlight_color: str = "FFD54A"     # active word
+    outline_color: str = "000000"
+    outline_width: int = Field(default=3, ge=0, le=10)
+    bold: bool = True
+    max_words_per_line: int = Field(default=4, ge=1, le=10)
+    video_width: int = 1080
+    video_height: int = 1920
+    margin_v: int = Field(default=120, ge=0, le=800)
+
+
+@app.post("/api/v1/captions/karaoke")
+async def captions_karaoke(req: KaraokeCaptionsRequest):
+    """Emit an .ass subtitle file with per-word color animation.
+
+    Pure build - no video, no ffmpeg. The returned path can be fed to the
+    Social Export endpoint's ``subtitle_path`` or to ffmpeg directly.
+    """
+    import karaoke_captions
+    if req.words:
+        words = req.words
+    elif req.segments:
+        words = karaoke_captions.words_from_segments(req.segments)
+    else:
+        raise HTTPException(status_code=422, detail="Provide `words` or `segments`.")
+    if not words:
+        raise HTTPException(status_code=422,
+                            detail="No usable words found in request.")
+    style = karaoke_captions.KaraokeStyle(
+        font_name=req.font_name,
+        font_size=req.font_size,
+        primary_color=req.primary_color,
+        highlight_color=req.highlight_color,
+        outline_color=req.outline_color,
+        outline_width=req.outline_width,
+        bold=req.bold,
+        max_words_per_line=req.max_words_per_line,
+        video_width=req.video_width,
+        video_height=req.video_height,
+        margin_v=req.margin_v,
+    )
+    out_name = f"karaoke_{uuid.uuid4().hex[:8]}.ass"
+    out_path = os.path.join(OUTPUT_DIR, "captions", out_name)
+    karaoke_captions.write_ass_file(words, out_path, style)
+    return {"ass_path": out_path, "word_count": len(words)}
+
+
 class VideoPathRequest(BaseModel):
     video_path: str
 

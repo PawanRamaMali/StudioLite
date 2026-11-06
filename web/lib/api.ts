@@ -1659,6 +1659,31 @@ export const snapTimesToBeats = (times_s: number[], beats_s: number[], tolerance
     body: JSON.stringify({ times_s, beats_s, tolerance_s }),
   });
 
+// Karaoke / word-highlight captions
+export interface KaraokeWord { word: string; start: number; end: number }
+
+export interface KaraokeCaptionsParams {
+  segments?: Record<string, unknown>[];
+  words?: KaraokeWord[];
+  font_name?: string;
+  font_size?: number;
+  primary_color?: string;
+  highlight_color?: string;
+  outline_color?: string;
+  outline_width?: number;
+  bold?: boolean;
+  max_words_per_line?: number;
+  video_width?: number;
+  video_height?: number;
+  margin_v?: number;
+}
+
+export const buildKaraokeCaptions = (params: KaraokeCaptionsParams) =>
+  apiFetch<{ ass_path: string; word_count: number }>("/api/v1/captions/karaoke", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+
 // Character library
 export interface StoredCharacter {
   id: string;

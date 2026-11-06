@@ -401,6 +401,14 @@ class StoryRequest(BaseModel):
     # "feed_portrait", "landscape". Drives gen dims, duration cap, target fps,
     # and the one-click Social Export defaults. Empty keeps legacy landscape.
     format_id: str = ""
+    # Beat template id (see story_beats.TEMPLATES). When set, the LLM script
+    # prompt is seeded with the template's pacing stubs so the hook is short,
+    # the payoff gets the time it needs, and no beat becomes filler. Empty
+    # falls back to uniform scenes - the legacy behaviour.
+    beat_template: str = ""
+    # Target total duration in seconds when a beat template is picked. Used to
+    # size each beat's weight share. Ignored when beat_template is blank.
+    beat_total_duration_s: float = 30.0
 
 
 class TTSRequest(BaseModel):
@@ -900,11 +908,39 @@ def _run_story(job_id: str, req: StoryRequest):
         else:
             _update_job(job_id, progress=5, message="Generating story script with AI...")
 
-        prompt = f"""You are a professional cinematographer. Write a {req.num_scenes}-scene shot list for this film:
+        # Beat-template guidance (empty string if no template picked).
+        beat_hint = ""
+        beat_stubs: list[dict] = []
+        if getattr(req, "beat_template", ""):
+            try:
+                import story_beats
+                beat_hint = story_beats.pacing_hint(req.beat_template)
+                beat_stubs = story_beats.build_scene_stubs(
+                    req.beat_template,
+                    total_duration_s=float(getattr(req, "beat_total_duration_s", 30.0)),
+                )
+            except Exception as e:
+                logger.warning(f"beat template resolve failed for {req.beat_template!r}: {e}")
+
+        beat_block = ""
+        if beat_stubs:
+            beat_block = "\n\nBEAT STRUCTURE (follow this exactly, one beat per scene):\n"
+            for i, b in enumerate(beat_stubs, 1):
+                beat_block += (
+                    f"  Scene {i} ({b['role']}, ~{b['duration']:.1f}s) - {b['title']}: {b['directive']}\n"
+                )
+            beat_block += (
+                f"\n{beat_hint}\n"
+                "Use the beat durations above as each scene's 'duration' value exactly.\n"
+            )
+
+        num_scenes_final = len(beat_stubs) if beat_stubs else req.num_scenes
+
+        prompt = f"""You are a professional cinematographer. Write a {num_scenes_final}-scene shot list for this film:
 
 STORY: {req.concept}
 GENRE: {req.genre} | MOOD: {req.mood}
-
+{beat_block}
 CRITICAL: Return a JSON object with TWO keys.
 
 1. "visual_identity": Describe the MAIN SUBJECT in extreme detail so it looks IDENTICAL in every scene. Include: exact physical description (breed, color, size, distinguishing marks), exact clothing/accessories, exact setting details that repeat. This paragraph is appended to EVERY scene prompt.
@@ -2961,6 +2997,28 @@ async def list_formats():
     """List social-media format presets (Reels/Shorts/TikTok/Square/Feed/Landscape)."""
     import video_formats
     return {"formats": video_formats.all_presets()}
+
+
+@app.get("/api/v1/beats")
+async def list_beat_templates():
+    """List hook/beat structure templates for Story Mode."""
+    import story_beats
+    return {"templates": story_beats.list_templates()}
+
+
+@app.post("/api/v1/beats/{template_id}/preview")
+async def preview_beat_template(template_id: str, total_duration_s: float = 30.0):
+    """Expand a beat template into concrete scene stubs with durations.
+
+    Lets the frontend show "what beats will I get?" before committing to a
+    full story-gen job. Pure read; no job queued.
+    """
+    import story_beats
+    stubs = story_beats.build_scene_stubs(template_id, total_duration_s)
+    if not stubs:
+        raise HTTPException(status_code=404, detail=f"Unknown beat template: {template_id}")
+    return {"template_id": template_id, "stubs": stubs,
+            "pacing_hint": story_beats.pacing_hint(template_id)}
 
 
 @app.get("/api/v1/characters")

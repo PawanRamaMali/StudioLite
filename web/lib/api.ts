@@ -1612,6 +1612,32 @@ export const exportSocial = (params: SocialExportParams) =>
     body: JSON.stringify(params),
   });
 
+// Beat templates
+export interface BeatTemplate {
+  id: string;
+  label: string;
+  description: string;
+  beat_count: number;
+  min_duration_s: number;
+  max_duration_s: number;
+}
+
+export interface BeatStub {
+  role: string;
+  title: string;
+  directive: string;
+  duration: number;
+}
+
+export const listBeatTemplates = () =>
+  apiFetch<{ templates: BeatTemplate[] }>("/api/v1/beats");
+
+export const previewBeatTemplate = (template_id: string, total_duration_s = 30) =>
+  apiFetch<{ template_id: string; stubs: BeatStub[]; pacing_hint: string }>(
+    `/api/v1/beats/${encodeURIComponent(template_id)}/preview?total_duration_s=${total_duration_s}`,
+    { method: "POST" },
+  );
+
 // Character library
 export interface StoredCharacter {
   id: string;

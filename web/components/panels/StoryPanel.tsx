@@ -87,6 +87,9 @@ export default function StoryPanel() {
   // Portrait-first config: pick a social format or stay on legacy landscape.
   // Options come from /api/v1/formats; value is the preset id ("" = legacy).
   const [formatId, setFormatId] = useState<string>("");
+  // Beat-template pacing. Empty string = uniform scenes (legacy).
+  const [beatTemplate, setBeatTemplate] = useState<string>("");
+  const [beatTotalS, setBeatTotalS] = useState<number>(30);
 
   // Character consistency
   const [continuityMode, setContinuityMode] = useState("prompt");
@@ -545,6 +548,8 @@ export default function StoryPanel() {
         video_engine: videoEngine,
         enable_lip_sync: enableLipSync,
         format_id: formatId || undefined,
+        beat_template: beatTemplate || undefined,
+        beat_total_duration_s: beatTemplate ? beatTotalS : undefined,
       });
 
       setGenStatus(`Job ${job.job_id.slice(0, 8)}... started`);
@@ -1119,6 +1124,27 @@ export default function StoryPanel() {
                       <option value="landscape">YouTube Landscape (16:9)</option>
                     </select>
                   </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-500">Beat template (pacing)</label>
+                    <select value={beatTemplate} onChange={(e) => setBeatTemplate(e.target.value)}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs text-zinc-200 mt-0.5">
+                      <option value="">Uniform scenes (no template)</option>
+                      <option value="hook_build_payoff">Hook → Build → Payoff</option>
+                      <option value="question_answer">Question → Answer</option>
+                      <option value="problem_solution">Problem → Solution</option>
+                      <option value="list_countdown">List countdown (5 → 1)</option>
+                      <option value="before_after">Before → After</option>
+                      <option value="narrative_arc">Narrative arc (5 beats)</option>
+                    </select>
+                  </div>
+                  {beatTemplate && (
+                    <div>
+                      <label className="text-[10px] text-zinc-500">Total duration: {beatTotalS}s</label>
+                      <input type="range" min={8} max={90} step={1} value={beatTotalS}
+                        onChange={(e) => setBeatTotalS(Number(e.target.value))}
+                        className="w-full mt-0.5" />
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className="text-[10px] text-zinc-500">Resolution</label>

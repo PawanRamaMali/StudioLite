@@ -3006,6 +3006,42 @@ async def list_beat_templates():
     return {"templates": story_beats.list_templates()}
 
 
+class AudioBeatsRequest(BaseModel):
+    """Detect BPM + beat times in an audio file (for Timeline beat-sync)."""
+    audio_path: str
+
+
+@app.post("/api/v1/audio/beats")
+async def audio_beats(req: AudioBeatsRequest):
+    """Return BPM, beat times (seconds), and downbeats for an audio track.
+
+    Synchronous - detection on a 3 minute track takes under a second with
+    librosa, a few seconds on the fallback path.
+    """
+    if not os.path.isfile(req.audio_path):
+        raise HTTPException(status_code=422, detail=f"Audio not found: {req.audio_path}")
+    import beat_detector
+    return beat_detector.detect_beats(req.audio_path)
+
+
+class SnapToBeatsRequest(BaseModel):
+    """Snap a list of cut points to the nearest beat within tolerance."""
+    times_s: list[float]
+    beats_s: list[float]
+    tolerance_s: float = Field(default=0.15, ge=0.01, le=2.0)
+
+
+@app.post("/api/v1/audio/snap-to-beats")
+async def audio_snap_to_beats(req: SnapToBeatsRequest):
+    """Pure helper: nudge each cut in ``times_s`` to the nearest beat.
+
+    No file I/O; the frontend passes the beats from a prior /audio/beats call.
+    """
+    import beat_detector
+    snapped = beat_detector.snap_to_beats(req.times_s, req.beats_s, req.tolerance_s)
+    return {"snapped": snapped}
+
+
 @app.post("/api/v1/beats/{template_id}/preview")
 async def preview_beat_template(template_id: str, total_duration_s: float = 30.0):
     """Expand a beat template into concrete scene stubs with durations.

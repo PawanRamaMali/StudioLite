@@ -1638,6 +1638,27 @@ export const previewBeatTemplate = (template_id: string, total_duration_s = 30) 
     { method: "POST" },
   );
 
+// Beat detection on audio tracks
+export interface AudioBeats {
+  bpm: number;
+  beats_s: number[];
+  downbeats_s: number[];
+  confidence: number;
+  source: "librosa" | "fallback";
+}
+
+export const detectAudioBeats = (audio_path: string) =>
+  apiFetch<AudioBeats>("/api/v1/audio/beats", {
+    method: "POST",
+    body: JSON.stringify({ audio_path }),
+  });
+
+export const snapTimesToBeats = (times_s: number[], beats_s: number[], tolerance_s = 0.15) =>
+  apiFetch<{ snapped: number[] }>("/api/v1/audio/snap-to-beats", {
+    method: "POST",
+    body: JSON.stringify({ times_s, beats_s, tolerance_s }),
+  });
+
 // Character library
 export interface StoredCharacter {
   id: string;

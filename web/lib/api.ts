@@ -1705,6 +1705,34 @@ export const previewGenerate = (params: PreviewParams) =>
 export const previewDefaults = (engine: string) =>
   apiFetch<Record<string, unknown>>(`/api/v1/preview/defaults?engine=${encodeURIComponent(engine)}`);
 
+// PuLID identity-anchored scene image
+export interface IdentityStatus {
+  pulid_available: boolean;
+  fallback: string;
+  install_hint: string;
+}
+
+export interface IdentityGenerateParams {
+  reference_image: string;
+  prompt: string;
+  negative_prompt?: string;
+  width?: number;
+  height?: number;
+  num_inference_steps?: number;
+  guidance_scale?: number;
+  id_scale?: number;
+  seed?: number | null;
+}
+
+export const identityStatus = () =>
+  apiFetch<IdentityStatus>("/api/v1/identity/status");
+
+export const generateWithIdentity = (params: IdentityGenerateParams) =>
+  apiFetch<Job>("/api/v1/generate/identity", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+
 // Audio-driven talking-head generation
 export interface TalkingHeadStatus {
   backends: string[];

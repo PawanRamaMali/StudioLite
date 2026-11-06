@@ -3131,6 +3131,89 @@ class TalkingHeadRequest(BaseModel):
     inference_steps: int = Field(default=20, ge=4, le=60)
 
 
+class IdentityGenerateRequest(BaseModel):
+    """Generate an SDXL scene image anchored to a specific person's face."""
+    reference_image: str
+    prompt: str
+    negative_prompt: str = ""
+    width: int = Field(default=1024, ge=256, le=2048)
+    height: int = Field(default=1024, ge=256, le=2048)
+    num_inference_steps: int = Field(default=25, ge=4, le=80)
+    guidance_scale: float = Field(default=5.0, ge=0.1, le=15.0)
+    id_scale: float = Field(default=0.8, ge=0.0, le=2.0)
+    seed: Optional[int] = None
+
+
+@app.get("/api/v1/identity/status")
+async def identity_status():
+    """Is PuLID installed? If not, the install hint."""
+    import identity_embedding
+    ok = identity_embedding.pulid_available()
+    return {
+        "pulid_available": ok,
+        "fallback": "ip_adapter" if not ok else "",
+        "install_hint": identity_embedding.install_hint() if not ok else "",
+    }
+
+
+def _run_identity_generate(job_id: str, req: "IdentityGenerateRequest"):
+    """Background worker for PuLID (or fallback) scene-image generation."""
+    try:
+        _update_job(job_id, status="running", progress=5,
+                    message="Loading identity backend...")
+        import identity_embedding
+        out_path = os.path.join(OUTPUT_DIR, f"identity_{job_id}.png")
+        cfg = identity_embedding.IdentityConfig(
+            reference_image=req.reference_image,
+            prompt=req.prompt,
+            negative_prompt=req.negative_prompt,
+            width=req.width, height=req.height,
+            num_inference_steps=req.num_inference_steps,
+            guidance_scale=req.guidance_scale,
+            id_scale=req.id_scale,
+            seed=req.seed,
+            output_path=out_path,
+        )
+        path = identity_embedding.generate_with_identity(
+            cfg,
+            progress_callback=lambda s, t, m: _update_job(
+                job_id, progress=5 + int((s / t) * 90),
+                message=f"Identity: {m}",
+            ),
+        )
+        _update_job(
+            job_id, status="completed", progress=100,
+            message="Identity image ready",
+            result={"output_path": path,
+                    "download_url": f"/api/v1/download/image?path={path}"},
+        )
+    except Exception as e:
+        _update_job(job_id, status="failed", error=str(e),
+                    message=f"Identity generation failed: {e}")
+        traceback.print_exc()
+
+
+@app.post("/api/v1/generate/identity", response_model=JobResponse)
+async def generate_identity_route(req: IdentityGenerateRequest):
+    """Generate a scene image anchored to a specific person's identity.
+
+    Uses PuLID when installed; falls back to IP-Adapter conditioning on plain
+    SDXL otherwise. Status endpoint reports which path will run.
+    """
+    if not os.path.isfile(req.reference_image):
+        raise HTTPException(status_code=422,
+                            detail=f"Reference image not found: {req.reference_image}")
+    ext = os.path.splitext(req.reference_image)[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png"):
+        raise HTTPException(status_code=422,
+                            detail=f"Reference must be jpg/png (got {ext})")
+    job_id = _create_job("identity", req.model_dump())
+    thread = threading.Thread(target=_run_identity_generate,
+                              args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
 @app.get("/api/v1/talking-head/status")
 async def talking_head_status():
     """Which backends are installed and runnable. Install hint if none."""

@@ -6,7 +6,7 @@ import {
   Users, KeyRound, Briefcase, Settings, ChevronLeft, ChevronRight,
   Sparkles, Image as ImageIcon, Radio, ScanText, FileVideo, Cpu,
   Film, LayoutList, Library, Server, Gauge, Mic, Captions, ImagePlus,
-  Images, Clapperboard, VolumeX, SlidersHorizontal, Music2, Grid3x3,
+  Images, Clapperboard, VolumeX, SlidersHorizontal, Music2, Grid3x3, Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getSystemStatus, type SystemStatus } from "@/lib/api";
@@ -41,6 +41,7 @@ const NAV_ITEMS: { id: string; label: string; icon: typeof Video; group: string;
   { id: "equalizer", label: "Equalizer", icon: SlidersHorizontal, group: "Tools" },
   { id: "bgmusic", label: "Background Music", icon: Music2, group: "Tools" },
   { id: "collage", label: "Video Collage", icon: Grid3x3, group: "Tools" },
+  { id: "scene-detect", label: "Scene Detection", icon: Search, group: "Tools" },
   { id: "slideshow", label: "Slideshow", icon: Images, group: "Create" },
   { id: "characters", label: "Characters", icon: Users, group: "Assets" },
   { id: "keyframes", label: "Keyframes", icon: KeyRound, group: "Assets" },

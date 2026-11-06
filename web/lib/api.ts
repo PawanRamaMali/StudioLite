@@ -377,6 +377,27 @@ export const buildCollage = (params: CollageParams) =>
     body: JSON.stringify(params),
   });
 
+export interface SceneDetectParams {
+  video_path: string;
+  threshold?: number;
+  min_scene_length?: number;
+  extract_thumbnails?: boolean;
+  thumb_width?: number;
+}
+export interface Scene {
+  index: number;
+  start: number;
+  end: number;
+  duration: number;
+  score: number;
+  thumbnail_url: string | null;
+}
+export const detectScenes = (params: SceneDetectParams) =>
+  apiFetch<Job>("/api/v1/edit/scene-detect", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+
 // Video edit utilities
 export interface EditUploadResponse {
   video_path: string;

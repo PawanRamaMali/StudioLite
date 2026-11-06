@@ -574,6 +574,16 @@ class ChromaKeyRequest(BaseModel):
     background_path: Optional[str] = None               # image / video modes
 
 
+class SceneDetectRequest(BaseModel):
+    video_path: str
+    threshold: float = Field(default=10.0, ge=0.0, le=100.0,
+                             description="Lower = more cuts detected. scdet default is 10.")
+    min_scene_length: float = Field(default=1.0, ge=0.0, le=60.0,
+                                     description="Drop cuts within this many seconds of the prior one.")
+    extract_thumbnails: bool = True
+    thumb_width: int = Field(default=320, ge=120, le=1920)
+
+
 class CollageRequest(BaseModel):
     video_paths: List[str] = Field(default_factory=list,
                                    description="Ordered absolute paths of source clips.")
@@ -2563,6 +2573,63 @@ def _run_chroma_key(job_id: str, req: "ChromaKeyRequest"):
                     message=f"Chroma key failed: {exc}")
 
 
+def _run_scene_detect(job_id: str, req: "SceneDetectRequest"):
+    try:
+        _update_job(job_id, status="running", progress=5,
+                    message="Detecting scene cuts...")
+        from scene_detection import detect_scenes, SceneDetectionStyle
+
+        style = SceneDetectionStyle(
+            threshold=req.threshold,
+            min_scene_length=req.min_scene_length,
+            extract_thumbnails=req.extract_thumbnails,
+            thumb_width=req.thumb_width,
+        )
+        thumb_dir = os.path.join(OUTPUT_DIR, f"scenes_{job_id}")
+        result = detect_scenes(req.video_path, thumb_dir, style=style)
+        if not result.get("ok"):
+            err = result.get("error", "unknown error")
+            hint = result.get("install_hint")
+            msg = f"{err} ({hint})" if hint else err
+            _update_job(job_id, status="failed", error=err,
+                        message=f"Scene detect failed: {msg}")
+            return
+
+        # Serialize thumbnail paths to /static URLs where present. The
+        # scene detector writes into OUTPUT_DIR which is served at /static.
+        scenes = []
+        for sc in result["scenes"]:
+            tp = sc.get("thumbnail_path")
+            url = None
+            if tp and os.path.isfile(tp):
+                rel = os.path.relpath(tp, OUTPUT_DIR).replace(os.sep, "/")
+                url = f"/static/{rel}"
+            scenes.append({
+                "index": sc["index"],
+                "start": sc["start"],
+                "end": sc["end"],
+                "duration": sc["duration"],
+                "score": sc.get("score", 0.0),
+                "thumbnail_url": url,
+            })
+
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message=f"Scene detect complete: {result['scene_count']} scenes.",
+            result={
+                "scene_count": result["scene_count"],
+                "cut_count": result["cut_count"],
+                "duration": result.get("duration"),
+                "scenes": scenes,
+            },
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc),
+                    message=f"Scene detect failed: {exc}")
+
+
 def _run_collage(job_id: str, req: "CollageRequest"):
     try:
         _update_job(job_id, status="running", progress=5,
@@ -4444,6 +4511,18 @@ async def edit_thumbnail(req: ThumbnailRequest):
         raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
     job_id = _create_job("thumbnail", req.model_dump())
     thread = threading.Thread(target=_run_thumbnail, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/scene-detect", response_model=JobResponse)
+async def edit_scene_detect(req: SceneDetectRequest):
+    """Detect scene cuts with ffmpeg's scdet filter and optionally pull
+    one thumbnail per scene. 422 if the source doesn't exist on disk."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    job_id = _create_job("scene_detect", req.model_dump())
+    thread = threading.Thread(target=_run_scene_detect, args=(job_id, req), daemon=True)
     thread.start()
     return _job_response(job_id)
 

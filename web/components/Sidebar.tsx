@@ -6,6 +6,7 @@ import {
   Users, KeyRound, Briefcase, Settings, ChevronLeft, ChevronRight,
   Sparkles, Image as ImageIcon, Radio, ScanText, FileVideo, Cpu,
   Film, LayoutList, Library, Server, Gauge, Mic, Captions, ImagePlus,
+  Images, Clapperboard,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getSystemStatus, type SystemStatus } from "@/lib/api";
@@ -34,6 +35,8 @@ const NAV_ITEMS: { id: string; label: string; icon: typeof Video; group: string;
   { id: "upscale", label: "Upscale Video", icon: ArrowUpCircle, group: "Tools" },
   { id: "captions", label: "Auto Captions", icon: Captions, group: "Tools" },
   { id: "thumbnails", label: "Thumbnails", icon: ImagePlus, group: "Tools" },
+  { id: "gif", label: "GIF Creator", icon: Clapperboard, group: "Tools" },
+  { id: "slideshow", label: "Slideshow", icon: Images, group: "Create" },
   { id: "characters", label: "Characters", icon: Users, group: "Assets" },
   { id: "keyframes", label: "Keyframes", icon: KeyRound, group: "Assets" },
   { id: "library", label: "Library", icon: Library, group: "Assets" },

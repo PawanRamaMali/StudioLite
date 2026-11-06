@@ -560,6 +560,21 @@ class GifRequest(BaseModel):
     width: int = Field(default=480, ge=120, le=1280)
 
 
+class SlideshowRequest(BaseModel):
+    images: List[str] = Field(default_factory=list,
+                               description="Ordered absolute paths of source images.")
+    per_image_duration: float = Field(default=3.0, gt=0.0, le=60.0)
+    durations: Optional[List[float]] = None
+    width: int = Field(default=1920, ge=120, le=7680)
+    height: int = Field(default=1080, ge=120, le=4320)
+    fps: int = Field(default=30, ge=1, le=120)
+    transition: str = Field(default="fade")  # or 'none' to disable
+    transition_duration: float = Field(default=0.5, ge=0.0, le=10.0)
+    kenburns: str = Field(default="none")    # none|zoom-in|zoom-out|pan-left|pan-right
+    audio_path: Optional[str] = None
+    audio_volume: float = Field(default=1.0, ge=0.0, le=2.0)
+
+
 class ThumbnailRequest(BaseModel):
     video_path: str
     # Single mode uses `timestamp`; multiple uses `timestamps`; grid picks
@@ -2471,6 +2486,54 @@ def _run_thumbnail(job_id: str, req: ThumbnailRequest):
                     message=f"Thumbnail extraction failed: {exc}")
 
 
+def _run_slideshow(job_id: str, req: "SlideshowRequest"):
+    try:
+        _update_job(job_id, status="running", progress=5,
+                    message=f"Building slideshow ({len(req.images)} images)...")
+        from slideshow import generate_slideshow, SlideshowStyle
+
+        style = SlideshowStyle(
+            width=req.width, height=req.height, fps=req.fps,
+            per_image_duration=req.per_image_duration,
+            transition=req.transition,
+            transition_duration=req.transition_duration,
+            kenburns=req.kenburns,
+            audio_volume=req.audio_volume,
+        )
+        out_path = os.path.join(OUTPUT_DIR, f"slideshow_{job_id}.mp4")
+        work_dir = os.path.join(OUTPUT_DIR, f"slideshow_{job_id}_work")
+
+        result = generate_slideshow(
+            list(req.images), out_path,
+            style=style,
+            durations=req.durations,
+            audio_path=req.audio_path,
+            work_dir=work_dir,
+        )
+        if not result.get("ok"):
+            err = result.get("error", "unknown error")
+            hint = result.get("install_hint")
+            msg = f"{err} ({hint})" if hint else err
+            _update_job(job_id, status="failed", error=err,
+                        message=f"Slideshow failed: {msg}")
+            return
+
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message=f"Slideshow complete ({result.get('duration_sec', 0):.1f}s).",
+            result={
+                "video_path": result["output_path"],
+                "duration_sec": result.get("duration_sec"),
+                "image_count": result.get("image_count"),
+            },
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc),
+                    message=f"Slideshow failed: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Image Studio runners (background workers)
 # ---------------------------------------------------------------------------
@@ -4060,6 +4123,25 @@ async def edit_thumbnail(req: ThumbnailRequest):
         raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
     job_id = _create_job("thumbnail", req.model_dump())
     thread = threading.Thread(target=_run_thumbnail, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/slideshow", response_model=JobResponse)
+async def edit_slideshow(req: SlideshowRequest):
+    """Assemble a slideshow mp4 from a list of images with optional
+    transitions, Ken Burns motion and background music. Upfront validation
+    catches the common misuses (no images, missing file on disk) with a
+    422 instead of a job that fails a second later."""
+    if not req.images:
+        raise HTTPException(status_code=422, detail="At least one image is required.")
+    for p in req.images:
+        if not os.path.isfile(p):
+            raise HTTPException(status_code=422, detail=f"Image not found: {p}")
+    if req.audio_path and not os.path.isfile(req.audio_path):
+        raise HTTPException(status_code=422, detail=f"Audio not found: {req.audio_path}")
+    job_id = _create_job("slideshow", req.model_dump())
+    thread = threading.Thread(target=_run_slideshow, args=(job_id, req), daemon=True)
     thread.start()
     return _job_response(job_id)
 

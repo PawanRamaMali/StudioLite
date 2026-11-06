@@ -17,6 +17,8 @@ import VideoTranscribePanel from "@/components/panels/VideoTranscribePanel";
 import UpscalePanel from "@/components/panels/UpscalePanel";
 import CaptionsPanel from "@/components/panels/CaptionsPanel";
 import ThumbnailsPanel from "@/components/panels/ThumbnailsPanel";
+import GifPanel from "@/components/panels/GifPanel";
+import SlideshowPanel from "@/components/panels/SlideshowPanel";
 import CharactersPanel from "@/components/panels/CharactersPanel";
 import KeyframesPanel from "@/components/panels/KeyframesPanel";
 import JobsPanel from "@/components/panels/JobsPanel";
@@ -82,6 +84,8 @@ export default function Home() {
       case "upscale":           return <UpscalePanel />;
       case "captions":          return <CaptionsPanel />;
       case "thumbnails":        return <ThumbnailsPanel />;
+      case "gif":               return <GifPanel />;
+      case "slideshow":         return <SlideshowPanel />;
       case "characters":        return <CharactersPanel />;
       case "keyframes":         return <KeyframesPanel />;
       case "library":           return <LibraryPanel />;

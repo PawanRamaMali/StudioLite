@@ -476,6 +476,27 @@ export const gifVideo = (params: {
   width: number;
 }) => apiFetch<Job>("/api/v1/edit/gif", { method: "POST", body: JSON.stringify(params) });
 
+export type SlideshowTransition =
+  | "none" | "fade" | "wipeleft" | "wiperight" | "slideleft" | "slideright"
+  | "dissolve" | "pixelize" | "circleopen" | "radial" | "smoothleft";
+export type SlideshowKenBurns =
+  | "none" | "zoom-in" | "zoom-out" | "pan-left" | "pan-right";
+
+export const buildSlideshow = (params: {
+  images: string[];
+  per_image_duration?: number;
+  durations?: number[];
+  width?: number;
+  height?: number;
+  fps?: number;
+  transition?: SlideshowTransition;
+  transition_duration?: number;
+  kenburns?: SlideshowKenBurns;
+  audio_path?: string;
+  audio_volume?: number;
+}) =>
+  apiFetch<Job>("/api/v1/edit/slideshow", { method: "POST", body: JSON.stringify(params) });
+
 // The endpoint accepts three modes; EditPanel still calls the single-mode
 // shape (video_path + timestamp) and that keeps working because every
 // other field is server-side-defaulted.

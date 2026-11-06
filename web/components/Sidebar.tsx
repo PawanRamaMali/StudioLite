@@ -36,6 +36,7 @@ const NAV_ITEMS: { id: string; label: string; icon: typeof Video; group: string;
   { id: "captions", label: "Auto Captions", icon: Captions, group: "Tools" },
   { id: "thumbnails", label: "Thumbnails", icon: ImagePlus, group: "Tools" },
   { id: "gif", label: "GIF Creator", icon: Clapperboard, group: "Tools" },
+  { id: "chroma-key", label: "Chroma Key", icon: Wand2, group: "Tools" },
   { id: "slideshow", label: "Slideshow", icon: Images, group: "Create" },
   { id: "characters", label: "Characters", icon: Users, group: "Assets" },
   { id: "keyframes", label: "Keyframes", icon: KeyRound, group: "Assets" },

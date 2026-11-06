@@ -476,6 +476,23 @@ export const gifVideo = (params: {
   width: number;
 }) => apiFetch<Job>("/api/v1/edit/gif", { method: "POST", body: JSON.stringify(params) });
 
+export type ChromaKeyMode = "transparent" | "color" | "image" | "video";
+
+export const chromaKeyRemove = (params: {
+  video_path: string;
+  mode?: ChromaKeyMode;
+  key_color?: string;
+  similarity?: number;
+  blend?: number;
+  out_width?: number;
+  out_height?: number;
+  fps?: number;
+  audio?: "copy" | "drop";
+  background_color?: string;
+  background_path?: string;
+}) =>
+  apiFetch<Job>("/api/v1/edit/chroma-key", { method: "POST", body: JSON.stringify(params) });
+
 export type SlideshowTransition =
   | "none" | "fade" | "wipeleft" | "wiperight" | "slideleft" | "slideright"
   | "dissolve" | "pixelize" | "circleopen" | "radial" | "smoothleft";

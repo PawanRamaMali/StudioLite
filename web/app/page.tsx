@@ -19,6 +19,7 @@ import CaptionsPanel from "@/components/panels/CaptionsPanel";
 import ThumbnailsPanel from "@/components/panels/ThumbnailsPanel";
 import GifPanel from "@/components/panels/GifPanel";
 import SlideshowPanel from "@/components/panels/SlideshowPanel";
+import ChromaKeyPanel from "@/components/panels/ChromaKeyPanel";
 import CharactersPanel from "@/components/panels/CharactersPanel";
 import KeyframesPanel from "@/components/panels/KeyframesPanel";
 import JobsPanel from "@/components/panels/JobsPanel";
@@ -86,6 +87,7 @@ export default function Home() {
       case "thumbnails":        return <ThumbnailsPanel />;
       case "gif":               return <GifPanel />;
       case "slideshow":         return <SlideshowPanel />;
+      case "chroma-key":        return <ChromaKeyPanel />;
       case "characters":        return <CharactersPanel />;
       case "keyframes":         return <KeyframesPanel />;
       case "library":           return <LibraryPanel />;

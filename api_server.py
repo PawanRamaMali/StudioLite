@@ -560,6 +560,20 @@ class GifRequest(BaseModel):
     width: int = Field(default=480, ge=120, le=1280)
 
 
+class ChromaKeyRequest(BaseModel):
+    video_path: str
+    mode: str = Field(default="transparent")  # transparent|color|image|video
+    key_color: str = Field(default="green")
+    similarity: float = Field(default=0.15, ge=0.0, le=1.0)
+    blend: float = Field(default=0.08, ge=0.0, le=1.0)
+    out_width: int = Field(default=1280, ge=120, le=7680)
+    out_height: int = Field(default=720, ge=120, le=4320)
+    fps: int = Field(default=30, ge=1, le=120)
+    audio: str = Field(default="copy")  # copy|drop
+    background_color: str = Field(default="0x000000")  # color mode only
+    background_path: Optional[str] = None               # image / video modes
+
+
 class SlideshowRequest(BaseModel):
     images: List[str] = Field(default_factory=list,
                                description="Ordered absolute paths of source images.")
@@ -2486,6 +2500,55 @@ def _run_thumbnail(job_id: str, req: ThumbnailRequest):
                     message=f"Thumbnail extraction failed: {exc}")
 
 
+def _run_chroma_key(job_id: str, req: "ChromaKeyRequest"):
+    try:
+        _update_job(job_id, status="running", progress=5,
+                    message=f"Removing chroma key ({req.mode})...")
+        from chroma_key import remove_chroma_key, ChromaKeyStyle
+
+        style = ChromaKeyStyle(
+            key_color=req.key_color,
+            similarity=req.similarity,
+            blend=req.blend,
+            out_width=req.out_width,
+            out_height=req.out_height,
+            fps=req.fps,
+            background_color=req.background_color,
+            audio=req.audio,
+        )
+        # Transparent output is always .webm, composited output is .mp4.
+        ext = ".webm" if req.mode == "transparent" else ".mp4"
+        out_path = os.path.join(OUTPUT_DIR, f"chromakey_{job_id}{ext}")
+
+        result = remove_chroma_key(
+            req.video_path, out_path,
+            mode=req.mode,
+            background_path=req.background_path,
+            style=style,
+        )
+        if not result.get("ok"):
+            err = result.get("error", "unknown error")
+            hint = result.get("install_hint")
+            msg = f"{err} ({hint})" if hint else err
+            _update_job(job_id, status="failed", error=err,
+                        message=f"Chroma key failed: {msg}")
+            return
+
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message=f"Chroma key ({result['mode']}) complete.",
+            result={
+                "video_path": result["output_path"],
+                "mode": result["mode"],
+            },
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc),
+                    message=f"Chroma key failed: {exc}")
+
+
 def _run_slideshow(job_id: str, req: "SlideshowRequest"):
     try:
         _update_job(job_id, status="running", progress=5,
@@ -3318,6 +3381,8 @@ async def download_result(job_id: str):
     lower_path = file_path.lower()
     if lower_path.endswith(".mp4"):
         media_type = "video/mp4"
+    elif lower_path.endswith(".webm"):
+        media_type = "video/webm"
     elif lower_path.endswith(".gif"):
         media_type = "image/gif"
     elif lower_path.endswith(".png"):
@@ -4123,6 +4188,26 @@ async def edit_thumbnail(req: ThumbnailRequest):
         raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
     job_id = _create_job("thumbnail", req.model_dump())
     thread = threading.Thread(target=_run_thumbnail, args=(job_id, req), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+@app.post("/api/v1/edit/chroma-key", response_model=JobResponse)
+async def edit_chroma_key(req: ChromaKeyRequest):
+    """Remove a chroma-key color from a video. ``mode=transparent`` produces
+    a VP9+alpha .webm; other modes composite over a color, image or video
+    background. Up-front 422 catches the common input mistakes before the
+    job queues so the user doesn't wait on a failure they'd have seen now."""
+    if not os.path.isfile(req.video_path):
+        raise HTTPException(status_code=422, detail=f"Video file not found: {req.video_path}")
+    if req.mode in ("image", "video"):
+        if not req.background_path or not os.path.isfile(req.background_path):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Background not found: {req.background_path}",
+            )
+    job_id = _create_job("chroma_key", req.model_dump())
+    thread = threading.Thread(target=_run_chroma_key, args=(job_id, req), daemon=True)
     thread.start()
     return _job_response(job_id)
 

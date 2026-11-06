@@ -16,6 +16,7 @@ import ScreenTranscribePanel from "@/components/panels/ScreenTranscribePanel";
 import VideoTranscribePanel from "@/components/panels/VideoTranscribePanel";
 import UpscalePanel from "@/components/panels/UpscalePanel";
 import CaptionsPanel from "@/components/panels/CaptionsPanel";
+import ThumbnailsPanel from "@/components/panels/ThumbnailsPanel";
 import CharactersPanel from "@/components/panels/CharactersPanel";
 import KeyframesPanel from "@/components/panels/KeyframesPanel";
 import JobsPanel from "@/components/panels/JobsPanel";
@@ -80,6 +81,7 @@ export default function Home() {
       case "video-transcribe":  return <VideoTranscribePanel />;
       case "upscale":           return <UpscalePanel />;
       case "captions":          return <CaptionsPanel />;
+      case "thumbnails":        return <ThumbnailsPanel />;
       case "characters":        return <CharactersPanel />;
       case "keyframes":         return <KeyframesPanel />;
       case "library":           return <LibraryPanel />;

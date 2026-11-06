@@ -562,8 +562,18 @@ class GifRequest(BaseModel):
 
 class ThumbnailRequest(BaseModel):
     video_path: str
+    # Single mode uses `timestamp`; multiple uses `timestamps`; grid picks
+    # evenly-spaced frames. Keeping the fields flat so old callers that only
+    # pass video_path + timestamp (what EditPanel uses) still work unchanged.
+    mode: str = Field(default="single")  # single | multiple | grid
     timestamp: float = Field(default=0.0, ge=0.0)
+    timestamps: Optional[List[float]] = None
+    cols: int = Field(default=3, ge=1, le=6)
+    rows: int = Field(default=3, ge=1, le=6)
     width: int = Field(default=1280, ge=120, le=3840)
+    overlay_path: Optional[str] = None
+    overlay_position: str = Field(default="bottom-right")
+    overlay_opacity: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
 # --- Timeline / NLE ------------------------------------------------------
@@ -2411,26 +2421,54 @@ def _run_gif(job_id: str, req: GifRequest):
 
 def _run_thumbnail(job_id: str, req: ThumbnailRequest):
     try:
-        _update_job(job_id, status="running", progress=10, message="Extracting thumbnail...")
+        _update_job(job_id, status="running", progress=10,
+                    message=f"Extracting thumbnail ({req.mode})...")
         _require_video_path(req.video_path)
-        output_path = os.path.join(OUTPUT_DIR, f"thumbnail_{job_id}.png")
-        _run_ffmpeg([
-            "ffmpeg", "-y",
-            "-ss", str(req.timestamp),
-            "-i", req.video_path,
-            "-frames:v", "1",
-            "-vf", f"scale={req.width}:-1",
-            output_path,
-        ])
+        from thumbnails import generate_thumbnails
+
+        result = generate_thumbnails(
+            req.video_path, OUTPUT_DIR,
+            mode=req.mode,
+            timestamp=req.timestamp,
+            timestamps=req.timestamps,
+            cols=req.cols, rows=req.rows,
+            width=req.width,
+            overlay_path=req.overlay_path,
+            overlay_position=req.overlay_position,
+            overlay_opacity=req.overlay_opacity,
+            job_id=job_id,
+        )
+        if not result.get("ok"):
+            err = result.get("error", "unknown error")
+            hint = result.get("install_hint")
+            msg = f"{err} ({hint})" if hint else err
+            _update_job(job_id, status="failed", error=err,
+                        message=f"Thumbnail failed: {msg}")
+            return
+
+        # Download endpoint picks the first of video_path/audio_path/image_path,
+        # so expose the user-facing deliverable there:
+        #   single/grid → the PNG;  multiple → the zip of PNGs.
+        if result["mode"] == "multiple":
+            image_path = result.get("archive_path") or result["output_paths"][0]
+        else:
+            image_path = result["output_paths"][0]
+
         _update_job(
             job_id,
             status="completed",
             progress=100,
-            message="Thumbnail extracted.",
-            result={"image_path": output_path, "timestamp": req.timestamp},
+            message=f"Thumbnail ({result['mode']}) complete.",
+            result={
+                "image_path": image_path,
+                "mode": result["mode"],
+                "output_paths": result["output_paths"],
+                "timestamp": req.timestamp,
+            },
         )
     except Exception as exc:
-        _update_job(job_id, status="failed", error=str(exc), message=f"Thumbnail extraction failed: {exc}")
+        _update_job(job_id, status="failed", error=str(exc),
+                    message=f"Thumbnail extraction failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -3221,6 +3259,8 @@ async def download_result(job_id: str):
         media_type = "image/gif"
     elif lower_path.endswith(".png"):
         media_type = "image/png"
+    elif lower_path.endswith(".zip"):
+        media_type = "application/zip"
     elif lower_path.endswith(".mp3"):
         media_type = "audio/mpeg"
     else:

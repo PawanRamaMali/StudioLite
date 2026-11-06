@@ -476,7 +476,25 @@ export const gifVideo = (params: {
   width: number;
 }) => apiFetch<Job>("/api/v1/edit/gif", { method: "POST", body: JSON.stringify(params) });
 
-export const thumbnailVideo = (params: { video_path: string; timestamp: number; width: number }) =>
+// The endpoint accepts three modes; EditPanel still calls the single-mode
+// shape (video_path + timestamp) and that keeps working because every
+// other field is server-side-defaulted.
+export type ThumbnailMode = "single" | "multiple" | "grid";
+export type ThumbnailOverlayPosition =
+  | "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center";
+
+export const thumbnailVideo = (params: {
+  video_path: string;
+  mode?: ThumbnailMode;
+  timestamp?: number;
+  timestamps?: number[];
+  cols?: number;
+  rows?: number;
+  width?: number;
+  overlay_path?: string;
+  overlay_position?: ThumbnailOverlayPosition;
+  overlay_opacity?: number;
+}) =>
   apiFetch<Job>("/api/v1/edit/thumbnail", { method: "POST", body: JSON.stringify(params) });
 
 // Characters

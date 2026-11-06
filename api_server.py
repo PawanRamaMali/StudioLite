@@ -3692,6 +3692,205 @@ async def audio_normalize(file: UploadFile = File(...), target_db: float = -3.0)
     return _job_response(job_id)
 
 
+# ---- Audio effects: denoise + equalizer + background music -----------------
+
+
+def _run_denoise(job_id: str, input_path: str, style):
+    try:
+        _update_job(job_id, status="running", message=f"Denoising ({style.method})...")
+        from audio_effects import denoise_audio
+        ext = "mp3" if style.output_format == "mp3" else "wav"
+        out_name = f"denoised_{job_id}.{ext}"
+        target_path = os.path.join(UPLOADS_DIR, out_name)
+        res = denoise_audio(input_path, target_path, style=style)
+        if not res.get("ok"):
+            raise RuntimeError(res.get("error") or "Denoise failed")
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Denoise complete.",
+            result={
+                "audio_path": target_path,
+                "audio_url": f"/static/uploads/{out_name}",
+                "backend": res.get("backend"),
+                "method": style.method,
+            },
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Denoise failed: {exc}")
+    finally:
+        try:
+            if os.path.isfile(input_path):
+                os.remove(input_path)
+        except OSError:
+            pass
+
+
+@app.post("/api/v1/audio/denoise", response_model=JobResponse)
+async def audio_denoise(
+    file: UploadFile = File(...),
+    method: str = "afftdn",
+    noise_reduction_db: float = -25.0,
+    noise_floor_db: float = -40.0,
+    smoothing: float = 0.002,
+    output_format: str = "wav",
+):
+    """Reduce background noise with ``afftdn`` (FFT) or ``anlmdn`` (NLM)."""
+    from audio_effects import DenoiseStyle
+    style = DenoiseStyle(
+        method=method if method in ("afftdn", "anlmdn") else "afftdn",
+        noise_reduction_db=float(noise_reduction_db),
+        noise_floor_db=float(noise_floor_db),
+        smoothing=float(smoothing),
+        output_format=output_format if output_format in ("wav", "mp3") else "wav",
+    )
+    saved = _save_upload(file, prefix="dn")
+    job_id = _create_job("denoise", {"filename": file.filename, "method": style.method})
+    thread = threading.Thread(target=_run_denoise, args=(job_id, saved, style), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+def _run_equalizer(job_id: str, input_path: str, style):
+    try:
+        _update_job(job_id, status="running", message=f"Equalizing ({style.preset})...")
+        from audio_effects import equalize_audio
+        ext = "mp3" if style.output_format == "mp3" else "wav"
+        out_name = f"eq_{job_id}.{ext}"
+        target_path = os.path.join(UPLOADS_DIR, out_name)
+        res = equalize_audio(input_path, target_path, style=style)
+        if not res.get("ok"):
+            raise RuntimeError(res.get("error") or "Equalizer failed")
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Equalizer complete.",
+            result={
+                "audio_path": target_path,
+                "audio_url": f"/static/uploads/{out_name}",
+                "backend": res.get("backend"),
+                "preset": style.preset,
+                "bands_hz": res.get("bands_hz"),
+                "gains_db": res.get("gains_db"),
+            },
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Equalizer failed: {exc}")
+    finally:
+        try:
+            if os.path.isfile(input_path):
+                os.remove(input_path)
+        except OSError:
+            pass
+
+
+@app.post("/api/v1/audio/equalizer", response_model=JobResponse)
+async def audio_equalizer(
+    file: UploadFile = File(...),
+    preset: str = "flat",
+    gains_csv: str = "",
+    output_format: str = "wav",
+):
+    """Apply a 10-band graphic equalizer. ``preset`` or ``gains_csv`` (10
+    comma-separated dB values, -18..+18) selects the curve."""
+    from audio_effects import EqStyle
+    gains: list = []
+    if gains_csv:
+        try:
+            gains = [float(x) for x in gains_csv.split(",") if x.strip()]
+        except ValueError:
+            gains = []
+    style = EqStyle(
+        preset=preset or "flat",
+        gains_db=gains,
+        output_format=output_format if output_format in ("wav", "mp3") else "wav",
+    )
+    saved = _save_upload(file, prefix="eq")
+    job_id = _create_job("equalizer", {"filename": file.filename, "preset": style.preset})
+    thread = threading.Thread(target=_run_equalizer, args=(job_id, saved, style), daemon=True)
+    thread.start()
+    return _job_response(job_id)
+
+
+def _run_background_music(job_id: str, voice_path: str, music_path: str, style):
+    try:
+        _update_job(job_id, status="running", message="Mixing background music...")
+        from audio_effects import mix_background_music
+        ext = "mp3" if style.output_format == "mp3" else "wav"
+        out_name = f"bgmix_{job_id}.{ext}"
+        target_path = os.path.join(UPLOADS_DIR, out_name)
+        res = mix_background_music(voice_path, music_path, target_path, style=style)
+        if not res.get("ok"):
+            raise RuntimeError(res.get("error") or "Mix failed")
+        _update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Background music mix complete.",
+            result={
+                "audio_path": target_path,
+                "audio_url": f"/static/uploads/{out_name}",
+                "backend": res.get("backend"),
+                "duration": res.get("duration"),
+            },
+        )
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=str(exc), message=f"Mix failed: {exc}")
+    finally:
+        for p in (voice_path, music_path):
+            try:
+                if p and os.path.isfile(p):
+                    os.remove(p)
+            except OSError:
+                pass
+
+
+@app.post("/api/v1/audio/background-music", response_model=JobResponse)
+async def audio_background_music(
+    voice: UploadFile = File(...),
+    music: UploadFile = File(...),
+    music_volume: float = 0.3,
+    voice_volume: float = 1.0,
+    duck: bool = True,
+    duck_threshold: float = 0.05,
+    duck_ratio: float = 8.0,
+    fade_in: float = 1.0,
+    fade_out: float = 2.0,
+    loop_music: bool = True,
+    output_format: str = "wav",
+):
+    """Mix a music bed under a voice/dialog track. Optional sidechain
+    ducking dips the music when the voice is present."""
+    from audio_effects import BackgroundMusicStyle
+    style = BackgroundMusicStyle(
+        music_volume=float(music_volume),
+        voice_volume=float(voice_volume),
+        duck=bool(duck),
+        duck_threshold=float(duck_threshold),
+        duck_ratio=float(duck_ratio),
+        fade_in=float(fade_in),
+        fade_out=float(fade_out),
+        loop_music=bool(loop_music),
+        output_format=output_format if output_format in ("wav", "mp3") else "wav",
+    )
+    voice_saved = _save_upload(voice, prefix="bgv")
+    music_saved = _save_upload(music, prefix="bgm")
+    job_id = _create_job("background_music", {
+        "voice_filename": voice.filename,
+        "music_filename": music.filename,
+        "duck": style.duck,
+    })
+    thread = threading.Thread(
+        target=_run_background_music,
+        args=(job_id, voice_saved, music_saved, style),
+        daemon=True,
+    )
+    thread.start()
+    return _job_response(job_id)
+
+
 @app.post("/api/v1/edit/trim", response_model=JobResponse)
 async def trim_video(req: TrimRequest, background_tasks: BackgroundTasks):
     """Trim a video to a specific time range."""

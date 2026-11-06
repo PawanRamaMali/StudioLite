@@ -287,6 +287,75 @@ export const isolateVoice = (file: File) => uploadAudio<Job>("/api/v1/audio/isol
 export const normalizeAudio = (file: File, target_db: number) =>
   uploadAudio<Job>(`/api/v1/audio/normalize?target_db=${target_db}`, file);
 
+export type DenoiseMethod = "afftdn" | "anlmdn";
+export interface DenoiseParams {
+  method?: DenoiseMethod;
+  noise_reduction_db?: number;  // -1 .. -97 (afftdn), typically -20..-30
+  noise_floor_db?: number;      // -20 .. -80 (afftdn)
+  smoothing?: number;           // 0.0001 .. 0.05 (anlmdn)
+  output_format?: "wav" | "mp3";
+}
+export const denoiseAudio = (file: File, params: DenoiseParams = {}) => {
+  const q = new URLSearchParams();
+  if (params.method) q.set("method", params.method);
+  if (params.noise_reduction_db != null) q.set("noise_reduction_db", String(params.noise_reduction_db));
+  if (params.noise_floor_db != null) q.set("noise_floor_db", String(params.noise_floor_db));
+  if (params.smoothing != null) q.set("smoothing", String(params.smoothing));
+  if (params.output_format) q.set("output_format", params.output_format);
+  return uploadAudio<Job>(`/api/v1/audio/denoise?${q.toString()}`, file);
+};
+
+export type EqPreset =
+  | "flat" | "bass_boost" | "bass_cut" | "vocal_boost"
+  | "treble_boost" | "treble_cut" | "rock" | "pop" | "podcast" | "radio";
+export interface EqualizerParams {
+  preset?: EqPreset;
+  gains_db?: number[];  // length 10, per band, -18..+18
+  output_format?: "wav" | "mp3";
+}
+export const EQ_BANDS_HZ = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000] as const;
+export const equalizerAudio = (file: File, params: EqualizerParams = {}) => {
+  const q = new URLSearchParams();
+  if (params.preset) q.set("preset", params.preset);
+  if (params.gains_db && params.gains_db.length) q.set("gains_csv", params.gains_db.join(","));
+  if (params.output_format) q.set("output_format", params.output_format);
+  return uploadAudio<Job>(`/api/v1/audio/equalizer?${q.toString()}`, file);
+};
+
+export interface BackgroundMusicParams {
+  music_volume?: number;
+  voice_volume?: number;
+  duck?: boolean;
+  duck_threshold?: number;
+  duck_ratio?: number;
+  fade_in?: number;
+  fade_out?: number;
+  loop_music?: boolean;
+  output_format?: "wav" | "mp3";
+}
+export const mixBackgroundMusic = async (
+  voice: File,
+  music: File,
+  params: BackgroundMusicParams = {},
+): Promise<Job> => {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined) continue;
+    q.set(k, String(v));
+  }
+  const fd = new FormData();
+  fd.append("voice", voice);
+  fd.append("music", music);
+  const res = await fetch(`${API_BASE}/api/v1/audio/background-music?${q.toString()}`, {
+    method: "POST", body: fd,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `Upload error: ${res.status}`);
+  }
+  return res.json();
+};
+
 // Video edit utilities
 export interface EditUploadResponse {
   video_path: string;

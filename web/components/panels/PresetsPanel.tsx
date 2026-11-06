@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Sparkles, Plus, Save, Trash2, Copy, Search, X, Tag } from "lucide-react";
+import { Sparkles, Plus, Save, Trash2, Copy, Search, X, Tag, Upload, FileDown } from "lucide-react";
 import {
   listPresets,
   savePreset,
@@ -145,6 +145,66 @@ export default function PresetsPanel() {
     }
   };
 
+  const exportAll = () => {
+    const user = library?.user ?? [];
+    if (user.length === 0) {
+      setError("No custom presets to export. Save at least one to enable export.");
+      return;
+    }
+    const data = JSON.stringify({
+      version: 1,
+      exported_at: new Date().toISOString(),
+      presets: user,
+    }, null, 2);
+    const blob = new Blob([data], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `studiolite_presets_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const importJson = async (file: File | null) => {
+    if (!file) return;
+    setError(null);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      // Accept either a single preset object, an array, or the exported
+      // wrapper shape { presets: [...] }.
+      let items: unknown[] = [];
+      if (Array.isArray(parsed)) items = parsed;
+      else if (parsed && Array.isArray((parsed as { presets?: unknown[] }).presets)) {
+        items = (parsed as { presets: unknown[] }).presets;
+      } else if (parsed && typeof parsed === "object") items = [parsed];
+
+      let imported = 0;
+      for (const raw of items) {
+        if (!raw || typeof raw !== "object") continue;
+        const p = raw as PromptPreset;
+        if (!p.name) continue;
+        try {
+          // Drop id so the server regenerates a unique one and avoids
+          // overwriting existing presets with the same id on re-import.
+          const { id: _ignoredId, builtin: _ignoredBuiltin, ...rest } = p;
+          void _ignoredId; void _ignoredBuiltin;
+          await savePreset({ ...rest, name: p.name });
+          imported++;
+        } catch { /* skip malformed, keep going */ }
+      }
+      if (imported === 0) {
+        setError("No importable presets found in that file.");
+      } else {
+        await refresh();
+      }
+    } catch (e) {
+      setError(`Import failed: ${(e as Error).message}`);
+    }
+  };
+
   return (
     <div>
       <div className="mb-8">
@@ -174,6 +234,16 @@ export default function PresetsPanel() {
         <Button onClick={beginNew}>
           <Plus className="w-4 h-4 mr-1" /> New preset
         </Button>
+        <Button variant="secondary" onClick={() => exportAll()}>
+          <FileDown className="w-4 h-4 mr-1" /> Export
+        </Button>
+        <label className="inline-flex">
+          <input type="file" accept="application/json" className="hidden"
+                 onChange={(e) => importJson(e.target.files?.[0] ?? null)} />
+          <span className="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 disabled:opacity-50 bg-zinc-800 text-zinc-100 hover:bg-zinc-700 h-10 px-4 py-2 cursor-pointer">
+            <Upload className="w-4 h-4 mr-1" /> Import
+          </span>
+        </label>
       </div>
 
       <div className="flex flex-wrap gap-2 mb-4">
